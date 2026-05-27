@@ -1,0 +1,745 @@
+import asyncio
+import json
+import random
+import time
+import uuid
+import structlog
+from typing import Dict, List, Optional
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from contextlib import asynccontextmanager
+
+from app.config import settings
+from app.core.event_bus import EventBus, EventPriority
+from app.intelligence.director_ai import DirectorAIEngine, BroadcastEvent, EventPriority as DirPriority
+from app.intelligence.commentary_engine import get_commentary_engine
+from app.db.session import init_db
+
+logger = structlog.get_logger("aegis.main")
+
+# ==========================================
+# CENTRALIZED STATE (Single Source of Truth)
+# ==========================================
+TEAMS = [
+    {"id": "t1", "name": "SouL", "tag": "SouL", "color": "#ff0055", "logo": "🔴", "rank": 1, "kills": 24, "placement_pts": 42, "total_pts": 66, "wwcd": 1, "alive": True, "players": ["Goblin", "Omega", "Viru", "Scout"]},
+    {"id": "t2", "name": "GodLike", "tag": "GodL", "color": "#00ffcc", "logo": "🟢", "rank": 2, "kills": 19, "placement_pts": 36, "total_pts": 55, "wwcd": 0, "alive": True, "players": ["Neyoo", "Zgod", "Clutchgod", "Jonathan"]},
+    {"id": "t3", "name": "Revenant", "tag": "RVNT", "color": "#ffcc00", "logo": "🟡", "rank": 3, "kills": 15, "placement_pts": 28, "total_pts": 43, "wwcd": 0, "alive": True, "players": ["Goldy", "Varinder", "Mavi", "Sagar"]},
+    {"id": "t4", "name": "Team XSpark", "tag": "XSK", "color": "#7c3aed", "logo": "🟣", "rank": 4, "kills": 12, "placement_pts": 24, "total_pts": 36, "wwcd": 0, "alive": True, "players": ["Jokerr", "Hyder", "Peaper", "Destro"]},
+    {"id": "t5", "name": "8Bit", "tag": "8BIT", "color": "#3b82f6", "logo": "🔵", "rank": 5, "kills": 10, "placement_pts": 20, "total_pts": 30, "wwcd": 0, "alive": True, "players": ["Bipop", "Owais", "Ghatak", "Lava"]},
+    {"id": "t6", "name": "Orangutan", "tag": "ORNG", "color": "#f97316", "logo": "🟠", "rank": 6, "kills": 8, "placement_pts": 16, "total_pts": 24, "wwcd": 0, "alive": True, "players": ["Bhavya", "Fanatic", "Harsh", "Rolex"]},
+    {"id": "t7", "name": "Blind Esports", "tag": "BLND", "color": "#10b981", "logo": "🟩", "rank": 7, "kills": 7, "placement_pts": 14, "total_pts": 21, "wwcd": 0, "alive": True, "players": ["Harpreet", "Rahul", "Karan", "Akash"]},
+    {"id": "t8", "name": "Fnatic", "tag": "FNC", "color": "#f59e0b", "logo": "⚡", "rank": 8, "kills": 6, "placement_pts": 12, "total_pts": 18, "wwcd": 0, "alive": True, "players": ["Amogh", "Titanic", "Rex", "Kd"]},
+]
+
+DEVICES = [
+    {"id": "gpu1", "name": "Node-GPU-1", "type": "RTX 4090", "load": 92, "status": "online", "task": "Vision CV Pipeline", "assigned_agent": "vision"},
+    {"id": "gpu2", "name": "Node-GPU-2", "type": "RTX 3090", "load": 45, "status": "online", "task": "Highlight Rendering", "assigned_agent": "commentary"},
+    {"id": "cpu1", "name": "Node-CPU-1", "type": "EPYC 7742", "load": 12, "status": "online", "task": "WebSocket Router", "assigned_agent": "director"},
+]
+
+AGENT_CHATTER_TEMPLATES = [
+    ("{from_agent} → {to_agent}: Fight detected at Pochinki, confidence {conf:.2f}", "fight"),
+    ("{from_agent} → {to_agent}: Zone closing in 45s, recommend POV switch to {team}", "zone"),
+    ("{from_agent} → {to_agent}: Squad wipe incoming, emotion score {score}/100", "wipe"),
+    ("{from_agent} → {to_agent}: Player {player} knocked, switching highlight buffer", "knock"),
+    ("{from_agent} → {to_agent}: Commentary queued: '{comment}'", "commentary"),
+    ("{from_agent} → {to_agent}: GPU load spike detected, throttling inference to 30fps", "perf"),
+    ("{from_agent} → {to_agent}: New clutch situation, switching to {team} POV", "clutch"),
+    ("{from_agent} → {to_agent}: Kill feed update processed, {n} events in queue", "kill"),
+    ("{from_agent} → {to_agent}: Heatmap updated — high activity sector G7", "heatmap"),
+    ("{from_agent} → {to_agent}: Model confidence dropped below threshold — recalibrating", "warn"),
+]
+
+MATCH_STATE = {
+    "teams": TEAMS,
+    "players": [p for team in TEAMS for p in team["players"]],
+    "matches": [{"id": "m1", "title": "BGIS Semifinals - Match 4", "map": "Erangel", "status": "LIVE"}],
+    "kill_feed": [],
+    "director_state": {"current_pov": "t1", "reason": "Initial", "action": "HOLD"},
+    "agents_state": [
+        {"id": "fight", "name": "Fight Detection Agent", "status": "active", "cpu": "12%", "mem": "145MB", "latency": "8ms", "tasks": 1204},
+        {"id": "director", "name": "Master Director AI", "status": "active", "cpu": "24%", "mem": "310MB", "latency": "15ms", "tasks": 450},
+        {"id": "commentary", "name": "AI Commentary Gen", "status": "active", "cpu": "45%", "mem": "2.1GB", "latency": "450ms", "tasks": 89},
+        {"id": "vision", "name": "YOLOv8 Vision Agent", "status": "active", "cpu": "85%", "mem": "4.5GB", "latency": "32ms", "tasks": 24500},
+        {"id": "economy", "name": "Utility Tracking", "status": "active", "cpu": "5%", "mem": "90MB", "latency": "4ms", "tasks": 800},
+    ],
+    "modes_state": {
+        "auto_director": True,
+        "ai_commentary": True,
+        "fight_detection": True,
+        "player_comms": False,
+        "pip_mode": True,
+    },
+    "system_health": {
+        "cpu_usage": 45,
+        "memory_usage": 62,
+        "gpu_usage": 78,
+        "event_bus_latency": 2,
+        "active_agents": 42,
+        "events_per_sec": 124,
+    },
+    "commentary_log": [],
+    # --- NEW STATE ---
+    "devices": DEVICES,
+    "agent_assignments": {
+        "vision": {"device_id": "gpu1", "device_name": "Node-GPU-1", "team_id": "t1", "team_name": "SouL"},
+        "commentary": {"device_id": "gpu2", "device_name": "Node-GPU-2", "team_id": None, "team_name": None},
+        "director": {"device_id": "cpu1", "device_name": "Node-CPU-1", "team_id": None, "team_name": None},
+        "fight": {"device_id": "gpu1", "device_name": "Node-GPU-1", "team_id": None, "team_name": None},
+        "economy": {"device_id": "cpu1", "device_name": "Node-CPU-1", "team_id": None, "team_name": None},
+    },
+    "agent_logs": [],
+    "scrim_state": {"active": False, "lobby_id": None, "teams": [], "map": "Erangel", "status": "idle"},
+    "social_config": {
+        "YouTube Shorts": {"connected": True, "auto_post": True},
+        "Instagram Reels": {"connected": True, "auto_post": True},
+        "TikTok": {"connected": True, "auto_post": False},
+        "Discord Webhook": {"connected": True, "auto_post": True},
+    },
+    "training_models": [
+        {"name": "Director AI v2.4 (Reinforcement Learning)", "loss": "0.012", "status": "Training (Epoch 42/100)", "active": True},
+        {"name": "Fight Detection (YOLOv8 + Tracker)", "loss": "0.004", "status": "Deployed", "active": True},
+        {"name": "LLM Commentary Generator (Hindi Base)", "loss": "1.24", "status": "Fine-tuning", "active": True},
+    ],
+    "render_jobs": [
+        {"id": "j1", "title": "Soul Wipe - YouTube Shorts Format", "status": "RENDERING", "progress": 72, "format": "YouTube Shorts"},
+        {"id": "j2", "title": "Mortal Clutch - TikTok Format", "status": "PENDING", "progress": 0, "format": "TikTok"},
+        {"id": "j3", "title": "Match 4 - Cinematic Recap", "status": "COMPLETED", "progress": 100, "format": "Full Broadcast"},
+    ],
+}
+
+# ==========================================
+# WEBSOCKET MANAGER
+# ==========================================
+class ConnectionManager:
+    def __init__(self):
+        self.active_connections: List[WebSocket] = []
+
+    async def connect(self, websocket: WebSocket):
+        await websocket.accept()
+        self.active_connections.append(websocket)
+        # Send initial state
+        await websocket.send_json({"type": "connected", "data": {"status": "ok"}})
+        await websocket.send_json({"type": "standings", "data": MATCH_STATE["teams"]})
+        await websocket.send_json({"type": "kill_feed_init", "data": MATCH_STATE["kill_feed"]})
+        await websocket.send_json({"type": "director_state", "data": MATCH_STATE["director_state"]})
+        await websocket.send_json({"type": "system_health", "data": MATCH_STATE["system_health"]})
+        await websocket.send_json({"type": "agents_state", "data": MATCH_STATE["agents_state"]})
+        await websocket.send_json({"type": "modes_state", "data": MATCH_STATE["modes_state"]})
+        # New state
+        await websocket.send_json({"type": "devices_state", "data": MATCH_STATE["devices"]})
+        await websocket.send_json({"type": "agent_assignments", "data": MATCH_STATE["agent_assignments"]})
+        await websocket.send_json({"type": "agent_logs", "data": MATCH_STATE["agent_logs"]})
+        await websocket.send_json({"type": "scrim_state", "data": MATCH_STATE["scrim_state"]})
+        await websocket.send_json({"type": "render_jobs", "data": MATCH_STATE["render_jobs"]})
+        await websocket.send_json({"type": "social_config", "data": MATCH_STATE["social_config"]})
+        await websocket.send_json({"type": "training_models", "data": MATCH_STATE["training_models"]})
+
+    def disconnect(self, websocket: WebSocket):
+        if websocket in self.active_connections:
+            self.active_connections.remove(websocket)
+
+    async def broadcast(self, message: dict):
+        dead_connections = []
+        for connection in self.active_connections:
+            try:
+                await connection.send_json(message)
+            except Exception:
+                dead_connections.append(connection)
+        
+        for dead in dead_connections:
+            self.disconnect(dead)
+
+manager = ConnectionManager()
+
+# ==========================================
+# GLOBAL SERVICES
+# ==========================================
+event_bus = EventBus()
+director_engine = DirectorAIEngine()
+commentary_engine = get_commentary_engine()
+simulation_task = None
+chatter_task = None
+
+# ==========================================
+# ACTION HANDLERS
+# ==========================================
+async def handle_action(data: dict):
+    action = data.get("action")
+
+    if action == "assign_agent":
+        agent_id = data.get("agent_id")
+        device_id = data.get("device_id")
+        team_id = data.get("team_id")
+
+        device = next((d for d in MATCH_STATE["devices"] if d["id"] == device_id), None)
+        team = next((t for t in MATCH_STATE["teams"] if t["id"] == team_id), None)
+
+        if agent_id and device:
+            MATCH_STATE["agent_assignments"][agent_id] = {
+                "device_id": device_id,
+                "device_name": device["name"],
+                "team_id": team_id,
+                "team_name": team["name"] if team else None,
+            }
+            # Update device's assigned agent
+            for d in MATCH_STATE["devices"]:
+                if d["id"] == device_id:
+                    d["assigned_agent"] = agent_id
+            
+            await manager.broadcast({"type": "agent_assignments", "data": MATCH_STATE["agent_assignments"]})
+            await manager.broadcast({"type": "devices_state", "data": MATCH_STATE["devices"]})
+            await manager.broadcast({
+                "type": "action_ack",
+                "data": {"action": "assign_agent", "status": "success", "agent_id": agent_id, "device": device["name"]}
+            })
+
+    elif action == "lock_pov":
+        team_id = data.get("team_id")
+        team = next((t for t in MATCH_STATE["teams"] if t["id"] == team_id), None)
+        if team:
+            decision = {
+                "action": "LOCK_POV",
+                "target_team": team_id,
+                "current_pov": team_id,
+                "reason": {"event_type": "manual_lock", "description": f"Director locked to {team['name']}"},
+                "timestamp": time.time()
+            }
+            MATCH_STATE["director_state"] = decision
+            await manager.broadcast({"type": "director_state", "data": decision})
+            await manager.broadcast({"type": "action_ack", "data": {"action": "lock_pov", "status": "success", "team": team["name"]}})
+
+    elif action == "start_scrim":
+        lobby_id = f"BGIS-{random.randint(1000, 9999)}"
+        map_name = data.get("map", "Erangel")
+        MATCH_STATE["scrim_state"] = {
+            "active": True,
+            "lobby_id": lobby_id,
+            "teams": [{"name": t["name"], "tag": t["tag"], "kills": 0, "placement": 0, "pts": 0} for t in MATCH_STATE["teams"][:8]],
+            "map": map_name,
+            "status": "lobby_open"
+        }
+        await manager.broadcast({"type": "scrim_state", "data": MATCH_STATE["scrim_state"]})
+        await manager.broadcast({"type": "action_ack", "data": {"action": "start_scrim", "status": "success", "lobby_id": lobby_id}})
+
+    elif action == "generate_recap":
+        fmt = data.get("format", "YouTube Shorts")
+        job_id = str(uuid.uuid4())[:6]
+        new_job = {"id": job_id, "title": f"Match 4 Recap — {fmt}", "status": "RENDERING", "progress": 0, "format": fmt}
+        MATCH_STATE["render_jobs"].append(new_job)
+        await manager.broadcast({"type": "render_jobs", "data": MATCH_STATE["render_jobs"]})
+        await manager.broadcast({"type": "action_ack", "data": {"action": "generate_recap", "status": "success", "job_id": job_id}})
+        # Simulate progress
+        asyncio.create_task(simulate_render_progress(job_id))
+
+    elif action == "restart_node":
+        node_name = data.get("node")
+        for d in MATCH_STATE["devices"]:
+            if d["name"] == node_name or d["id"] == data.get("node_id"):
+                d["status"] = "restarting"
+        await manager.broadcast({"type": "devices_state", "data": MATCH_STATE["devices"]})
+        asyncio.create_task(simulate_node_restart(node_name or data.get("node_id")))
+
+    elif action == "toggle_node":
+        node_id = data.get("node_id")
+        for d in MATCH_STATE["devices"]:
+            if d["id"] == node_id:
+                d["status"] = "offline" if d["status"] == "online" else "online"
+                await manager.broadcast({"type": "devices_state", "data": MATCH_STATE["devices"]})
+                await manager.broadcast({"type": "action_ack", "data": {"action": "toggle_node", "status": "success", "node": d["name"], "new_status": d["status"]}})
+                break
+
+    elif action == "test_post":
+        platform = data.get("plat", data.get("platform", "Unknown"))
+        await manager.broadcast({"type": "action_ack", "data": {"action": "test_post", "status": "success", "platform": platform}})
+
+    elif action == "toggle_autopost":
+        platform = data.get("platform")
+        if platform and platform in MATCH_STATE["social_config"]:
+            current = MATCH_STATE["social_config"][platform]["auto_post"]
+            MATCH_STATE["social_config"][platform]["auto_post"] = not current
+            await manager.broadcast({"type": "social_config", "data": MATCH_STATE["social_config"]})
+            await manager.broadcast({"type": "action_ack", "data": {"action": "toggle_autopost", "platform": platform, "auto_post": not current}})
+
+    elif action == "upload_sponsor":
+        await manager.broadcast({"type": "action_ack", "data": {"action": "upload_sponsor", "status": "success", "file": "Sponsor_Asset.png"}})
+
+    elif action == "revoke_key":
+        new_key = f"sk_live_{''.join(random.choices('abcdefghijklmnopqrstuvwxyz0123456789', k=24))}"
+        await manager.broadcast({"type": "action_ack", "data": {"action": "revoke_key", "status": "success", "new_key": new_key}})
+
+    elif action == "stop_training":
+        model_name = data.get("model")
+        for m in MATCH_STATE["training_models"]:
+            if m["name"] == model_name:
+                m["status"] = "Stopped"
+                m["active"] = False
+        await manager.broadcast({"type": "training_models", "data": MATCH_STATE["training_models"]})
+        await manager.broadcast({"type": "action_ack", "data": {"action": "stop_training", "status": "success", "model": model_name}})
+
+    elif action == "post_now":
+        platform = data.get("platform")
+        await manager.broadcast({"type": "action_ack", "data": {"action": "post_now", "status": "success", "platform": platform}})
+
+    elif action == "create_tournament":
+        name = data.get("name", "New Tournament")
+        await manager.broadcast({"type": "action_ack", "data": {"action": "create_tournament", "status": "success", "name": name}})
+
+    elif action == "clip_highlight":
+        clip_id = data.get("clip_id")
+        await manager.broadcast({"type": "action_ack", "data": {"action": "clip_highlight", "status": "success", "clip_id": clip_id}})
+
+    elif action == "generate_all_highlights":
+        await manager.broadcast({"type": "action_ack", "data": {"action": "generate_all_highlights", "status": "success"}})
+
+    elif action == "toggle_broadcaster_seat":
+        seat = data.get("seat")
+        await manager.broadcast({"type": "action_ack", "data": {"action": "toggle_broadcaster_seat", "status": "success", "seat": seat}})
+
+    elif action == "test_webhook":
+        await manager.broadcast({"type": "action_ack", "data": {"action": "test_webhook", "status": "success"}})
+
+async def simulate_render_progress(job_id: str):
+    """Simulate a render job progressing from 0 to 100%."""
+    for progress in range(5, 101, 5):
+        await asyncio.sleep(0.5)
+        for job in MATCH_STATE["render_jobs"]:
+            if job["id"] == job_id:
+                job["progress"] = progress
+                if progress >= 100:
+                    job["status"] = "COMPLETED"
+        await manager.broadcast({"type": "render_jobs", "data": MATCH_STATE["render_jobs"]})
+
+async def simulate_node_restart(node_identifier: str):
+    """Simulate a node restarting and coming back online."""
+    await asyncio.sleep(3)
+    for d in MATCH_STATE["devices"]:
+        if d["name"] == node_identifier or d["id"] == node_identifier:
+            d["status"] = "online"
+            d["load"] = random.randint(10, 30)
+    await manager.broadcast({"type": "devices_state", "data": MATCH_STATE["devices"]})
+    await manager.broadcast({"type": "action_ack", "data": {"action": "restart_node", "status": "success", "node": node_identifier}})
+
+# ==========================================
+# SIMULATOR TASK — Match Events
+# ==========================================
+async def match_simulator():
+    """Generates realistic match events and feeds them to the real Director AI."""
+    logger.info("Match simulator started.")
+    
+    while True:
+        await asyncio.sleep(random.uniform(3, 8))
+        
+        killer_team = random.choice(MATCH_STATE["teams"])
+        victim_team = random.choice([t for t in MATCH_STATE["teams"] if t["id"] != killer_team["id"] and t["alive"]])
+        
+        if not victim_team:
+            continue
+            
+        killer = random.choice(killer_team["players"])
+        victim = random.choice(victim_team["players"])
+        weapon = random.choice(["M416", "AKM", "Beryl M762", "UMP45", "Kar98k", "AWM", "Grenade"])
+        is_knock = random.random() > 0.3
+        
+        event_type = "knock" if is_knock else "kill"
+        
+        fight_score = random.randint(30, 95)
+        priority = DirPriority.CRITICAL if fight_score > 85 else DirPriority.HIGH if fight_score > 60 else DirPriority.MEDIUM
+        
+        b_event = BroadcastEvent(
+            id=str(uuid.uuid4())[:8],
+            team_id=killer_team["id"],
+            type="fight",
+            priority=priority,
+            confidence=0.95,
+            emotion_score=fight_score,
+            timestamp=time.time(),
+            description=f"{killer} {event_type}s {victim}"
+        )
+        
+        decision = director_engine.process_tick([b_event])
+        if decision:
+            MATCH_STATE["director_state"] = decision
+            await manager.broadcast({"type": "director_state", "data": decision})
+            await manager.broadcast({"type": "scene_switch", "data": decision})
+        
+        ctx = {
+            "killer_name": killer,
+            "victim_name": victim,
+            "weapon": weapon,
+            "team_id": killer_team["id"]
+        }
+        commentary = await commentary_engine.generate(event_type, ctx)
+        if commentary:
+            comm_obj = {"timestamp": time.time(), "text": commentary, "type": event_type}
+            MATCH_STATE["commentary_log"].append(comm_obj)
+            if len(MATCH_STATE["commentary_log"]) > 10:
+                MATCH_STATE["commentary_log"].pop(0)
+            await manager.broadcast({"type": "commentary", "data": comm_obj})
+
+        kill_event = {
+            "id": str(uuid.uuid4()),
+            "killer": killer,
+            "killerTeam": killer_team["name"],
+            "killerTeamId": killer_team["id"],
+            "victim": victim,
+            "victimTeam": victim_team["name"],
+            "weapon": weapon,
+            "isKnock": is_knock,
+            "timestamp": time.time(),
+        }
+        
+        if not is_knock:
+            for t in MATCH_STATE["teams"]:
+                if t["id"] == killer_team["id"]:
+                    t["kills"] += 1
+                    t["total_pts"] += 1
+        
+        MATCH_STATE["kill_feed"].append(kill_event)
+        if len(MATCH_STATE["kill_feed"]) > 10:
+            MATCH_STATE["kill_feed"].pop(0)
+            
+        MATCH_STATE["system_health"]["events_per_sec"] = random.randint(100, 150)
+        MATCH_STATE["system_health"]["cpu_usage"] = random.randint(40, 60)
+        
+        # Update device loads dynamically
+        for d in MATCH_STATE["devices"]:
+            if d["status"] == "online":
+                d["load"] = min(99, max(5, d["load"] + random.randint(-5, 8)))
+            
+        await manager.broadcast({"type": "kill", "data": kill_event})
+        await manager.broadcast({"type": "standings", "data": MATCH_STATE["teams"]})
+        await manager.broadcast({"type": "system_health", "data": MATCH_STATE["system_health"]})
+        await manager.broadcast({"type": "devices_state", "data": MATCH_STATE["devices"]})
+        
+        if event_bus._running:
+            await event_bus.publish(
+                event_type="kill_event" if not is_knock else "knock_event",
+                data=kill_event,
+                priority=EventPriority.HIGH,
+                source="simulator"
+            )
+
+# ==========================================
+# AGENT CHATTER SIMULATOR
+# ==========================================
+async def agent_chatter_simulator():
+    """Generates realistic inter-agent communication messages."""
+    logger.info("Agent chatter simulator started.")
+    
+    agent_names = {
+        "fight": "FightDetect",
+        "director": "Director",
+        "commentary": "CommentaryGen",
+        "vision": "VisionAgent",
+        "economy": "EconTracker",
+    }
+    
+    comments = [
+        "Clutch situation imminent!",
+        "Zone damage is critical for zone 4.",
+        "SouL executing a compound rush.",
+        "GodLike rotating east via Pochinki.",
+    ]
+    
+    while True:
+        await asyncio.sleep(random.uniform(2, 5))
+        
+        agents = list(agent_names.items())
+        from_id, from_name = random.choice(agents)
+        to_id, to_name = random.choice([a for a in agents if a[0] != from_id])
+        
+        template, log_type = random.choice(AGENT_CHATTER_TEMPLATES)
+        team = random.choice(MATCH_STATE["teams"])
+        player = random.choice(team["players"])
+        
+        message = template.format(
+            from_agent=from_name,
+            to_agent=to_name,
+            conf=random.uniform(0.72, 0.99),
+            score=random.randint(60, 98),
+            team=team["name"],
+            player=player,
+            comment=random.choice(comments),
+            n=random.randint(1, 8),
+        )
+        
+        log_entry = {
+            "id": str(uuid.uuid4()),
+            "timestamp": time.time(),
+            "from": from_name,
+            "from_id": from_id,
+            "to": to_name,
+            "to_id": to_id,
+            "message": message,
+            "level": log_type,
+        }
+        
+        MATCH_STATE["agent_logs"].append(log_entry)
+        if len(MATCH_STATE["agent_logs"]) > 50:
+            MATCH_STATE["agent_logs"].pop(0)
+        
+        await manager.broadcast({"type": "agent_log", "data": log_entry})
+
+# ==========================================
+# FASTAPI APP & LIFESPAN
+# ==========================================
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup
+    logger.info("AEGIS AI Starting...")
+    
+    try:
+        await init_db()
+    except Exception as e:
+        logger.warning(f"Database initialization failed, continuing with in-memory state: {e}")
+        
+    try:
+        await event_bus.connect()
+    except Exception as e:
+        logger.warning(f"EventBus connection failed, continuing with in-memory broadcasting: {e}")
+        
+    global simulation_task, chatter_task
+    simulation_task = asyncio.create_task(match_simulator())
+    chatter_task = asyncio.create_task(agent_chatter_simulator())
+    
+    logger.info("✅ AEGIS AI Ready")
+    
+    yield
+    
+    logger.info("AEGIS AI Shutting down...")
+    if simulation_task:
+        simulation_task.cancel()
+    if chatter_task:
+        chatter_task.cancel()
+    try:
+        await event_bus.disconnect()
+    except Exception:
+        pass
+
+app = FastAPI(title="AEGIS AI", version="2.0.0", lifespan=lifespan)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+@app.get("/")
+async def root():
+    return JSONResponse({
+        "message": "Welcome to AEGIS AI Backend",
+        "docs": "/docs",
+        "status_endpoint": "/api/v1/system/status"
+    })
+
+# ==========================================
+# WEBSOCKET ENDPOINTS
+# ==========================================
+@app.websocket("/ws/live")
+async def websocket_live(websocket: WebSocket):
+    await manager.connect(websocket)
+    try:
+        while True:
+            data = await websocket.receive_text()
+            if data == "ping":
+                await websocket.send_text("pong")
+                continue
+            try:
+                payload = json.loads(data)
+                await handle_action(payload)
+            except Exception as e:
+                logger.error(f"Failed to handle WS action: {e}")
+    except WebSocketDisconnect:
+        manager.disconnect(websocket)
+        
+@app.websocket("/ws/monitor")
+async def websocket_monitor(websocket: WebSocket):
+    await manager.connect(websocket)
+    try:
+        while True:
+            data = await websocket.receive_text()
+            if data == "ping":
+                await websocket.send_text("pong")
+    except WebSocketDisconnect:
+        manager.disconnect(websocket)
+
+# ==========================================
+# REST API ENDPOINTS
+# ==========================================
+@app.get("/api/v1/system/status")
+async def get_system_status():
+    return JSONResponse({
+        "status": "online",
+        "health": MATCH_STATE["system_health"],
+        "modes": MATCH_STATE["modes_state"],
+        "event_bus": "connected" if event_bus._running else "disconnected",
+    })
+
+@app.get("/api/v1/teams")
+async def get_teams():
+    return JSONResponse({"data": MATCH_STATE["teams"]})
+
+@app.get("/api/v1/teams/{team_id}")
+async def get_team(team_id: str):
+    team = next((t for t in MATCH_STATE["teams"] if t["id"] == team_id), None)
+    if team:
+        return JSONResponse({"data": team})
+    return JSONResponse({"error": "Team not found"}, status_code=404)
+
+@app.get("/api/v1/players")
+async def get_players():
+    players_data = []
+    for team in MATCH_STATE["teams"]:
+        for player in team["players"]:
+            players_data.append({
+                "id": f"{team['id']}_{player}",
+                "name": player,
+                "team": team["name"],
+                "role": "Assaulter",
+                "kills": team["kills"] // 4,
+                "damage": team["kills"] * 100,
+                "mvp_score": (team["kills"] * 10) + 50
+            })
+    return JSONResponse({"data": players_data})
+
+@app.get("/api/v1/players/mvp")
+async def get_mvp():
+    players_data = []
+    for team in MATCH_STATE["teams"]:
+        for player in team["players"]:
+            players_data.append({
+                "id": f"{team['id']}_{player}",
+                "name": player,
+                "team": team["name"],
+                "role": "Assaulter",
+                "kills": team["kills"] // 4,
+                "damage": team["kills"] * 100,
+                "mvp_score": (team["kills"] * 10) + 50
+            })
+    if not players_data:
+        return JSONResponse({"error": "No players found"}, status_code=404)
+    mvp = max(players_data, key=lambda x: x["mvp_score"])
+    return JSONResponse({"data": mvp})
+
+@app.get("/api/v1/matches")
+async def get_matches():
+    return JSONResponse({"data": MATCH_STATE["matches"]})
+
+@app.get("/api/v1/matches/live")
+async def get_live_match():
+    return JSONResponse({"data": MATCH_STATE["matches"][0]})
+
+@app.get("/api/v1/tournaments")
+async def get_tournaments():
+    return JSONResponse({"data": [{"id": "tour1", "name": "BGIS 2024", "status": "LIVE"}]})
+
+@app.get("/api/v1/analytics/standings")
+async def get_standings():
+    sorted_teams = sorted(MATCH_STATE["teams"], key=lambda x: x["total_pts"], reverse=True)
+    return JSONResponse({"data": sorted_teams})
+
+@app.get("/api/v1/analytics/kill_feed")
+@app.get("/api/v1/analytics/kill-feed")
+async def get_kill_feed():
+    return JSONResponse({"data": MATCH_STATE["kill_feed"]})
+
+@app.get("/api/v1/analytics/summary")
+async def get_analytics_summary():
+    total_kills = sum(t["kills"] for t in MATCH_STATE["teams"])
+    teams_alive = sum(1 for t in MATCH_STATE["teams"] if t["alive"])
+    return JSONResponse({
+        "data": {
+            "total_kills": total_kills,
+            "total_damage": total_kills * 120,
+            "avg_kills_per_team": round(total_kills / max(1, len(MATCH_STATE["teams"])), 1),
+            "most_kills_team": max(MATCH_STATE["teams"], key=lambda x: x["kills"])["tag"],
+            "zone_phase": 4,
+            "teams_alive": teams_alive,
+            "match_time_seconds": 945
+        }
+    })
+
+@app.post("/api/v1/broadcast/switch")
+async def switch_camera(request: Request):
+    data = await request.json()
+    team_id = data.get("team_id")
+    if team_id:
+        decision = {
+            "action": "SWITCH_POV",
+            "target_team": team_id,
+            "reason": {"event_type": "manual_override", "description": "Manual override from dashboard"},
+            "timestamp": time.time()
+        }
+        MATCH_STATE["director_state"] = decision
+        await manager.broadcast({"type": "director_state", "data": decision})
+        await manager.broadcast({"type": "scene_switch", "data": decision})
+        return JSONResponse({"status": "success", "message": f"Switched to {team_id}"})
+    return JSONResponse({"status": "error", "message": "Missing team_id"}, status_code=400)
+
+@app.post("/api/v1/broadcast/replay")
+async def trigger_replay(request: Request):
+    return JSONResponse({"status": "success", "message": "Replay triggered"})
+
+@app.get("/api/v1/broadcast/status")
+async def get_broadcast_status():
+    return JSONResponse({"data": MATCH_STATE["director_state"]})
+
+@app.post("/api/v1/broadcast/production-mode")
+async def set_production_mode(request: Request):
+    data = await request.json()
+    for key, value in data.items():
+        if key in MATCH_STATE["modes_state"]:
+            MATCH_STATE["modes_state"][key] = value
+    await manager.broadcast({"type": "modes_state", "data": MATCH_STATE["modes_state"]})
+    return JSONResponse({"status": "success", "modes": MATCH_STATE["modes_state"]})
+
+@app.get("/api/v1/commentary/latest")
+async def get_latest_commentary():
+    return JSONResponse({"data": MATCH_STATE["commentary_log"]})
+
+@app.get("/api/v1/highlights")
+async def get_highlights():
+    return JSONResponse({"data": []})
+
+@app.get("/api/v1/admin/system")
+async def get_admin_system():
+    return JSONResponse({
+        "status": "online",
+        "health": MATCH_STATE["system_health"],
+        "modes": MATCH_STATE["modes_state"],
+        "event_bus": "connected" if event_bus._running else "disconnected",
+    })
+
+@app.get("/api/v1/admin/agents")
+@app.get("/api/v1/agents")
+async def get_admin_agents():
+    return JSONResponse({"data": MATCH_STATE["agents_state"]})
+
+# --- NEW REST ENDPOINTS ---
+@app.get("/api/v1/devices")
+async def get_devices():
+    return JSONResponse({"data": MATCH_STATE["devices"]})
+
+@app.get("/api/v1/agent-assignments")
+async def get_agent_assignments():
+    return JSONResponse({"data": MATCH_STATE["agent_assignments"]})
+
+@app.get("/api/v1/agent-logs")
+async def get_agent_logs():
+    return JSONResponse({"data": MATCH_STATE["agent_logs"]})
+
+@app.post("/api/v1/scrims/start")
+async def start_scrim(request: Request):
+    data = await request.json()
+    await handle_action({"action": "start_scrim", **data})
+    return JSONResponse({"status": "success", "scrim": MATCH_STATE["scrim_state"]})
+
+@app.post("/api/v1/content/generate-recap")
+async def generate_recap(request: Request):
+    data = await request.json()
+    await handle_action({"action": "generate_recap", **data})
+    return JSONResponse({"status": "success", "jobs": MATCH_STATE["render_jobs"]})

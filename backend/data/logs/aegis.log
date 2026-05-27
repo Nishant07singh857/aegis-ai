@@ -1,0 +1,55 @@
+2026-05-22 21:37:35 | INFO     | aegis.db:71 | create_engine() | Database engine created: localhost:5432/aegis
+2026-05-22 21:42:40 | INFO     | aegis.db:71 | create_engine() | Database engine created: localhost:5432/aegis
+2026-05-22 21:43:57 | INFO     | aegis.db:71 | create_engine() | Database engine created: localhost:5432/aegis
+2026-05-22 21:44:26 | INFO     | aegis.db:71 | create_engine() | Database engine created: localhost:5432/aegis
+2026-05-22 21:44:33 | INFO     | aegis.db:71 | create_engine() | Database engine created: localhost:5432/aegis
+2026-05-22 21:45:31 | INFO     | aegis.db:71 | create_engine() | Database engine created: localhost:5432/aegis
+2026-05-22 21:48:19 | INFO     | aegis.db:40 | create_engine() | Database engine created: localhost:5432/aegis
+2026-05-22 21:49:34 | INFO     | aegis.db:40 | create_engine() | Database engine created: localhost:5432/aegis
+2026-05-22 21:49:46 | INFO     | aegis.db:40 | create_engine() | Database engine created: localhost:5432/aegis
+{"asctime": "2026-05-24 19:46:22,434", "levelname": "INFO", "name": "aegis.db", "funcName": "create_engine", "lineno": 210, "message": "Database engine created | Pool Size: 10 | Max Overflow: 5", "taskName": "Task-1"}
+{"asctime": "2026-05-24 19:47:58,978", "levelname": "INFO", "name": "aegis.db", "funcName": "create_engine", "lineno": 210, "message": "Database engine created | Pool Size: 10 | Max Overflow: 5", "taskName": "Task-1"}
+{"asctime": "2026-05-24 19:48:27,492", "levelname": "INFO", "name": "aegis.db", "funcName": "create_engine", "lineno": 210, "message": "Database engine created | Pool Size: 10 | Max Overflow: 5", "taskName": "Task-1"}
+{"asctime": "2026-05-24 19:48:58,854", "levelname": "INFO", "name": "aegis.db", "funcName": "create_engine", "lineno": 210, "message": "Database engine created | Pool Size: 10 | Max Overflow: 5", "taskName": "Task-1"}
+{"asctime": "2026-05-24 19:49:32,696", "levelname": "INFO", "name": "aegis.db", "funcName": "create_engine", "lineno": 210, "message": "Database engine created | Pool Size: 10 | Max Overflow: 5", "taskName": "Task-1"}
+{"asctime": "2026-05-24 19:50:10,911", "levelname": "INFO", "name": "aegis.db", "funcName": "create_engine", "lineno": 210, "message": "Database engine created | Pool Size: 10 | Max Overflow: 5", "taskName": "Task-1"}
+{"asctime": "2026-05-24 19:50:58,234", "levelname": "INFO", "name": "aegis.db", "funcName": "create_engine", "lineno": 210, "message": "Database engine created | Pool Size: 10 | Max Overflow: 5", "taskName": "Task-1"}
+{"asctime": "2026-05-24 21:10:57,552", "levelname": "INFO", "name": "aegis.db", "funcName": "create_engine", "lineno": 210, "message": "Database engine created | Pool Size: 10 | Max Overflow: 5", "taskName": null}
+{"asctime": "2026-05-24 21:10:57,579", "levelname": "INFO", "name": "aegis.db", "funcName": "create_engine", "lineno": 40, "message": "Database engine created: localhost:5432/aegis", "taskName": null}
+{"asctime": "2026-05-24 21:11:02,408", "levelname": "INFO", "name": "numexpr.utils", "funcName": "_init_num_threads", "lineno": 160, "message": "NumExpr defaulting to 8 threads.", "taskName": null}
+{"asctime": "2026-05-24 21:11:32,192", "levelname": "INFO", "name": "aegis.db", "funcName": "create_engine", "lineno": 210, "message": "Database engine created | Pool Size: 10 | Max Overflow: 5", "taskName": null}
+{"asctime": "2026-05-24 21:11:32,215", "levelname": "INFO", "name": "aegis.db", "funcName": "create_engine", "lineno": 40, "message": "Database engine created: localhost:5432/aegis", "taskName": null}
+{"asctime": "2026-05-24 21:11:33,690", "levelname": "INFO", "name": "numexpr.utils", "funcName": "_init_num_threads", "lineno": 160, "message": "NumExpr defaulting to 8 threads.", "taskName": null}
+{"asctime": "2026-05-24 21:12:59,526", "levelname": "INFO", "name": "aegis.db", "funcName": "create_engine", "lineno": 210, "message": "Database engine created | Pool Size: 10 | Max Overflow: 5", "taskName": null}
+{"asctime": "2026-05-24 21:12:59,570", "levelname": "INFO", "name": "aegis.db", "funcName": "create_engine", "lineno": 40, "message": "Database engine created: localhost:5432/aegis", "taskName": null}
+{"asctime": "2026-05-24 21:13:02,648", "levelname": "INFO", "name": "numexpr.utils", "funcName": "_init_num_threads", "lineno": 160, "message": "NumExpr defaulting to 8 threads.", "taskName": null}
+{"asctime": "2026-05-24 21:14:32,053", "levelname": "INFO", "name": "aegis.db", "funcName": "create_engine", "lineno": 210, "message": "Database engine created | Pool Size: 10 | Max Overflow: 5", "taskName": null}
+{"asctime": "2026-05-24 21:14:32,078", "levelname": "INFO", "name": "aegis.db", "funcName": "create_engine", "lineno": 40, "message": "Database engine created: localhost:5432/aegis", "taskName": null}
+{"asctime": "2026-05-24 21:14:33,905", "levelname": "INFO", "name": "numexpr.utils", "funcName": "_init_num_threads", "lineno": 160, "message": "NumExpr defaulting to 8 threads.", "taskName": null}
+{"asctime": "2026-05-25 23:33:56,733", "levelname": "WARNING", "name": "easyocr.easyocr", "funcName": "getDetectorPath", "lineno": 251, "message": "Downloading detection model, please wait. This may take several minutes depending upon your network connection.", "taskName": "Task-1"}
+{"asctime": "2026-05-25 23:34:03,260", "levelname": "INFO", "name": "easyocr.easyocr", "funcName": "getDetectorPath", "lineno": 255, "message": "Download complete", "taskName": "Task-1"}
+{"asctime": "2026-05-25 23:34:03,261", "levelname": "WARNING", "name": "easyocr.easyocr", "funcName": "__init__", "lineno": 176, "message": "Downloading recognition model, please wait. This may take several minutes depending upon your network connection.", "taskName": "Task-1"}
+{"asctime": "2026-05-25 23:34:04,162", "levelname": "INFO", "name": "easyocr.easyocr", "funcName": "__init__", "lineno": 180, "message": "Download complete.", "taskName": "Task-1"}
+{"asctime": "2026-05-26 23:24:09,320", "levelname": "INFO", "name": "aegis.db", "funcName": "create_engine", "lineno": 210, "message": "Database engine created | Pool Size: 10 | Max Overflow: 5"}
+{"asctime": "2026-05-26 23:24:52,130", "levelname": "INFO", "name": "aegis.security", "funcName": "__init__", "lineno": 51, "message": "\u001b[1mSecurityManager initialized   \u001b[0m [\u001b[0m\u001b[1m\u001b[34maegis.security\u001b[0m]\u001b[0m"}
+{"asctime": "2026-05-26 23:24:52,621", "levelname": "INFO", "name": "aegis.monitoring", "funcName": "__init__", "lineno": 39, "message": "\u001b[1mMetrics manager initialized   \u001b[0m [\u001b[0m\u001b[1m\u001b[34maegis.monitoring\u001b[0m]\u001b[0m"}
+{"asctime": "2026-05-26 23:24:53,689", "levelname": "INFO", "name": "aegis.db", "funcName": "create_engine", "lineno": 207, "message": "Database engine created | Pool Size: 10 | Max Overflow: 5"}
+{"asctime": "2026-05-26 23:35:23,869", "levelname": "INFO", "name": "aegis.db", "funcName": "create_engine", "lineno": 207, "message": "Database engine created | Pool Size: 10 | Max Overflow: 5"}
+{"asctime": "2026-05-26 23:38:10,957", "levelname": "INFO", "name": "aegis.db", "funcName": "create_engine", "lineno": 207, "message": "Database engine created | Pool Size: 10 | Max Overflow: 5"}
+{"asctime": "2026-05-26 23:38:10,997", "levelname": "INFO", "name": "aegis.db", "funcName": "create_engine", "lineno": 38, "message": "Database engine created: localhost:5432/aegis"}
+{"asctime": "2026-05-26 23:38:46,256", "levelname": "INFO", "name": "aegis.db", "funcName": "create_engine", "lineno": 207, "message": "Database engine created | Pool Size: 10 | Max Overflow: 5"}
+{"asctime": "2026-05-26 23:38:46,293", "levelname": "INFO", "name": "aegis.db", "funcName": "create_engine", "lineno": 38, "message": "Database engine created: localhost:5432/aegis"}
+{"asctime": "2026-05-26 23:38:52,292", "levelname": "INFO", "name": "aegis.security", "funcName": "__init__", "lineno": 51, "message": "\u001b[1mSecurityManager initialized   \u001b[0m [\u001b[0m\u001b[1m\u001b[34maegis.security\u001b[0m]\u001b[0m"}
+{"asctime": "2026-05-26 23:38:52,310", "levelname": "INFO", "name": "aegis.monitoring", "funcName": "__init__", "lineno": 39, "message": "\u001b[1mMetrics manager initialized   \u001b[0m [\u001b[0m\u001b[1m\u001b[34maegis.monitoring\u001b[0m]\u001b[0m"}
+{"asctime": "2026-05-26 23:38:52,961", "levelname": "INFO", "name": "aegis.db", "funcName": "create_engine", "lineno": 207, "message": "Database engine created | Pool Size: 10 | Max Overflow: 5"}
+{"asctime": "2026-05-27 00:24:25,420", "levelname": "INFO", "name": "aegis.db", "funcName": "create_engine", "lineno": 207, "message": "Database engine created | Pool Size: 10 | Max Overflow: 5"}
+{"asctime": "2026-05-27 00:24:57,373", "levelname": "INFO", "name": "aegis.db", "funcName": "create_engine", "lineno": 207, "message": "Database engine created | Pool Size: 10 | Max Overflow: 5"}
+{"asctime": "2026-05-27 00:24:57,396", "levelname": "INFO", "name": "aegis.db", "funcName": "create_engine", "lineno": 39, "message": "Database engine created: localhost:5432/aegis"}
+{"asctime": "2026-05-27 00:39:12,050", "levelname": "INFO", "name": "aegis.db", "funcName": "create_engine", "lineno": 207, "message": "Database engine created | Pool Size: 10 | Max Overflow: 5"}
+{"asctime": "2026-05-27 00:39:12,118", "levelname": "INFO", "name": "aegis.db", "funcName": "create_engine", "lineno": 39, "message": "Database engine created: localhost:5432/aegis"}
+{"asctime": "2026-05-27 00:41:24,179", "levelname": "INFO", "name": "aegis.db", "funcName": "create_engine", "lineno": 207, "message": "Database engine created | Pool Size: 10 | Max Overflow: 5"}
+{"asctime": "2026-05-27 00:41:24,232", "levelname": "INFO", "name": "aegis.db", "funcName": "create_engine", "lineno": 39, "message": "Database engine created: localhost:5432/aegis"}
+{"asctime": "2026-05-27 00:59:45,387", "levelname": "INFO", "name": "aegis.db", "funcName": "create_engine", "lineno": 207, "message": "Database engine created | Pool Size: 10 | Max Overflow: 5"}
+{"asctime": "2026-05-27 00:59:45,425", "levelname": "INFO", "name": "aegis.db", "funcName": "create_engine", "lineno": 39, "message": "Database engine created: localhost:5432/aegis"}
+{"asctime": "2026-05-27 01:07:10,855", "levelname": "INFO", "name": "aegis.db", "funcName": "create_engine", "lineno": 207, "message": "Database engine created | Pool Size: 10 | Max Overflow: 5"}
+{"asctime": "2026-05-27 01:07:10,886", "levelname": "INFO", "name": "aegis.db", "funcName": "create_engine", "lineno": 39, "message": "Database engine created: localhost:5432/aegis"}

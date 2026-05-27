@@ -1,0 +1,126 @@
+# backend/app/vision/models/model_configs/weapon_detection.yaml
+"""
+AEGIS AI - Weapon Detection Model Configuration
+YOLOv8 model optimized for weapon identification in BGMI.
+Detects weapon types, attachments, and firing states.
+"""
+
+model:
+  name: "weapon_detector"
+  type: "yolo"
+  version: "2.0.0"
+  description: "BGMI weapon detection - identifies weapons, attachments, firing state"
+  
+  architecture: "yolov8m"
+  input_size: [640, 640]
+  pretrained: "yolov8m.pt"
+  
+  trained_on: "bgmi_weapon_dataset_v4"
+  training_samples: 52000
+  validation_samples: 6000
+  
+  classes:
+    # Assault Rifles
+    0: "M416"
+    1: "AKM"
+    2: "SCAR-L"
+    3: "GROZA"
+    4: "AUG"
+    5: "M762"
+    
+    # SMGs
+    10: "UMP45"
+    11: "Vector"
+    12: "UZI"
+    13: "MP5K"
+    
+    # Sniper Rifles
+    20: "AWM"
+    21: "M24"
+    22: "Kar98k"
+    
+    # DMRs
+    30: "Mini14"
+    31: "SKS"
+    32: "Mk14"
+    33: "SLR"
+    
+    # Shotguns
+    40: "S12K"
+    41: "DBS"
+    
+    # LMGs
+    50: "DP-28"
+    51: "M249"
+    
+    # Pistols
+    60: "P1911"
+    61: "P92"
+    62: "Deagle"
+    
+    # Melee
+    70: "Pan"
+    71: "Machete"
+    
+    # States
+    80: "weapon_firing"
+    81: "weapon_reloading"
+    82: "muzzle_flash"
+    83: "bullet_trail"
+
+inference:
+  confidence_threshold: 0.50
+  iou_threshold: 0.40
+  max_detections: 20
+  half_precision: true
+  batch_size: 2
+  
+  weapon_specific:
+    fire_detection:
+      muzzle_flash_duration_ms: 100
+      consecutive_flash_frames: 2
+    
+    reload_detection:
+      animation_duration_ms: 2000
+      magazine_visible: true
+    
+    attachment_detection:
+      enabled: true
+      scope_types: ["red_dot", "holographic", "2x", "3x", "4x", "6x", "8x"]
+      suppressor_visible: true
+      extended_mag_visible: true
+
+performance:
+  target_fps: 25
+  max_latency_ms: 60
+  gpu_memory_mb: 800
+  
+  tensorrt:
+    enabled: true
+    fp16: true
+    workspace_size_mb: 2048
+
+augmentation:
+  train:
+    hsv_h: 0.01
+    hsv_s: 0.3
+    hsv_v: 0.2
+    degrees: 2.0
+    translate: 0.05
+    scale: 0.2
+    flip_lr: 0.5
+    mosaic: 0.4
+
+post_processing:
+  weapon_identification:
+    multi_view_confirmation: true
+    temporal_smoothing: true
+    smoothing_window: 5  # frames
+    
+  ammo_tracking:
+    ocr_enabled: true
+    ammo_display_region:
+      x: 0.42
+      y: 0.88
+      width: 0.16
+      height: 0.04

@@ -1,0 +1,87 @@
+# backend/app/vision/models/model_configs/utility_detection.yaml
+"""
+AEGIS AI - Utility Detection Model Configuration
+YOLOv8 model optimized for detecting utility items in BGMI.
+Detects grenades, smokes, molotovs, and their effects.
+"""
+
+model:
+  name: "utility_detector"
+  type: "yolo"
+  version: "1.8.0"
+  description: "BGMI utility detection - grenades, smokes, molotovs, flashes"
+  
+  architecture: "yolov8s"  # Small model for speed
+  input_size: [640, 640]
+  pretrained: "yolov8s.pt"
+  
+  trained_on: "bgmi_utility_dataset_v2"
+  training_samples: 28000
+  validation_samples: 3500
+  
+  classes:
+    0: "frag_grenade"
+    1: "smoke_grenade"
+    2: "molotov_cocktail"
+    3: "stun_grenade"
+    4: "grenade_trajectory"
+    5: "smoke_cloud"
+    6: "fire_area"
+    7: "explosion_flash"
+    8: "grenade_pin_pull"
+
+inference:
+  confidence_threshold: 0.40
+  iou_threshold: 0.35
+  max_detections: 30
+  half_precision: true
+  batch_size: 4
+  
+  utility_specific:
+    grenade_tracking:
+      track_trajectory: true
+      trajectory_points: 10
+      predict_landing: true
+    
+    smoke_analysis:
+      detect_coverage: true
+      coverage_radius_threshold: 50  # pixels
+      duration_monitoring: true
+      max_smoke_duration_seconds: 25
+    
+    molotov_detection:
+      fire_spread_radius: 30
+      damage_zone_monitoring: true
+
+performance:
+  target_fps: 30
+  max_latency_ms: 45
+  gpu_memory_mb: 400
+  
+  tensorrt:
+    enabled: true
+    fp16: true
+    workspace_size_mb: 1024
+
+augmentation:
+  train:
+    hsv_h: 0.01
+    hsv_s: 0.5
+    hsv_v: 0.3
+    degrees: 3.0
+    translate: 0.05
+    scale: 0.3
+    flip_lr: 0.5
+    mosaic: 0.3
+
+post_processing:
+  utility_classification:
+    grenade_type_confirmation:
+      min_confidence: 0.55
+      temporal_window: 3  # frames
+    smoke_coverage:
+      min_area_pixels: 500
+      max_area_pixels: 50000
+    fire_verification:
+      color_check: true
+      flicker_detection: true

@@ -1,0 +1,44 @@
+# AEGIS AI - Commentary Fine-Tuning Configuration
+
+model:
+  base_model: "meta-llama/Llama-2-7b-chat-hf"
+  output_name: "aegis-commentary-v1"
+  use_peft: true
+  peft_method: "lora"  # lora, qlora, adapter
+  
+lora:
+  r: 16
+  lora_alpha: 32
+  target_modules: ["q_proj", "v_proj", "k_proj", "o_proj"]
+  lora_dropout: 0.1
+  
+training:
+  epochs: 3
+  batch_size: 4
+  gradient_accumulation_steps: 4
+  learning_rate: 2.0e-4
+  warmup_ratio: 0.03
+  weight_decay: 0.01
+  max_seq_length: 512
+  
+dataset:
+  train_file: "data/commentary_train.jsonl"
+  val_file: "data/commentary_val.jsonl"
+  format: "alpaca"  # alpaca, sharegpt, custom
+  
+  # Custom format fields
+  instruction_field: "instruction"
+  input_field: "input"
+  output_field: "output"
+  
+generation:
+  max_new_tokens: 150
+  temperature: 0.8
+  top_p: 0.95
+  do_sample: true
+  
+output:
+  dir: "fine_tuned_models"
+  save_steps: 500
+  logging_steps: 50
+  eval_steps: 200

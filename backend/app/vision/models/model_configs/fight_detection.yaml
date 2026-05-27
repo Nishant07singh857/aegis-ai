@@ -1,0 +1,95 @@
+# backend/app/vision/models/model_configs/fight_detection.yaml
+"""
+AEGIS AI - Fight Detection Model Configuration
+YOLOv8 model optimized for detecting fights in BGMI.
+Focuses on player interactions, HP bar changes, and combat indicators.
+"""
+
+model:
+  name: "fight_detector"
+  type: "yolo"
+  version: "2.1.0"
+  description: "BGMI fight detection model - detects active combat between teams"
+  
+  # Model architecture
+  architecture: "yolov8m"  # Medium size for balance
+  input_size: [640, 640]
+  pretrained: "yolov8m.pt"
+  
+  # Training data
+  trained_on: "bgmi_fight_dataset_v3"
+  training_samples: 45000
+  validation_samples: 5000
+  
+  # Classes
+  classes:
+    0: "player_shooting"
+    1: "player_knocked"
+    2: "explosion"
+    3: "muzzle_flash"
+    4: "blood_effect"
+    5: "damage_indicator"
+    6: "knock_animation"
+
+inference:
+  confidence_threshold: 0.45
+  iou_threshold: 0.40
+  max_detections: 50
+  half_precision: true
+  batch_size: 4
+  
+  # Fight detection specific
+  fight_indicators:
+    min_players_engaged: 2
+    damage_rate_threshold: 30  # HP per second
+    proximity_threshold: 100   # meters
+    
+  # Region of interest
+  roi:
+    enabled: true
+    focus_areas:
+      - name: "center_screen"
+        x: 0.15
+        y: 0.15
+        width: 0.70
+        height: 0.70
+      - name: "kill_feed"
+        x: 0.75
+        y: 0.05
+        width: 0.23
+        height: 0.40
+
+performance:
+  target_fps: 30
+  max_latency_ms: 50
+  gpu_memory_mb: 800
+  
+  # Optimization
+  tensorrt:
+    enabled: true
+    fp16: true
+    workspace_size_mb: 2048
+  
+  onnx:
+    enabled: false
+    opset_version: 17
+
+augmentation:
+  train:
+    hsv_h: 0.015
+    hsv_s: 0.7
+    hsv_v: 0.4
+    degrees: 5.0
+    translate: 0.1
+    scale: 0.5
+    shear: 2.0
+    flip_lr: 0.5
+    mosaic: 0.5
+  val:
+    none: true
+
+post_processing:
+  fight_confirmation:
+    require_consecutive_frames: 3
+    confidence_decay: 0.9
+    min_fight_duration_ms: 2000

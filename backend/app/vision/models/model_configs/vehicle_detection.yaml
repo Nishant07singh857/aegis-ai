@@ -1,0 +1,108 @@
+# backend/app/vision/models/model_configs/vehicle_detection.yaml
+"""
+AEGIS AI - Vehicle Detection Model Configuration
+YOLOv8 model optimized for vehicle detection and tracking in BGMI.
+Detects vehicle types, states, and player interactions.
+"""
+
+model:
+  name: "vehicle_detector"
+  type: "yolo"
+  version: "1.5.0"
+  description: "BGMI vehicle detection - identifies vehicles, tracks movement, detects destruction"
+  
+  architecture: "yolov8s"
+  input_size: [640, 640]
+  pretrained: "yolov8s.pt"
+  
+  trained_on: "bgmi_vehicle_dataset_v2"
+  training_samples: 22000
+  validation_samples: 3000
+  
+  classes:
+    # Land Vehicles
+    0: "dacia"
+    1: "uaz"
+    2: "buggy"
+    3: "motorcycle"
+    4: "bike_3seat"
+    5: "pickup"
+    6: "brdm"
+    
+    # Water Vehicles
+    10: "boat"
+    11: "jetski"
+    
+    # Air Vehicles (flare drops)
+    20: "helicopter"
+    
+    # Vehicle States
+    30: "vehicle_moving"
+    31: "vehicle_idle"
+    32: "vehicle_destroyed"
+    33: "vehicle_smoking"
+    34: "vehicle_on_fire"
+    35: "vehicle_explosion"
+    
+    # Player Interactions
+    40: "player_driving"
+    41: "player_entering"
+    42: "player_exiting"
+    43: "player_in_vehicle"
+
+inference:
+  confidence_threshold: 0.45
+  iou_threshold: 0.40
+  max_detections: 15
+  half_precision: true
+  batch_size: 4
+  
+  vehicle_specific:
+    tracking:
+      enabled: true
+      track_buffer: 60  # frames
+      match_threshold: 0.7
+    
+    speed_estimation:
+      enabled: true
+      calibration_required: true
+      pixels_per_meter: 5.0
+    
+    destruction_detection:
+      explosion_confidence: 0.6
+      fire_duration_ms: 5000
+      smoke_detection: true
+
+performance:
+  target_fps: 25
+  max_latency_ms: 55
+  gpu_memory_mb: 400
+  
+  tensorrt:
+    enabled: true
+    fp16: true
+    workspace_size_mb: 1024
+
+augmentation:
+  train:
+    hsv_h: 0.01
+    hsv_s: 0.3
+    hsv_v: 0.2
+    degrees: 5.0
+    translate: 0.1
+    scale: 0.4
+    flip_lr: 0.5
+    mosaic: 0.3
+
+post_processing:
+  vehicle_verification:
+    min_track_length: 5  # frames before confirmed
+    movement_validation: true
+    min_movement_pixels: 10
+    
+  destruction_confirmation:
+    require_explosion_or_fire: true
+    consecutive_detection_frames: 3
+    hp_estimation:
+      enabled: true
+      visual_damage_stages: 4
