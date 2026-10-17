@@ -1,4 +1,3 @@
-# Auto-generated placeholder for pov_selector.py
 # backend/app/agents/observer_agents/pov_selector.py
 """
 AEGIS AI - POV Selector

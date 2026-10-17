@@ -54,7 +54,7 @@ function toWsUrl(base: string, token: string | null): string {
   return token ? `${url}?token=${encodeURIComponent(token)}` : url;
 }
 
-export function useLiveSocket(): {
+export function useLiveSocket(apiBase?: string): {
   status: ConnStatus;
   retryCount: number;
   reconnect: () => void;
@@ -92,6 +92,11 @@ export function useLiveSocket(): {
     isAuthed: false,
   });
   authRef.current = { token, isAuthed };
+
+  // Optional per-caller API base (overlay pages pass their ?api= override).
+  // Kept in a ref so the connect callback always uses the latest value.
+  const apiBaseRef = useRef<string | undefined>(apiBase);
+  apiBaseRef.current = apiBase;
 
   const clearTimers = useCallback(() => {
     if (reconnectTimerRef.current) {
@@ -191,7 +196,7 @@ export function useLiveSocket(): {
     const { token: t, isAuthed: authed } = authRef.current;
     let ws: WebSocket;
     try {
-      ws = new WebSocket(toWsUrl(API_BASE, authed ? t : null));
+      ws = new WebSocket(toWsUrl(apiBaseRef.current ?? API_BASE, authed ? t : null));
     } catch {
       scheduleReconnect();
       return;
@@ -262,8 +267,9 @@ export function useLiveSocket(): {
     connectRef.current();
   }, [clearTimers]);
 
-  // Connect on mount, and reconnect whenever auth state changes (token may have
-  // been added/removed, which changes the ?token= query on the WS URL).
+  // Connect on mount, and reconnect whenever auth state or the API base
+  // changes (token may have been added/removed, which changes the ?token=
+  // query on the WS URL; ?api= changes the host outright).
   useEffect(() => {
     intentionalCloseRef.current = false;
     attemptsRef.current = 0;
@@ -276,7 +282,7 @@ export function useLiveSocket(): {
       closeSocket();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [token, isAuthed]);
+  }, [token, isAuthed, apiBase]);
 
   return {
     status,

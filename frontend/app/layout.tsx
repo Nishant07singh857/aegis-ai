@@ -1,7 +1,7 @@
 import type { Metadata } from "next";
 import type { ReactNode } from "react";
 import { AuthProvider } from "@/lib/auth";
-import { TopBar } from "@/components/topbar";
+import { Chrome } from "@/components/chrome";
 import "./globals.css";
 
 export const metadata: Metadata = {
@@ -19,10 +19,7 @@ export default function RootLayout({ children }: { children: ReactNode }) {
     <html lang="en">
       <body>
         <AuthProvider>
-          <TopBar />
-          <main className="mx-auto max-w-7xl px-4 py-6 sm:px-6">
-            {children}
-          </main>
+          <Chrome>{children}</Chrome>
         </AuthProvider>
       </body>
     </html>
