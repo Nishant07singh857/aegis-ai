@@ -1,1 +1,85 @@
-# Auto-generated placeholder for docker-compose.prod.yml
+# =============================================================================
+# AEGIS AI — production stack
+#
+# Production images only, no source-code mounts, no published DB/Redis ports.
+# All secrets come from the environment and are REQUIRED — compose refuses to
+# start if any of them is missing:
+#
+#   export POSTGRES_PASSWORD='<strong-db-password>'
+#   export SECRET_KEY='<strong-random-secret>'
+#   docker compose -f infrastructure/docker/docker-compose.prod.yml up -d --build
+#
+# Frontend is served on localhost:3000. Put it behind TLS (nginx/traefik) and
+# set NEXT_PUBLIC_API_URL to the public API origin at build time:
+#
+#   NEXT_PUBLIC_API_URL=https://api.example.com docker compose \
+#       -f infrastructure/docker/docker-compose.prod.yml up -d --build
+# =============================================================================
+
+name: aegis-prod
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: aegis
+      POSTGRES_USER: aegis
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in the environment}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U aegis -d aegis"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+
+  backend:
+    build:
+      context: ../..
+      dockerfile: backend/Dockerfile
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql+asyncpg://aegis:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in the environment}@postgres:5432/aegis
+      REDIS_URL: redis://redis:6379/0
+      ENVIRONMENT: production
+      SECRET_KEY: ${SECRET_KEY:?SECRET_KEY must be set in the environment}
+      # Required: the backend refuses to boot in production without a stable
+      # Fernet key (see app/core/security.py). Generate with:
+      # python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+      FERNET_KEY: ${FERNET_KEY:?FERNET_KEY must be set in the environment}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  frontend:
+    build:
+      context: ../..
+      dockerfile: frontend/Dockerfile
+      args:
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:?NEXT_PUBLIC_API_URL must be set in the environment}
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    depends_on:
+      - backend
+
+volumes:
+  pgdata:
+  redisdata:

@@ -1,1 +1,97 @@
-# Auto-generated placeholder for docker-compose.dev.yml
+# =============================================================================
+# AEGIS AI — development stack
+#
+# Run from the repo root:
+#   docker compose -f infrastructure/docker/docker-compose.dev.yml up --build
+#
+# Services:
+#   postgres  -> localhost:5432  (user aegis, db aegis)
+#   redis     -> localhost:6379
+#   backend   -> localhost:8000  (FastAPI, uvicorn --reload)
+#   frontend  -> localhost:3000  (Next.js dev server)
+#
+# Hot-reload: backend and frontend sources are bind-mounted, so edits on the
+# host take effect without rebuilding. The backend mount intentionally covers
+# only app/, alembic/ and alembic.ini — NOT all of /app — so the container's
+# own virtualenv at /app/.venv is not shadowed by the mount.
+# =============================================================================
+
+name: aegis-dev
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: aegis
+      POSTGRES_USER: aegis
+      # Dev-only convenience default. This password is ONLY for local
+      # development; never reuse it in staging or production. Override with
+      # POSTGRES_PASSWORD in a local .env file next to this compose file.
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-aegis_dev_only}
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U aegis -d aegis"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "6379:6379"
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+
+  backend:
+    build:
+      context: ../..
+      dockerfile: backend/Dockerfile.dev
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+    volumes:
+      - ../../backend/app:/app/app
+      - ../../backend/alembic:/app/alembic
+      - ../../backend/alembic.ini:/app/alembic.ini
+    ports:
+      - "8000:8000"
+    env_file:
+      - ../../backend/.env.development
+    environment:
+      # Explicit values win over env_file, wiring the backend to the
+      # compose-provided services instead of localhost.
+      DATABASE_URL: postgresql+asyncpg://aegis:${POSTGRES_PASSWORD:-aegis_dev_only}@postgres:5432/aegis
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  frontend:
+    build:
+      context: ../..
+      dockerfile: frontend/Dockerfile.dev
+    volumes:
+      - ../../frontend:/app
+      # Anonymous volume so the source mount above does not hide node_modules.
+      - /app/node_modules
+    ports:
+      - "3000:3000"
+    environment:
+      NEXT_PUBLIC_API_URL: http://localhost:8000
+    depends_on:
+      - backend
+
+volumes:
+  pgdata:
+  redisdata:

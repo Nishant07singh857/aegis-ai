@@ -1,0 +1,59 @@
+# syntax=docker/dockerfile:1
+# =============================================================================
+# AEGIS AI — backend development image (single stage)
+#
+# Build context is the REPO ROOT:
+#   docker build -f backend/Dockerfile.dev -t aegis-backend:dev .
+# or via infrastructure/docker/docker-compose.dev.yml
+#
+# The image bakes the application source so it also runs standalone, but the
+# dev compose file bind-mounts the live source directories (app/, alembic/)
+# over /app — deliberately NOT the whole /app, so the in-project virtualenv
+# baked at /app/.venv is not shadowed by the mount.
+# =============================================================================
+
+ARG PYTHON_IMAGE=python:3.11-slim
+
+FROM ${PYTHON_IMAGE}
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    POETRY_VERSION=2.1.2 \
+    POETRY_NO_INTERACTION=1 \
+    POETRY_VIRTUALENVS_IN_PROJECT=true \
+    POETRY_VIRTUALENVS_CREATE=true \
+    PATH="/app/.venv/bin:${PATH}"
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends curl \
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd --system --gid 10001 aegis \
+    && useradd --system --uid 10001 --gid aegis --no-create-home \
+               --shell /usr/sbin/nologin aegis
+
+WORKDIR /app
+
+# Dependency manifests first for layer caching.
+COPY --chown=aegis:aegis backend/pyproject.toml backend/poetry.lock ./
+
+# Poetry is installed system-wide as root (the `aegis` user has no home
+# directory, so a `pip install --user` target would not exist); the venv and
+# all project files are created afterwards as `aegis`.
+RUN pip install --no-cache-dir "poetry==${POETRY_VERSION}" \
+    && chown aegis:aegis /app
+
+USER aegis
+
+# Dev dependencies are included (the dev compose stack needs pytest etc.).
+RUN poetry install --no-root
+
+# Application source (overlaid by bind mounts in compose).
+COPY --chown=aegis:aegis backend/app ./app
+COPY --chown=aegis:aegis backend/alembic ./alembic
+COPY --chown=aegis:aegis backend/alembic.ini ./alembic.ini
+
+EXPOSE 8000
+
+# Runs as the non-root `aegis` user with auto-reload for development.
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]

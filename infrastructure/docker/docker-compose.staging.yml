@@ -1,1 +1,86 @@
-# Auto-generated placeholder for docker-compose.staging.yml
+# =============================================================================
+# AEGIS AI — staging stack
+#
+# Identical images and configuration strictness as production, but with ports
+# published so the staging deployment can be verified from the host before a
+# production rollout:
+#
+#   export POSTGRES_PASSWORD='<staging-db-password>'
+#   export SECRET_KEY='<staging-secret-key>'
+#   docker compose -f infrastructure/docker/docker-compose.staging.yml up -d --build
+#
+#   backend   -> localhost:8000
+#   frontend  -> localhost:3000
+#
+# Staging intentionally reads no .env file: everything comes from the process
+# environment, exactly like production.
+# =============================================================================
+
+name: aegis-staging
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: aegis
+      POSTGRES_USER: aegis
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in the environment}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U aegis -d aegis"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+
+  backend:
+    build:
+      context: ../..
+      dockerfile: backend/Dockerfile
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      DATABASE_URL: postgresql+asyncpg://aegis:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in the environment}@postgres:5432/aegis
+      REDIS_URL: redis://redis:6379/0
+      ENVIRONMENT: production
+      SECRET_KEY: ${SECRET_KEY:?SECRET_KEY must be set in the environment}
+      # Required: the backend refuses to boot in production without a stable
+      # Fernet key (see app/core/security.py).
+      FERNET_KEY: ${FERNET_KEY:?FERNET_KEY must be set in the environment}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  frontend:
+    build:
+      context: ../..
+      dockerfile: frontend/Dockerfile
+      args:
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000}
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    depends_on:
+      - backend
+
+volumes:
+  pgdata:
+  redisdata:
