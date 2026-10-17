@@ -1,0 +1,250 @@
+# AEGIS AI — Live Streaming Guide
+
+AEGIS can broadcast itself to YouTube, Twitch, and Facebook at the same time,
+with nobody touching anything once it is running. This guide covers both ways
+to do it:
+
+1. **Automated streamer** (recommended) — a Docker service renders the
+   broadcast director page in a headless browser, captures it, and pushes it
+   to every platform you configured. Start it, walk away.
+2. **OBS, manually** — add the AEGIS overlay pages as OBS browser sources and
+   stream from OBS yourself. Zero code, full manual control.
+
+No paid APIs are involved anywhere. Stream keys are the only credentials, and
+they live in your environment — never in code, never in this repo.
+
+---
+
+## 1. Getting a stream key
+
+A stream key is a password that tells YouTube/Twitch/Facebook "this incoming
+video is mine". Treat it like a password: anyone with it can stream to your
+channel.
+
+### YouTube
+
+1. Open [YouTube Studio](https://studio.youtube.com) and sign in.
+2. Click **Create** (camera icon, top right) → **Go live**.
+3. If this is your first stream, YouTube asks you to verify your channel
+   (phone verification); brand-new accounts may have to wait 24 hours before
+   live streaming is enabled.
+4. In the live dashboard, under **Stream settings**, choose or create a
+   stream, then copy the **Stream key** (click the eye icon to reveal it).
+
+RTMP endpoint used: `rtmp://a.rtmp.youtube.com/live2/`
+
+### Twitch
+
+1. Open the [Twitch Creator Dashboard](https://dashboard.twitch.tv) and sign in.
+2. Go to **Settings → Stream**.
+3. Copy the **Primary Stream key** (click **Copy**).
+
+RTMP endpoint used: `rtmp://live.twitch.tv/app/`
+
+### Facebook
+
+1. Open [Facebook Live Producer](https://www.facebook.com/live/producer) and
+   sign in to the Page or profile you want to stream from.
+2. Select **Use stream key** as the video source.
+3. Copy the **Stream key** shown (the server URL is filled in automatically by
+   the streamer).
+
+RTMP endpoint used: `rtmps://live-api-s.facebook.com:443/rtmp/`
+
+---
+
+## 2. Where to put the keys
+
+Keys go in **environment variables**, passed to the streamer container at
+start time. They must never appear in code, Dockerfiles, compose files, or
+commits.
+
+```bash
+export YOUTUBE_STREAM_KEY='paste-your-key-here'
+export TWITCH_STREAM_KEY='paste-your-key-here'
+export FACEBOOK_STREAM_KEY='paste-your-key-here'
+```
+
+You only need the ones you actually stream to — set one, two, or all three.
+At least one must be set, or the streamer refuses to start and tells you why.
+
+If you prefer a file over exports, create a `.env` file in the directory
+where you run `docker compose`:
+
+```bash
+# .env — git-ignored, chmod 600, never committed
+YOUTUBE_STREAM_KEY=paste-your-key-here
+TWITCH_STREAM_KEY=paste-your-key-here
+```
+
+Docker Compose reads `.env` automatically. Keep the file readable only by
+you (`chmod 600 .env`) and never commit it.
+
+**If a key leaks** (pasted into chat, committed by accident, screenshared):
+go back to the platform dashboard above and **reset/regenerate** it, then
+update your environment. A leaked key lets anyone stream to your channel.
+
+---
+
+## 3. CPU requirements
+
+The streamer encodes with **software x264** (libx264) on the CPU — no GPU
+needed, but encoding is the most expensive thing the box does.
+
+| Output | What it needs (approximate) |
+|---|---|
+| 720p30 (default: 1280×720, 30 fps, 4.5 Mbps, `veryfast`) | ~4 vCPUs comfortably. This is the shipped default and the compose file caps the container at 4 CPUs / 4 GB RAM. |
+| 1080p30 | ~6–8 vCPUs with software x264. |
+| 1080p60 | A strong CPU (8+ fast cores) **or** a hardware encoder. |
+
+Hardware encoding (NVIDIA NVENC, Intel QuickSync) is the usual answer for
+1080p60 on modest hardware, but it is **not wired up yet** — the streamer
+image and entrypoint assume software x264. It is a natural future upgrade:
+pass through `/dev/dri` or the NVIDIA runtime and switch the encoder to
+`h264_nvenc` / `h264_qsv`.
+
+Rules of thumb:
+
+- One encode feeds all platforms (the tee muxer), so adding Twitch to a
+  YouTube stream costs almost no extra CPU — only network upload.
+- Upload bandwidth matters: budget ~6 Mbps up per 720p30 stream destination
+  headroom (bitrate + overhead + spikes).
+- If the picture stutters but audio is fine, you are CPU-bound: drop to a
+  faster preset (`VIDEO_PRESET=ultrafast`, lower quality) or fewer pixels
+  (`STREAM_WIDTH=960 STREAM_HEIGHT=540`).
+
+---
+
+## 4. Quick start — automated streamer
+
+From the repo root, with the base stack's secrets already exported (see
+`infrastructure/docker/docker-compose.prod.yml` header):
+
+```bash
+# 1. stream keys (at least one)
+export YOUTUBE_STREAM_KEY='...'
+export TWITCH_STREAM_KEY='...'
+
+# 2. start the stack plus the streamer
+docker compose -f infrastructure/docker/docker-compose.prod.yml \
+               -f infrastructure/docker/docker-compose.streaming.yml \
+               --profile streaming up -d --build
+
+# 3. watch it work
+docker compose -f infrastructure/docker/docker-compose.prod.yml \
+               -f infrastructure/docker/docker-compose.streaming.yml \
+               --profile streaming logs -f streamer
+```
+
+What happens: the `streamer` service waits for the frontend, opens the
+broadcast director output page
+(`http://frontend:3000/broadcast/output?bg=brand` by default — the full-frame
+layout built for headless capture, with an opaque branded plate) in Chromium
+on a virtual display, captures it at 1280×720 @ 30 fps, encodes x264, and
+pushes to every platform whose key you set. You are live within about half a
+minute of the page loading.
+
+Stop the stream:
+
+```bash
+docker compose -f infrastructure/docker/docker-compose.prod.yml \
+               -f infrastructure/docker/docker-compose.streaming.yml \
+               --profile streaming stop streamer
+```
+
+The service uses `restart: "no"` on purpose — a broadcast is a deliberate
+session, not a background daemon. It does not auto-restart after a crash or
+a host reboot; start it when you mean to go live.
+
+### Environment reference
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `YOUTUBE_STREAM_KEY` | *(empty)* | YouTube stream key. At least one key required. |
+| `TWITCH_STREAM_KEY` | *(empty)* | Twitch stream key. |
+| `FACEBOOK_STREAM_KEY` | *(empty)* | Facebook stream key. |
+| `DIRECTOR_URL` | `http://frontend:3000/broadcast/output?bg=brand` | Page the streamer captures. `?bg=brand` = opaque plate (for direct capture); omit it for a transparent background (for downstream compositing). Any overlay URL works for a widget-only stream. |
+| `STREAM_WIDTH` / `STREAM_HEIGHT` | `1280` / `720` | Capture resolution. |
+| `STREAM_FPS` | `30` | Capture frame rate. |
+| `VIDEO_BITRATE` | `4500k` | x264 target bitrate (`k` or `M` suffix). |
+| `VIDEO_PRESET` | `veryfast` | x264 preset; `ultrafast` = less CPU, lower quality; `medium` = more CPU, better quality. |
+
+### Troubleshooting
+
+- **Container exits immediately with "no stream destination configured"** —
+  you started the profile without exporting any `*_STREAM_KEY`. Set at least
+  one and re-run.
+- **"frontend did not answer after 60s"** — the base stack isn't up. Start
+  the base compose file first, then add the overlay, or just run the combined
+  command above (the streamer waits via `depends_on`).
+- **Chromium shows a blank page** — the director page needs the backend API;
+  check `docker compose logs backend`. The streamer also needs the frontend
+  built with the right `NEXT_PUBLIC_API_URL` (see the prod compose header).
+- **"Stream key invalid" on the platform** — keys are single-line secrets;
+  re-copy from the dashboard and check for trailing spaces or newlines in
+  your `.env`.
+- **Dropped frames / choppy motion** — CPU-bound. See §3: faster preset,
+  lower resolution, or a bigger host.
+
+---
+
+## 5. The OBS alternative (manual, zero code)
+
+If you prefer to run the show yourself — or you want to mix AEGIS graphics
+with your own webcam/commentary — skip the streamer and use OBS Studio.
+
+Every AEGIS broadcast surface is a plain web page, so each one works as an
+**OBS Browser Source** (add Source → Browser, paste the URL, set the size):
+
+| Page | URL (frontend on localhost:3000) | Use |
+|---|---|---|
+| Director console | `http://localhost:3000/broadcast` | Full operator view: POV control, teams, commentary. |
+| Director output (capture-ready) | `http://localhost:3000/broadcast/output?bg=brand` | Full-frame 1920×1080 layout (scorebug + kill ticker + lower third) built for headless capture; `?bg=brand` adds the opaque plate. This is what the automated streamer captures. |
+| Scorebug | `http://localhost:3000/overlays/scorebug` | Top-of-screen score strip. |
+| Kill feed | `http://localhost:3000/overlays/killfeed` | Kill event ticker. |
+| Standings | `http://localhost:3000/overlays/standings` | Tournament standings panel. |
+| Lower third | `http://localhost:3000/overlays/lower-third` | Player/caster name strap. |
+
+All five update live over the backend websocket feed — no page refreshes, no
+mock data. In OBS you then stream to YouTube/Twitch/Facebook with the same
+stream keys from §1 (OBS Settings → Stream), and you can layer your own
+camera, microphone, and scenes on top. This is the fastest way to get on air
+today and the easiest way to combine AEGIS graphics with a human caster.
+
+---
+
+## 6. Honest limits — what the stream shows today
+
+- **There is no real game video feed yet.** The vision pipeline
+  (`backend/app/vision/`) is built to ingest a match feed, but nothing is
+  feeding it real gameplay right now. What you see on the director page and
+  overlays is the real layout, real components, and real websocket plumbing —
+  driven by the **simulated match engine**, not a live match.
+- **Audio is a silent track.** The streamer muxes a silent AAC track because
+  platforms expect one; there is no game audio, no commentary audio, no TTS
+  on the stream today. (The commentary *text* feed in the app is real.)
+- **The picture is the web UI**, captured at 720p. It looks like a broadcast
+  graphics package, not a game client — because that is what it is.
+
+The path to a real match broadcast is: get a real game feed into the vision
+ingestion pipeline (screen capture, observer client, or tournament API) →
+the overlays and director keep working unchanged, because they already
+render from live events. Real game capture is your future step, not
+something this guide pretends exists.
+
+---
+
+## 7. Files involved
+
+- `infrastructure/docker/Dockerfile.streamer` — ffmpeg + Chromium + Xvfb
+  image (Debian bookworm, release-pinned).
+- `infrastructure/docker/streamer-entrypoint.sh` — virtual display →
+  Chromium → x11grab → x264 → multi-RTMP (tee muxer).
+- `infrastructure/docker/docker-compose.streaming.yml` — overlay adding the
+  `streamer` service (profile `streaming`) on top of prod/staging. It does
+  not modify any base compose file.
+- `frontend/app/broadcast/page.tsx` — director console (operator view).
+- `frontend/app/broadcast/output/page.tsx` — capture-ready director output
+  (default streamer target; `?bg=brand` for the opaque plate).
+- `frontend/app/overlays/{scorebug,killfeed,standings,lower-third}/page.tsx`
+  — OBS-ready overlay routes.

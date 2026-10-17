@@ -23,6 +23,7 @@ from app.api.deps import (
 )
 from app.api.v1.teams.demo_data import DEMO_TEAMS
 from app.api.v1.teams.router import router as teams_router
+from app.api.v1.stream.router import router as stream_router
 from app.intelligence.director_ai import DirectorAIEngine, BroadcastEvent, EventPriority as DirPriority
 from app.intelligence.commentary_engine import get_commentary_engine
 from app.db.session import init_db
@@ -562,6 +563,9 @@ app.add_middleware(RateLimitMiddleware)
 # rather than through app/api/v1/router.py (deleted) — teams is the only
 # domain extracted from main.py so far.
 app.include_router(teams_router, prefix="/api/v1", tags=["Teams"])
+
+# Phase 5: automated live streaming (admin-gated start/stop, authenticated status).
+app.include_router(stream_router, prefix="/api/v1", tags=["Stream"])
 
 @app.get("/")
 async def root():

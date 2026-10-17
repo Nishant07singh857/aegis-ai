@@ -6,6 +6,7 @@ import { useRouter } from "next/navigation";
 import { apiFetch } from "../lib/api";
 import { useAuth } from "../lib/auth";
 import { Badge, Card, EmptyState, ErrorState, Loading } from "../components/ui";
+import { StreamControl } from "../components/stream-control";
 
 interface SystemInfo {
   status?: string;
@@ -212,6 +213,8 @@ export default function AdminPage() {
             </div>
           )}
         </Card>
+
+        <StreamControl token={token} onSessionExpired={handleExpired} />
 
         <Card title="Agents">
           {!agents.data && !agents.error && <Loading label="Loading agents…" />}

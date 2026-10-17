@@ -1,0 +1,72 @@
+# =============================================================================
+# AEGIS AI — streaming overlay
+#
+# Adds the automated `streamer` service to an existing stack WITHOUT changing
+# any base compose file. Use it on top of prod or staging:
+#
+#   docker compose -f infrastructure/docker/docker-compose.prod.yml \
+#                  -f infrastructure/docker/docker-compose.streaming.yml \
+#                  --profile streaming up -d --build
+#
+# WHAT YOU MUST PROVIDE (the user, before starting):
+#   1. At least ONE stream key, as a process environment variable:
+#        export YOUTUBE_STREAM_KEY='...'   # from YouTube Studio -> Go Live
+#        export TWITCH_STREAM_KEY='...'    # from Twitch Creator Dashboard
+#        export FACEBOOK_STREAM_KEY='...'  # from Facebook Live Producer
+#      Keys are NEVER written into this file or into code. If you keep them
+#      in a file, use a `.env` next to this command that is git-ignored and
+#      chmod 600. Rotate a key in the platform dashboard if it ever leaks.
+#   2. CPU: 720p30 software x264 (the default below) needs roughly 4 vCPUs
+#      to encode comfortably. The service is capped at 4 CPUs / 4 GB RAM;
+#      raise `deploy.resources.limits` on a bigger host if you move to
+#      1080p, or switch to a hardware encoder (NVENC/QuickSync — not wired
+#      up yet, see docs/STREAMING.md).
+#
+# The streamer renders DIRECTOR_URL in Chromium on a virtual display and
+# pushes the result to every platform whose key is set (tee muxer, one
+# encode, many RTMP outputs).
+# =============================================================================
+
+services:
+  streamer:
+    build:
+      context: ../..
+      dockerfile: infrastructure/docker/Dockerfile.streamer
+    image: aegis-streamer:local
+    profiles:
+      - streaming
+    restart: "no" # a stream is a deliberate session, not a daemon: start it on purpose, stop it with Ctrl-C / docker compose stop
+    depends_on:
+      backend:
+        condition: service_started
+      frontend:
+        condition: service_started
+    shm_size: "1gb" # Chromium needs shared memory; /dev/shm is tiny in containers by default
+    environment:
+      # Page the streamer captures. Defaults to the broadcast director OUTPUT
+      # page on the compose `frontend` service: a full-frame layout designed
+      # for headless capture (scorebug + kill ticker + lower third in one
+      # frame). ?bg=brand gives it an opaque plate; drop it (transparent)
+      # only when compositing downstream. Point it at any single overlay URL
+      # (e.g. http://frontend:3000/overlays/scorebug) for a widget-only stream.
+      DIRECTOR_URL: ${DIRECTOR_URL:-http://frontend:3000/broadcast/output?bg=brand}
+      # 720p30 software x264 defaults. 1080p60 needs a much stronger CPU —
+      # see the header comment and docs/STREAMING.md.
+      STREAM_WIDTH: ${STREAM_WIDTH:-1280}
+      STREAM_HEIGHT: ${STREAM_HEIGHT:-720}
+      STREAM_FPS: ${STREAM_FPS:-30}
+      VIDEO_BITRATE: ${VIDEO_BITRATE:-4500k}
+      VIDEO_PRESET: ${VIDEO_PRESET:-veryfast}
+      # Stream keys: env-only. At least one must be set or the container
+      # exits with a clear error (no key is ever baked into the image).
+      YOUTUBE_STREAM_KEY: ${YOUTUBE_STREAM_KEY:-}
+      TWITCH_STREAM_KEY: ${TWITCH_STREAM_KEY:-}
+      FACEBOOK_STREAM_KEY: ${FACEBOOK_STREAM_KEY:-}
+    deploy:
+      resources:
+        limits:
+          cpus: "4.0"
+          memory: 4G
+        reservations:
+          cpus: "2.0"
+          memory: 2G

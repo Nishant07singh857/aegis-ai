@@ -1,0 +1,46 @@
+# syntax=docker/dockerfile:1
+# =============================================================================
+# AEGIS AI — streamer image (automated broadcast)
+#
+# Renders the broadcast director page in Chromium on a virtual X display
+# (Xvfb), captures it with FFmpeg x11grab, encodes with software x264, and
+# pushes to YouTube / Twitch / Facebook over RTMP via the tee muxer.
+#
+# Build context is the REPO ROOT:
+#   docker build -f infrastructure/docker/Dockerfile.streamer -t aegis-streamer .
+# or via infrastructure/docker/docker-compose.streaming.yml (overlay).
+#
+# - Base: debian:bookworm-slim (release-pinned, never :latest)
+# - ffmpeg, chromium and xvfb come from the Debian bookworm package set
+# - Stream keys are NEVER baked in: they arrive only as container env vars
+# - Chromium runs with --no-sandbox (required in unprivileged containers;
+#   standard container practice, documented in the entrypoint)
+# =============================================================================
+
+FROM debian:bookworm-slim
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# One layer: install, then drop the apt cache. curl is needed by the
+# entrypoint's frontend readiness check; procps gives kill/pgrep for cleanup.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        chromium \
+        curl \
+        ffmpeg \
+        procps \
+        xvfb \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY infrastructure/docker/streamer-entrypoint.sh /usr/local/bin/stream.sh
+RUN chmod +x /usr/local/bin/stream.sh
+
+# Sanity: the capture/encode toolchain must be present at build time.
+# (Fails the build if libx264 is missing from the packaged ffmpeg.)
+RUN set -e; \
+    ffmpeg -hide_banner -encoders 2>/dev/null | grep -q libx264; \
+    chromium --version; \
+    Xvfb -help 2>&1 | head -n 1 | grep -qi xvfb
+
+ENTRYPOINT ["/usr/local/bin/stream.sh"]
