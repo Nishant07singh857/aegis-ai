@@ -1,0 +1,49 @@
+@import "tailwindcss";
+
+/* AEGIS AI — dark esports-console theme.
+   Near-black background, cyan accent, danger red. Panels use
+   bg-white/5 border border-white/10 rounded-xl. font-mono for data/labels. */
+
+:root {
+  --aegis-bg: #0a0a0f;
+  --aegis-panel: rgba(255, 255, 255, 0.05);
+  --aegis-accent: #00f0ff;
+  --aegis-danger: #ff3366;
+  --aegis-text: #e4e4e7;
+  --aegis-muted: #a1a1aa;
+}
+
+html {
+  background-color: var(--aegis-bg);
+  color-scheme: dark;
+}
+
+body {
+  background-color: var(--aegis-bg);
+  color: var(--aegis-text);
+  min-height: 100vh;
+  font-family:
+    ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+::selection {
+  background: rgba(0, 240, 255, 0.25);
+}
+
+/* Thin scrollbars that stay out of the way on dense console screens. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.15) transparent;
+}
+*::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+*::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.15);
+  border-radius: 4px;
+}
+*::-webkit-scrollbar-track {
+  background: transparent;
+}

@@ -1,0 +1,24 @@
+# frontend/.dockerignore
+
+.git
+.gitignore
+.env
+.env*
+!/.env.example
+
+node_modules
+.next
+out
+dist
+build
+
+*.log
+*.tgz
+
+Dockerfile
+Dockerfile.dev
+.dockerignore
+
+coverage
+.nyc_output
+*.md

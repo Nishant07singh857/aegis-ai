@@ -1,0 +1,28 @@
+# syntax=docker/dockerfile:1
+# =============================================================================
+# AEGIS AI — frontend development image (single stage)
+#
+# Build context is the REPO ROOT:
+#   docker build -f frontend/Dockerfile.dev -t aegis-frontend:dev .
+# or via infrastructure/docker/docker-compose.dev.yml, which bind-mounts the
+# live frontend/ source over /app (node_modules is kept in an anonymous volume
+# so the mount does not shadow the installed dependencies).
+# =============================================================================
+
+ARG NODE_IMAGE=node:20-alpine
+
+FROM ${NODE_IMAGE}
+
+ENV NEXT_TELEMETRY_DISABLED=1
+
+WORKDIR /app
+
+# Install from manifests first for layer caching; source comes via bind mount.
+COPY frontend/package.json frontend/package-lock.json* ./
+
+RUN npm install
+
+EXPOSE 3000
+
+# Next.js dev server must bind 0.0.0.0 to be reachable outside the container.
+CMD ["npm", "run", "dev", "--", "--hostname", "0.0.0.0", "--port", "3000"]

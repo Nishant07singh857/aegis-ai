@@ -1,0 +1,17 @@
+# dependencies
+node_modules/
+
+# next.js build output
+.next/
+out/
+
+# typescript build info
+*.tsbuildinfo
+
+# local env files (never commit real secrets)
+.env*.local
+.env.development
+.env.production
+
+# misc
+.DS_Store
