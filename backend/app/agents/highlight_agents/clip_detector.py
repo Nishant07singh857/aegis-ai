@@ -12,7 +12,7 @@ from enum import Enum
 from collections import deque
 import structlog
 from ..base_agent import BaseAgent, AgentConfig
-from ...core.event_bus import EventBus, EventRecord
+from ...core.event_bus import EventBus, EventPriority, EventRecord
 
 logger = structlog.get_logger("aegis.agents.clip_detector")
 
@@ -649,6 +649,8 @@ class ClipDetector(BaseAgent):
         self.subscribe_to_event("clutch_detected")
         self.subscribe_to_event("highlight_moment")
         self.subscribe_to_event("fight_detected")
+        # Chain: script generator -> clip detector -> highlight pipeline
+        self.subscribe_to_event("commentary.line")
 
     async def tick(self) -> None:
         """Periodic maintenance tick."""
@@ -658,14 +660,63 @@ class ClipDetector(BaseAgent):
     async def handle_event(self, record: EventRecord) -> None:
         """Handle an event from the event bus.
 
-        The heuristic engine is driven synchronously via direct method
-        calls; this hook keeps match context current for future
-        event-driven use.
+        commentary.line events run through the real clip pipeline
+        (detect_clip) and publish highlight.clip_ready when a clip
+        candidate is produced. All paths are exception-guarded.
         """
         try:
-            data = record.event.data if hasattr(record, "event") else {}
-            if isinstance(data, dict) and data.get("match_id"):
+            event = getattr(record, "event", None)
+            event_type = getattr(event, "event_type", "") if event else ""
+            data = getattr(event, "data", {}) if event else {}
+            if not isinstance(data, dict):
+                return
+
+            if data.get("match_id"):
                 self.config.match_id = data["match_id"]
+
+            if event_type != "commentary.line":
+                return
+
+            clip_event_type = str(data.get("clip_event_type") or "multi_kill")
+            match_id = data.get("match_id") or self.config.match_id
+
+            event_data = {
+                "player_name": "Unknown",
+                "team_name": "",
+                "kill_count": 3,
+                "time_span": 10,
+                "timestamp_ms": int(time.time() * 1000),
+                "commentary_text": str(data.get("text", ""))[:300],
+                "trigger": data.get("trigger", ""),
+                "hype_level": data.get("hype_level", ""),
+            }
+            match_context = {"match_id": match_id}
+            fight_context = {"fight_id": data.get("fight_id", "")}
+
+            clip = self.detect_clip(
+                clip_event_type, event_data, match_context, fight_context
+            )
+            if clip is None:
+                return
+
+            try:
+                await self.event_bus.publish(
+                    event_type="highlight.clip_ready",
+                    data={
+                        "clip_id": clip.clip_id,
+                        "category": clip.category.value,
+                        "quality": clip.quality.value,
+                        "title": clip.title,
+                        "excitement_score": round(clip.excitement_score, 1),
+                        "fight_id": data.get("fight_id"),
+                        "match_id": match_id,
+                    },
+                    priority=EventPriority.LOW,
+                    source=self.config.agent_id,
+                    match_id=match_id,
+                )
+            except Exception as e:
+                self._log.warning(f"Failed to publish highlight.clip_ready: {e}")
         except Exception:
             pass
 

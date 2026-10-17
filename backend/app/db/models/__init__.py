@@ -4,6 +4,17 @@ AEGIS AI - ORM Models package.
 Import modules here so `Base.metadata` is fully populated when the app initializes.
 """
 
+from .enums import (  # noqa: F401
+    BroadcastMode,
+    EventType,
+    FightIntensity,
+    HighlightType,
+    MatchMap,
+    MatchStatus,
+    PlayerRole,
+    TournamentFormat,
+    TournamentStatus,
+)
 from .tournament import Tournament  # noqa: F401
 from .match import Match  # noqa: F401
 from .team import Team  # noqa: F401
@@ -18,3 +29,6 @@ from .commentary import Commentary  # noqa: F401
 from .prediction import Prediction  # noqa: F401
 from .team_intelligence import TeamIntelligence  # noqa: F401
 from .broadcast_session import BroadcastSession  # noqa: F401
+from .user import User  # noqa: F401
+from .api_key import ApiKey  # noqa: F401
+from .audit_log import AuditLog  # noqa: F401

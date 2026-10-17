@@ -13,7 +13,7 @@ from collections import deque
 from enum import Enum
 import structlog
 from ..base_agent import BaseAgent, AgentConfig
-from ...core.event_bus import EventBus, EventRecord
+from ...core.event_bus import EventBus, EventPriority, EventRecord
 
 logger = structlog.get_logger("aegis.agents.fight_detector")
 
@@ -227,7 +227,12 @@ class FightDetector(BaseAgent):
     def __init__(self, config: AgentConfig, event_bus: EventBus):
         super().__init__(config, event_bus)
         self.detection_state = FightDetectionState()
-        
+
+        # Events queued by _promote_to_active(); tick() flushes them to the
+        # bus. Kept out of the hot signal path so detection never blocks on
+        # event-bus I/O (Redis down => publish is a no-op, never raises).
+        self._pending_fight_events: List[Dict[str, Any]] = []
+
         # Detection thresholds
         self.thresholds = {
             "hp_drop_min_damage": 20,        # Minimum HP drop to consider
@@ -617,8 +622,38 @@ class FightDetector(BaseAgent):
             f"Detection: {detection_time:.0f}ms | "
             f"Confidence: {potential.fight_probability:.2f}"
         )
-        
+
+        # Queue the chain event; tick() flushes it to the bus.
+        self._pending_fight_events.append(
+            {
+                "fight_id": active_fight_id,
+                "teams_involved": sorted(active_fight.teams_involved),
+                "intensity": round(active_fight.current_intensity, 1),
+                "fight_type": fight_type.value,
+                "location": {
+                    "x": round(active_fight.location_x, 1),
+                    "y": round(active_fight.location_y, 1),
+                },
+                "match_id": self.config.match_id,
+            }
+        )
+
         return active_fight_id
+
+    async def _flush_pending_fight_events(self) -> None:
+        """Publish queued fight.detected events (best-effort, never raises)."""
+        while self._pending_fight_events:
+            payload = self._pending_fight_events.pop(0)
+            try:
+                await self.event_bus.publish(
+                    event_type="fight.detected",
+                    data=payload,
+                    priority=EventPriority.HIGH,
+                    source=self.config.agent_id,
+                    match_id=payload.get("match_id") or self.config.match_id,
+                )
+            except Exception as e:
+                self._log.warning(f"Failed to publish fight.detected: {e}")
     
     def _determine_fight_type(self, fight: PotentialFight) -> FightType:
         """Determine the type of fight"""
@@ -965,18 +1000,35 @@ class FightDetector(BaseAgent):
     async def tick(self) -> None:
         """Periodic maintenance tick."""
         self.cleanup_stale_fights()
+        # Flush fight.detected events queued by _promote_to_active().
+        await self._flush_pending_fight_events()
 
     async def handle_event(self, record: EventRecord) -> None:
         """Handle an event from the event bus.
 
-        The heuristic engine is driven synchronously via direct method
-        calls; this hook keeps match context current for future
-        event-driven use.
+        kill_confirmed events drive the real signal pipeline
+        (process_kill_feed); every path also keeps match context current.
         """
         try:
-            data = record.event.data if hasattr(record, "event") else {}
-            if isinstance(data, dict) and data.get("match_id"):
+            event = getattr(record, "event", None)
+            event_type = getattr(event, "event_type", "") if event else ""
+            data = getattr(event, "data", {}) if event else {}
+            if not isinstance(data, dict):
+                return
+
+            if data.get("match_id"):
                 self.config.match_id = data["match_id"]
+
+            if event_type == "kill_confirmed":
+                self.process_kill_feed(
+                    killer_id=data.get("killer_id", ""),
+                    killer_team_id=data.get("killer_team_id", ""),
+                    victim_id=data.get("victim_id", ""),
+                    victim_team_id=data.get("victim_team_id", ""),
+                    location_x=float(data.get("location_x", 0.0) or 0.0),
+                    location_y=float(data.get("location_y", 0.0) or 0.0),
+                    weapon=data.get("weapon"),
+                )
         except Exception:
             pass
 

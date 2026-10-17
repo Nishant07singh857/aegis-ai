@@ -569,19 +569,21 @@ class TestObserverDirector:
         assert "player_star" in director.priority_players
         assert "player_clutch" in director.priority_players
     
-    def test_force_switch_manual_override(self, director):
+    async def test_force_switch_manual_override(self, director):
         """Test manual force switch (human override)"""
         target = {
             "feed_type": "team_pov",
             "team_id": "team_override",
             "player_id": None,
         }
-        
-        director.force_switch(target)
-        
-        # Force switch creates an async task - verify it was triggered
-        # The actual switch happens asynchronously
-        assert True  # If no exception, test passes
+
+        # force_switch returns the switch task; await it so the switch
+        # completes before asserting on the new scene.
+        switch_task = director.force_switch(target)
+        await switch_task
+
+        assert director.director_state.current_scene is not None
+        assert director.director_state.current_scene.team_id == "team_override"
     
     def test_reset_for_match(self, director):
         """Test resetting director for new match"""

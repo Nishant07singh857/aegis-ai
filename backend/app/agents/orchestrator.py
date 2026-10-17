@@ -13,7 +13,7 @@ import structlog
 
 from .base_agent import BaseAgent, AgentConfig, AgentPriority
 from .agent_registry import AgentRegistry
-from ..core.event_bus import EventBus
+from ..core.event_bus import EventBus, EventPriority
 from ..config import settings
 
 # Import all agent types
@@ -566,6 +566,47 @@ class AgentOrchestrator:
             low=len(self.registry.get_agents_by_priority(AgentPriority.LOW)),
             background=len(self.registry.get_agents_by_priority(AgentPriority.BACKGROUND)),
         )
+
+        # Lifecycle chain event: one agent.registered per initialized agent.
+        # Best-effort; the real bus drops (never raises) when Redis is down,
+        # and the smoke fake dispatches only to matching subscribers.
+        for agent_id, agent in self.agents.items():
+            await self._publish_lifecycle(
+                "agent.registered",
+                {
+                    "agent_id": agent_id,
+                    "agent_type": agent.config.agent_type,
+                    "priority": agent.config.priority.name,
+                },
+                EventPriority.LOW,
+            )
+
+    async def _publish_lifecycle(
+        self,
+        event_type: str,
+        data: Dict[str, Any],
+        priority: EventPriority = EventPriority.MEDIUM,
+    ) -> None:
+        """
+        Publish an agent lifecycle event.
+
+        Kwargs (event_type, data, priority, source, match_id) are compatible
+        with both the real EventBus.publish and the smoke-test fake. Never
+        raises: publish itself never raises on Redis-down, and this is
+        additionally guarded.
+        """
+        try:
+            await self.event_bus.publish(
+                event_type=event_type,
+                data=data,
+                priority=priority,
+                source="orchestrator",
+                match_id=self.state.match_id,
+            )
+        except Exception as e:
+            self._log.warning(
+                f"Lifecycle publish failed ({event_type}): {e}"
+            )
     
     def _make_config(
         self,
@@ -644,16 +685,32 @@ class AgentOrchestrator:
     
     async def _start_agent_safely(self, agent: BaseAgent) -> bool:
         """Start an agent with error handling"""
+        agent_id = agent.config.agent_id
         try:
             await agent.start()
-            self.registry.mark_active(agent.config.agent_id)
+            self.registry.mark_active(agent_id)
+            await self._publish_lifecycle(
+                "agent.started",
+                {"agent_id": agent_id, "agent_type": agent.config.agent_type},
+                EventPriority.LOW,
+            )
             return True
         except Exception as e:
             self._log.error(
-                f"Failed to start agent {agent.config.agent_id}: {e}"
+                f"Failed to start agent {agent_id}: {e}"
             )
             self.state.startup_errors.append(
-                f"{agent.config.agent_id}: {str(e)}"
+                f"{agent_id}: {str(e)}"
+            )
+            await self._publish_lifecycle(
+                "agent.failed",
+                {
+                    "agent_id": agent_id,
+                    "agent_type": agent.config.agent_type,
+                    "error": str(e)[:300],
+                    "phase": "start",
+                },
+                EventPriority.HIGH,
             )
             return False
     
@@ -690,13 +747,19 @@ class AgentOrchestrator:
     
     async def _stop_agent_safely(self, agent: BaseAgent) -> bool:
         """Stop an agent with error handling"""
+        agent_id = agent.config.agent_id
         try:
             await agent.stop()
-            self.registry.mark_inactive(agent.config.agent_id)
+            self.registry.mark_inactive(agent_id)
+            await self._publish_lifecycle(
+                "agent.stopped",
+                {"agent_id": agent_id, "agent_type": agent.config.agent_type},
+                EventPriority.LOW,
+            )
             return True
         except Exception as e:
             self._log.error(
-                f"Failed to stop agent {agent.config.agent_id}: {e}"
+                f"Failed to stop agent {agent_id}: {e}"
             )
             return False
     

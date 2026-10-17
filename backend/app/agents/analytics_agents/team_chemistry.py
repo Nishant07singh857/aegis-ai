@@ -12,7 +12,7 @@ from enum import Enum
 from collections import deque
 import structlog
 from ..base_agent import BaseAgent, AgentConfig
-from ...core.event_bus import EventBus, EventRecord
+from ...core.event_bus import EventBus, EventPriority, EventRecord
 
 logger = structlog.get_logger("aegis.agents.team_chemistry")
 
@@ -147,7 +147,13 @@ class TeamChemistryAnalyzer(BaseAgent):
             SynergyType.POSITIONING: 0.10,
             SynergyType.TARGET_FOCUS: 0.10,
         }
-        
+
+        # Cached inputs for the periodic refresh: analyze_team_chemistry
+        # stores its latest inputs per team; tick() re-runs the real
+        # analysis on a 60s cadence (in-memory, no network, no settings).
+        self._last_analysis_inputs: Dict[str, Dict[str, Any]] = {}
+        self._last_periodic_refresh = 0.0
+
         self._log = logger.bind(component="team_chemistry")
     
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -218,13 +224,22 @@ class TeamChemistryAnalyzer(BaseAgent):
         
         score.matches_analyzed += 1
         score.last_updated = time.time()
-        
+
+        # Cache inputs so tick() can re-run the real analysis periodically.
+        self._last_analysis_inputs[team_id] = {
+            "team_id": team_id,
+            "team_name": team_name,
+            "players": players,
+            "match_events": match_events,
+            "match_stats": match_stats,
+        }
+
         self._log.info(
             f"Team chemistry: {team_name}",
             score=round(score.overall_score, 1),
             level=score.chemistry_level.value,
         )
-        
+
         return score
     
     def _calculate_combat_synergy(
@@ -592,9 +607,41 @@ class TeamChemistryAnalyzer(BaseAgent):
         self.subscribe_to_event("fight_ended")
 
     async def tick(self) -> None:
-        """Periodic maintenance tick."""
-        # Heuristic engine is driven by direct method calls;
-        # nothing periodic is required here.
+        """Periodic maintenance tick.
+
+        Re-runs the real chemistry analysis for each cached team on a 60s
+        cadence and publishes analytics.chemistry_updated (LOW priority).
+        In-memory only: no network, no settings reads, smoke-safe.
+        """
+        now = time.time()
+        if now - self._last_periodic_refresh < 60.0:
+            return
+        self._last_periodic_refresh = now
+
+        for team_id, inputs in list(self._last_analysis_inputs.items()):
+            try:
+                score = self.analyze_team_chemistry(**inputs)
+            except Exception:
+                continue
+            try:
+                await self.event_bus.publish(
+                    event_type="analytics.chemistry_updated",
+                    data={
+                        "team_id": team_id,
+                        "team_name": score.team_name,
+                        "overall_score": round(score.overall_score, 1),
+                        "chemistry_level": score.chemistry_level.value,
+                        "matches_analyzed": score.matches_analyzed,
+                        "match_id": self.config.match_id,
+                    },
+                    priority=EventPriority.LOW,
+                    source=self.config.agent_id,
+                    match_id=self.config.match_id,
+                )
+            except Exception as e:
+                self._log.warning(
+                    f"Failed to publish analytics.chemistry_updated: {e}"
+                )
 
     async def handle_event(self, record: EventRecord) -> None:
         """Handle an event from the event bus.

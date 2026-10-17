@@ -8,7 +8,7 @@ transitions, audio mixing, replay system, and recording management.
 import pytest
 import asyncio
 import json
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, call
 
 from app.broadcast.obs_client import OBSClient, OBSConfig, OBSResponse, ConnectionState
 from app.broadcast.scene_manager import SceneManager, Scene, SceneItem, SceneType
@@ -824,7 +824,7 @@ class TestAudioMixer:
         assert audio_mixer.channel_volumes[AudioChannel.COMMENTARY] == 1.0
     
     @pytest.mark.asyncio
-    async def test_mute_unmute_channel(self, audio_mixer):
+    async def test_mute_unmute_channel(self, audio_mixer, mock_obs):
         """Test muting entire channel"""
         await audio_mixer.add_source("Game1", AudioChannel.GAME)
         await audio_mixer.add_source("Game2", AudioChannel.GAME)
@@ -832,7 +832,15 @@ class TestAudioMixer:
         await audio_mixer.mute_channel(AudioChannel.GAME)
         await audio_mixer.unmute_channel(AudioChannel.GAME)
         
-        assert True  # No exceptions
+        # mute_channel calls obs.set_mute(name, True) per GAME source,
+        # unmute_channel calls obs.set_mute(name, False) per GAME source.
+        assert mock_obs.set_mute.call_count == 4
+        assert mock_obs.set_mute.call_args_list == [
+            call("Game1", True),
+            call("Game2", True),
+            call("Game1", False),
+            call("Game2", False),
+        ]
     
     @pytest.mark.asyncio
     async def test_duck_for_commentary(self, audio_mixer):
@@ -850,7 +858,7 @@ class TestAudioMixer:
         assert audio_mixer.is_ducking is False
     
     @pytest.mark.asyncio
-    async def test_duck_for_replay(self, audio_mixer):
+    async def test_duck_for_replay(self, audio_mixer, mock_obs):
         """Test audio ducking during replay"""
         await audio_mixer.add_source("Game Audio", AudioChannel.GAME, 0.8)
         await audio_mixer.add_source("Commentary", AudioChannel.COMMENTARY, 1.0)
@@ -858,7 +866,17 @@ class TestAudioMixer:
         
         await audio_mixer.duck_for_replay()
         
-        assert True  # No exceptions
+        # Replay ducking reduces every non-REPLAY/non-MASTER source to 30%
+        # of its configured volume; the REPLAY source itself is untouched.
+        # (add_source also calls set_volume once per source, so the ducking
+        # calls are the final ones.)
+        duck_calls = mock_obs.set_volume.call_args_list[-2:]
+        assert len(duck_calls) == 2
+        calls = {c.args[0]: c.args[1] for c in duck_calls}
+        assert calls["Game Audio"] == pytest.approx(0.8 * 0.3)
+        assert calls["Commentary"] == pytest.approx(1.0 * 0.3)
+        # The REPLAY source is skipped by the ducking itself.
+        assert not any(c.args[0] == "Replay Audio" for c in duck_calls)
     
     def test_save_load_preset(self, audio_mixer):
         """Test saving and loading audio presets"""

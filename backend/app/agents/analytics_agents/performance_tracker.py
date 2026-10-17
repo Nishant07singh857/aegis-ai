@@ -150,6 +150,9 @@ class PerformanceTracker(BaseAgent):
         # Configuration
         self.recent_window = 10  # Matches for "recent form"
         self.trend_window = 20   # Matches for trend analysis
+
+        # Periodic trend refresh (30s cadence, in-memory, stdlib-only)
+        self._last_trend_refresh = 0.0
         
         self._log = logger.bind(component="performance_tracker")
     
@@ -509,9 +512,22 @@ class PerformanceTracker(BaseAgent):
         self.subscribe_to_event("match_state_change")
 
     async def tick(self) -> None:
-        """Periodic maintenance tick."""
-        # Heuristic engine is driven by direct method calls;
-        # nothing periodic is required here.
+        """Periodic maintenance tick.
+
+        Recomputes each tracked player's performance trend via the real
+        _determine_trend() on a 30s cadence. Pure in-memory stdlib work:
+        no network, no settings reads, smoke-safe.
+        """
+        now = time.time()
+        if now - self._last_trend_refresh < 30.0:
+            return
+        self._last_trend_refresh = now
+
+        for player_id, summary in list(self.player_summaries.items()):
+            try:
+                summary.trend = self._determine_trend(player_id)
+            except Exception:
+                continue
 
     async def handle_event(self, record: EventRecord) -> None:
         """Handle an event from the event bus.

@@ -636,5 +636,4 @@ class TestMatchService:
             tournament=sample_tournament,
             scheduled_time=datetime.utcnow() + timedelta(hours=2),
         )
-        # No exception = pass
-        assert True
+        # No exception raised: the schedule is valid (nothing to assert).

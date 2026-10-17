@@ -7,6 +7,7 @@ import structlog
 from typing import Dict, List, Optional
 from fastapi import Depends, FastAPI, WebSocket, WebSocketDisconnect, Request
 from fastapi.middleware.cors import CORSMiddleware
+from app.core.rate_limit_middleware import RateLimitMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.security import OAuth2PasswordRequestForm
 from contextlib import asynccontextmanager
@@ -20,6 +21,8 @@ from app.api.deps import (
     require_admin,
     verify_admin_login,
 )
+from app.api.v1.teams.demo_data import DEMO_TEAMS
+from app.api.v1.teams.router import router as teams_router
 from app.intelligence.director_ai import DirectorAIEngine, BroadcastEvent, EventPriority as DirPriority
 from app.intelligence.commentary_engine import get_commentary_engine
 from app.db.session import init_db
@@ -29,16 +32,10 @@ logger = structlog.get_logger("aegis.main")
 # ==========================================
 # CENTRALIZED STATE (Single Source of Truth)
 # ==========================================
-TEAMS = [
-    {"id": "t1", "name": "SouL", "tag": "SouL", "color": "#ff0055", "logo": "🔴", "rank": 1, "kills": 24, "placement_pts": 42, "total_pts": 66, "wwcd": 1, "alive": True, "players": ["Goblin", "Omega", "Viru", "Scout"]},
-    {"id": "t2", "name": "GodLike", "tag": "GodL", "color": "#00ffcc", "logo": "🟢", "rank": 2, "kills": 19, "placement_pts": 36, "total_pts": 55, "wwcd": 0, "alive": True, "players": ["Neyoo", "Zgod", "Clutchgod", "Jonathan"]},
-    {"id": "t3", "name": "Revenant", "tag": "RVNT", "color": "#ffcc00", "logo": "🟡", "rank": 3, "kills": 15, "placement_pts": 28, "total_pts": 43, "wwcd": 0, "alive": True, "players": ["Goldy", "Varinder", "Mavi", "Sagar"]},
-    {"id": "t4", "name": "Team XSpark", "tag": "XSK", "color": "#7c3aed", "logo": "🟣", "rank": 4, "kills": 12, "placement_pts": 24, "total_pts": 36, "wwcd": 0, "alive": True, "players": ["Jokerr", "Hyder", "Peaper", "Destro"]},
-    {"id": "t5", "name": "8Bit", "tag": "8BIT", "color": "#3b82f6", "logo": "🔵", "rank": 5, "kills": 10, "placement_pts": 20, "total_pts": 30, "wwcd": 0, "alive": True, "players": ["Bipop", "Owais", "Ghatak", "Lava"]},
-    {"id": "t6", "name": "Orangutan", "tag": "ORNG", "color": "#f97316", "logo": "🟠", "rank": 6, "kills": 8, "placement_pts": 16, "total_pts": 24, "wwcd": 0, "alive": True, "players": ["Bhavya", "Fanatic", "Harsh", "Rolex"]},
-    {"id": "t7", "name": "Blind Esports", "tag": "BLND", "color": "#10b981", "logo": "🟩", "rank": 7, "kills": 7, "placement_pts": 14, "total_pts": 21, "wwcd": 0, "alive": True, "players": ["Harpreet", "Rahul", "Karan", "Akash"]},
-    {"id": "t8", "name": "Fnatic", "tag": "FNC", "color": "#f59e0b", "logo": "⚡", "rank": 8, "kills": 6, "placement_pts": 12, "total_pts": 18, "wwcd": 0, "alive": True, "players": ["Amogh", "Titanic", "Rex", "Kd"]},
-]
+# Demo dataset lives in app/api/v1/teams/demo_data.py (DEMO_TEAMS). TEAMS is
+# kept as a module-level alias because match_simulator and other inline demo
+# endpoints mutate these dicts in place.
+TEAMS = DEMO_TEAMS
 
 DEVICES = [
     {"id": "gpu1", "name": "Node-GPU-1", "type": "RTX 4090", "load": 92, "status": "online", "task": "Vision CV Pipeline", "assigned_agent": "vision"},
@@ -558,6 +555,13 @@ app.add_middleware(
     allow_methods=settings.CORS_METHODS,
     allow_headers=settings.CORS_HEADERS,
 )
+# Phase 2: rate limiting on mutating endpoints (5/min auth, 60/min broadcast/scrims/content).
+app.add_middleware(RateLimitMiddleware)
+
+# Teams vertical slice (Phase 2): public reads, admin writes. Mounted here
+# rather than through app/api/v1/router.py (deleted) — teams is the only
+# domain extracted from main.py so far.
+app.include_router(teams_router, prefix="/api/v1", tags=["Teams"])
 
 @app.get("/")
 async def root():
@@ -643,17 +647,6 @@ async def get_system_status():
         "modes": MATCH_STATE["modes_state"],
         "event_bus": "connected" if event_bus._running else "disconnected",
     })
-
-@app.get("/api/v1/teams")
-async def get_teams():
-    return JSONResponse({"data": MATCH_STATE["teams"]})
-
-@app.get("/api/v1/teams/{team_id}")
-async def get_team(team_id: str):
-    team = next((t for t in MATCH_STATE["teams"] if t["id"] == team_id), None)
-    if team:
-        return JSONResponse({"data": team})
-    return JSONResponse({"error": "Team not found"}, status_code=404)
 
 @app.get("/api/v1/players")
 async def get_players():

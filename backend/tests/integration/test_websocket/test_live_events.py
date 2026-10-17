@@ -146,10 +146,14 @@ class TestLiveEventsWebSocket:
         
         try:
             async with AsyncClient(transport=transport, base_url="http://test") as client:
-                async with aconnect_ws(client, f"/ws/live/{match_id}") as ws:
+                async with aconnect_ws(client, "/ws/live") as ws:
+                    # Server must send the `connected` handshake first
+                    handshake = json.loads(
+                        await asyncio.wait_for(ws.receive_text(), timeout=5.0)
+                    )
+                    assert handshake.get("type") == "connected"
                     # Close gracefully
                     await ws.close(code=1000, reason="Test complete")
-                    assert True  # No exception
         except Exception:
             pytest.skip("WebSocket not available")
     
@@ -204,27 +208,3 @@ class TestLiveEventsWebSocket:
                     assert ws is not None
         except Exception:
             pytest.skip("WebSocket not available")
-
-
-@pytest.mark.integration
-@pytest.mark.websocket
-class TestWebSocketManager:
-    """Test WebSocket connection manager"""
-    
-    def test_room_management(self):
-        """Test room creation and client tracking"""
-        from app.api.websocket.live_events import ws_manager
-        
-        # Initially no rooms
-        initial_rooms = len(ws_manager.rooms)
-        
-        # Room stats should work
-        stats = ws_manager.get_room_stats()
-        assert isinstance(stats, dict)
-    
-    def test_broadcast_functionality(self):
-        """Test broadcast to room functionality"""
-        
-        # Broadcast to non-existent room should not raise error
-        # (This is tested with mock in unit tests)
-        assert True  # Placeholder for actual broadcast test

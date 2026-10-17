@@ -7,13 +7,14 @@ Identifies moments that deserve maximum energy from casters.
 
 import time
 import math
+import uuid
 from typing import Dict, List, Optional, Any, Tuple
 from dataclasses import dataclass, field
 from enum import Enum
 from collections import deque
 import structlog
 from ..base_agent import BaseAgent, AgentConfig
-from ...core.event_bus import EventBus, EventRecord
+from ...core.event_bus import EventBus, EventPriority, EventRecord
 
 logger = structlog.get_logger("aegis.agents.hype")
 
@@ -668,29 +669,126 @@ class HypeDetector(BaseAgent):
     # BaseAgent lifecycle
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
+    # Fight type -> suggested clip category for the highlight chain.
+    # Documented heuristic: the clip detector needs one of its known
+    # event types; this maps the fight classifier's output to the closest
+    # clip kind. "multi_kill" is the generic exciting-fight fallback.
+    _FIGHT_CLIP_TYPE = {
+        "third_party": "squad_wipe",
+        "close_quarters": "grenade_kill",
+        "utility_fight": "grenade_kill",
+        "long_range": "long_range_kill",
+        "ambush": "multi_kill",
+        "clutch": "clutch_win",
+        "push": "multi_kill",
+        "hold_and_defend": "multi_kill",
+        "retreat": "comeback_win",
+        "mid_range": "multi_kill",
+    }
+
     async def setup(self) -> None:
         """Subscribe to match events relevant to this agent."""
         self.subscribe_to_event("kill_confirmed")
         self.subscribe_to_event("clutch_detected")
         self.subscribe_to_event("highlight_moment")
         self.subscribe_to_event("fight_detected")
+        # Chain: fight detector -> hype detector -> script generator
+        self.subscribe_to_event("fight.detected")
 
     async def tick(self) -> None:
         """Periodic maintenance tick."""
         # Heuristic engine is driven by direct method calls;
         # nothing periodic is required here.
 
+    @staticmethod
+    def _level_for_intensity(intensity: float) -> "HypeLevel":
+        """Map a 0-100 fight intensity to a hype level."""
+        if intensity >= 90:
+            return HypeLevel.LEGENDARY
+        if intensity >= 75:
+            return HypeLevel.HYPE
+        if intensity >= 55:
+            return HypeLevel.EXCITING
+        if intensity >= 35:
+            return HypeLevel.NOTABLE
+        return HypeLevel.MILD
+
+    def _moment_from_fight(self, data: Dict[str, Any]) -> HypeMoment:
+        """Build a real HypeMoment from a fight.detected payload."""
+        teams = data.get("teams_involved", []) or []
+        intensity = float(data.get("intensity", 50.0) or 50.0)
+        fight_type = str(data.get("fight_type", "mid_range"))
+        level = self._level_for_intensity(intensity)
+
+        if len(teams) >= 3:
+            category = HypeCategory.RIVALRY
+        elif intensity >= 85:
+            category = HypeCategory.MULTI_KILL
+        else:
+            category = HypeCategory.FIRST_BLOOD
+
+        return HypeMoment(
+            moment_id=f"hype_{uuid.uuid4().hex[:8]}",
+            category=category,
+            level=level,
+            hype_score=round(intensity, 1),
+            description=(
+                f"Fight erupted between {', '.join(teams) or 'unknown teams'} "
+                f"({fight_type}, intensity {intensity:.0f})"
+            ),
+            team_name=teams[0] if teams else "",
+            opponent_name=teams[1] if len(teams) > 1 else "",
+            match_context={"match_id": data.get("match_id", "")},
+            fight_id=data.get("fight_id"),
+        )
+
     async def handle_event(self, record: EventRecord) -> None:
         """Handle an event from the event bus.
 
-        The heuristic engine is driven synchronously via direct method
-        calls; this hook keeps match context current for future
-        event-driven use.
+        fight.detected events run through the real hype pipeline
+        (_process_hype_moment) and publish hype.spike for the commentary
+        chain. All paths are exception-guarded.
         """
         try:
-            data = record.event.data if hasattr(record, "event") else {}
-            if isinstance(data, dict) and data.get("match_id"):
+            event = getattr(record, "event", None)
+            event_type = getattr(event, "event_type", "") if event else ""
+            data = getattr(event, "data", {}) if event else {}
+            if not isinstance(data, dict):
+                return
+
+            if data.get("match_id"):
                 self.config.match_id = data["match_id"]
+
+            if event_type != "fight.detected":
+                return
+
+            moment = self._moment_from_fight(data)
+            self._process_hype_moment(moment)
+
+            clip_event_type = self._FIGHT_CLIP_TYPE.get(
+                str(data.get("fight_type", "")), "multi_kill"
+            )
+            try:
+                await self.event_bus.publish(
+                    event_type="hype.spike",
+                    data={
+                        "hype_level": moment.level.value,
+                        "hype_score": moment.hype_score,
+                        "reason": moment.description,
+                        "fight_id": moment.fight_id,
+                        "clip_event_type": clip_event_type,
+                        "fight_type": data.get("fight_type"),
+                        "teams_involved": data.get("teams_involved", []),
+                        "intensity": data.get("intensity"),
+                        "match_id": data.get("match_id")
+                        or self.config.match_id,
+                    },
+                    priority=EventPriority.HIGH,
+                    source=self.config.agent_id,
+                    match_id=data.get("match_id") or self.config.match_id,
+                )
+            except Exception as e:
+                self._log.warning(f"Failed to publish hype.spike: {e}")
         except Exception:
             pass
 

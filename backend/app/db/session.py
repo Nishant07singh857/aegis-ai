@@ -1,92 +1,41 @@
+# backend/app/db/session.py
 """
-AEGIS AI - Database Session
-Async engine + session factory + lifecycle helpers.
+AEGIS AI - Database Session (re-export shim).
+
+The canonical engine/session implementation lives in :mod:`app.db.base`.
+This module exists only to preserve the historical import surface
+(``from app.db.session import init_db`` in ``app/main.py``) and re-exports
+the single shared engine and session factory from ``app.db.base``.
+
+Do NOT create a second engine here: there is exactly one connection pool,
+owned by ``app.db.base``. The assertion below enforces that at import time.
 """
 
 from __future__ import annotations
 
-import logging
-from typing import AsyncGenerator
-
-from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
-from sqlalchemy.pool import QueuePool
-
-from ..config import Environment, settings
-from .base import Base
-
-logger = logging.getLogger("aegis.db")
-
-
-def create_engine() -> AsyncEngine:
-    engine_kwargs = {
-        "echo": settings.DEBUG,
-        "pool_size": settings.DATABASE_POOL_SIZE,
-        "max_overflow": settings.DATABASE_MAX_OVERFLOW,
-        "pool_recycle": settings.DATABASE_POOL_RECYCLE,
-        "pool_pre_ping": True,
-    }
-
-    if settings.ENVIRONMENT == Environment.PRODUCTION:
-        engine_kwargs.update(
-            {
-                "pool_size": 50,
-                "max_overflow": 25,
-                "pool_timeout": 30,
-            }
-        )
-
-    engine = create_async_engine(settings.DATABASE_URL, **engine_kwargs)
-    logger.info(f"Database engine created: {settings.DATABASE_URL.split('@')[1]}")
-    return engine
-
-
-engine = create_engine()
-
-AsyncSessionLocal = async_sessionmaker(
+from . import base as _base
+from .base import (
+    AsyncSessionLocal,
+    close_db,
+    create_engine,
     engine,
-    class_=AsyncSession,
-    expire_on_commit=False,
-    autocommit=False,
-    autoflush=False,
+    get_db,
+    init_db,
 )
 
+# Single-pool invariant: session.* must be the very same objects as base.*.
+assert _base.engine is engine, "app.db.session.engine must be app.db.base.engine"
+assert _base.AsyncSessionLocal is AsyncSessionLocal
+assert _base.create_engine is create_engine
+assert _base.get_db is get_db
+assert _base.init_db is init_db
+assert _base.close_db is close_db
 
-async def get_db() -> AsyncGenerator[AsyncSession, None]:
-    async with AsyncSessionLocal() as session:
-        try:
-            yield session
-            await session.commit()
-        except Exception:
-            await session.rollback()
-            raise
-        finally:
-            await session.close()
-
-
-async def init_db() -> None:
-    # Ensure ORM models are imported so they register with Base.metadata.
-    from .models import (  # noqa: F401
-        broadcast_session,
-        commentary,
-        fight_event,
-        highlight,
-        kill_event,
-        match,
-        match_event,
-        player,
-        prediction,
-        rotation_event,
-        team,
-        team_intelligence,
-        tournament,
-        utility_event,
-    )
-
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    logger.info("Database tables created successfully")
-
-
-async def close_db() -> None:
-    await engine.dispose()
-    logger.info("Database connections closed")
+__all__ = [
+    "create_engine",
+    "engine",
+    "AsyncSessionLocal",
+    "get_db",
+    "init_db",
+    "close_db",
+]

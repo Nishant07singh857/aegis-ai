@@ -496,11 +496,31 @@ class ObserverDirector(BaseAgent):
     
     async def _execute_decision(self, decision: Dict[str, Any]) -> None:
         """Execute a director decision"""
-        
+
         decision_type = decision.get("type")
         candidate = decision.get("candidate")
         reason = decision.get("reason", "")
-        
+
+        # Chain event: broadcast the decision (best-effort, never raises).
+        try:
+            await self.event_bus.publish(
+                event_type="director.decision",
+                data={
+                    "decision_type": (
+                        decision_type.value
+                        if hasattr(decision_type, "value")
+                        else str(decision_type)
+                    ),
+                    "reason": reason,
+                    "match_id": self.director_state.match_id,
+                },
+                priority=EventPriority.MEDIUM,
+                source=self.config.agent_id,
+                match_id=self.director_state.match_id,
+            )
+        except Exception as e:
+            self._log.warning(f"Failed to publish director.decision: {e}")
+
         if decision_type == DirectorDecision.SWITCH_FEED:
             await self._switch_feed(candidate, reason)
         elif decision_type == DirectorDecision.SHOW_REPLAY:
@@ -752,8 +772,11 @@ class ObserverDirector(BaseAgent):
         self.priority_players = set(player_ids)
         self._log.info(f"Priority players set: {self.priority_players}")
     
-    def force_switch(self, target: Dict[str, Any]) -> None:
-        """Force a manual switch (human override)"""
+    def force_switch(self, target: Dict[str, Any]) -> "asyncio.Task":
+        """Force a manual switch (human override).
+
+        Returns the created task so callers/tests can await the switch.
+        """
         candidate = POVCandidate(
             feed_type=FeedType(target.get("feed_type", "team_pov")),
             team_id=target.get("team_id"),
@@ -761,8 +784,8 @@ class ObserverDirector(BaseAgent):
             priority_score=100,
             reason="Manual override",
         )
-        
-        asyncio.create_task(self._switch_feed(candidate, "Manual override"))
+
+        return asyncio.create_task(self._switch_feed(candidate, "Manual override"))
     
     def get_current_scene(self) -> Optional[Dict[str, Any]]:
         """Get current broadcast scene info"""

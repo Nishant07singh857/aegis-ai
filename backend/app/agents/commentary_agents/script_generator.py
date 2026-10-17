@@ -16,7 +16,7 @@ from enum import Enum
 from collections import deque
 import structlog
 from ..base_agent import BaseAgent, AgentConfig
-from ...core.event_bus import EventBus, EventRecord
+from ...core.event_bus import EventBus, EventPriority, EventRecord
 
 logger = structlog.get_logger("aegis.agents.commentary")
 
@@ -264,6 +264,18 @@ Describe the action as if you're watching it live.
 Keep it urgent and exciting.
 """,
             
+            "fight_start": """
+You are a professional BGMI esports caster. Generate {style} commentary:
+
+A fight just broke out between {team_a} and {team_b}!
+Initial intensity: {intensity}/100
+Zone phase: {zone_phase}
+Teams alive: {teams_alive}
+
+Generate {language} play-by-play commentary announcing the fight.
+Sound urgent and excited. Keep it under 15 words.
+""",
+
             "final_circle": """
 You are a professional BGMI esports caster. Generate {style} commentary:
 
@@ -541,7 +553,11 @@ Keep it informative but casual. Bridge the silence naturally.
         """
         if self._llm_provider is None and not self._llm_provider_failed:
             try:
-                from backend.app.ai import get_llm_provider
+                try:
+                    from backend.app.ai import get_llm_provider
+                except ImportError:
+                    # `app` package layout (backend/ on sys.path)
+                    from app.ai import get_llm_provider
                 self._llm_provider = get_llm_provider()
             except Exception as e:
                 self._log.warning(
@@ -605,7 +621,11 @@ Keep it informative but casual. Bridge the silence naturally.
         # records source="heuristic-template" in its own metadata, and we
         # mirror that provenance onto the CommentaryLine below.
         try:
-            from backend.app.ai import HeuristicProvider
+            try:
+                from backend.app.ai import HeuristicProvider
+            except ImportError:
+                # `app` package layout (backend/ on sys.path)
+                from app.ai import HeuristicProvider
             heuristic = HeuristicProvider(
                 template_fn=lambda p, **kw: self._generate_template_response(
                     style, tone, p
@@ -735,6 +755,7 @@ Keep it informative but casual. Bridge the silence naturally.
             CommentaryTrigger.TEAM_WIPE: "team_wipe",
             CommentaryTrigger.CLUTCH_START: "clutch_start",
             CommentaryTrigger.CLUTCH_WIN: "clutch_win",
+            CommentaryTrigger.FIGHT_START: "fight_start",
             CommentaryTrigger.FIGHT_INTENSE: "fight_intense",
             CommentaryTrigger.FINAL_CIRCLE: "final_circle",
             CommentaryTrigger.INTERESTING_MOMENT: "filler",
@@ -862,6 +883,8 @@ Keep it informative but casual. Bridge the silence naturally.
         self.subscribe_to_event("clutch_detected")
         self.subscribe_to_event("highlight_moment")
         self.subscribe_to_event("match_state_change")
+        # Chain: hype detector -> script generator -> clip detector
+        self.subscribe_to_event("hype.spike")
 
     async def tick(self) -> None:
         """Periodic maintenance tick."""
@@ -871,14 +894,69 @@ Keep it informative but casual. Bridge the silence naturally.
     async def handle_event(self, record: EventRecord) -> None:
         """Handle an event from the event bus.
 
-        The heuristic engine is driven synchronously via direct method
-        calls; this hook keeps match context current for future
-        event-driven use.
+        hype.spike events drive real commentary generation
+        (generate_commentary) and publish commentary.line for the
+        highlight chain. All paths are exception-guarded.
         """
         try:
-            data = record.event.data if hasattr(record, "event") else {}
-            if isinstance(data, dict) and data.get("match_id"):
+            event = getattr(record, "event", None)
+            event_type = getattr(event, "event_type", "") if event else ""
+            data = getattr(event, "data", {}) if event else {}
+            if not isinstance(data, dict):
+                return
+
+            if data.get("match_id"):
                 self.config.match_id = data["match_id"]
+
+            if event_type != "hype.spike":
+                return
+
+            hype_level = str(data.get("hype_level", "notable"))
+            trigger = (
+                CommentaryTrigger.FIGHT_INTENSE
+                if hype_level in ("legendary", "historic", "hype")
+                else CommentaryTrigger.FIGHT_START
+            )
+
+            teams = data.get("teams_involved", []) or []
+            context = {
+                "team_a": teams[0] if teams else "Unknown",
+                "team_b": teams[1] if len(teams) > 1 else "opponents",
+                "intensity": round(float(data.get("intensity", 50) or 50)),
+                "duration": 0,
+                "damage": 0,
+                "kills": 0,
+                "zone_phase": 0,
+                "teams_alive": 16,
+                "match_state": "fight_started",
+                "notable_info": str(data.get("reason", ""))[:200],
+                "fight_id": data.get("fight_id", ""),
+            }
+
+            line = await self.generate_commentary(trigger, context)
+            if line is None:
+                return  # cooldown or generation failure; stay silent
+
+            try:
+                await self.event_bus.publish(
+                    event_type="commentary.line",
+                    data={
+                        "text": line.text,
+                        "trigger": line.trigger.value,
+                        "generation_source": line.generation_source,
+                        "hype_level": hype_level,
+                        "hype_score": data.get("hype_score"),
+                        "fight_id": data.get("fight_id"),
+                        "clip_event_type": data.get("clip_event_type"),
+                        "match_id": data.get("match_id")
+                        or self.config.match_id,
+                    },
+                    priority=EventPriority.MEDIUM,
+                    source=self.config.agent_id,
+                    match_id=data.get("match_id") or self.config.match_id,
+                )
+            except Exception as e:
+                self._log.warning(f"Failed to publish commentary.line: {e}")
         except Exception:
             pass
 

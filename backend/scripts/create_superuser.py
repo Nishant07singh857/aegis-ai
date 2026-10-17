@@ -7,6 +7,7 @@ Creates an admin superuser for the AEGIS AI dashboard.
 import asyncio
 import sys
 import uuid
+from datetime import datetime
 from pathlib import Path
 import getpass
 

@@ -1,5 +1,19 @@
 from __future__ import annotations
 
+"""
+AEGIS AI - Alembic environment.
+
+Schema-change story (see also 001_initial_schema.py docstring):
+* ``alembic upgrade head`` is the versioned deploy path for schema changes.
+* ``app.db.base.init_db()`` (``Base.metadata.create_all(checkfirst=True)``)
+  stays as the idempotent local-dev bootstrap; it also enables the
+  ``uuid-ossp``/``pgcrypto``/``pg_trgm`` extensions, which migrations do not
+  manage. Both derive from the same ``Base.metadata``, so they agree.
+* Online mode always takes the URL from ``settings.DATABASE_URL`` (converted
+  to a sync driver URL); the ``sqlalchemy.url`` key in ``alembic.ini`` is
+  intentionally absent so a stale hardcoded URL can never win.
+"""
+
 import sys
 from logging.config import fileConfig
 from pathlib import Path
