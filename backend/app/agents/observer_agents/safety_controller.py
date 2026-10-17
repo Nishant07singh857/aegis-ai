@@ -11,6 +11,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 from collections import deque
 import structlog
+from ..base_agent import BaseAgent, AgentConfig
+from ...core.event_bus import EventBus, EventRecord
 
 logger = structlog.get_logger("aegis.agents.safety")
 
@@ -76,7 +78,7 @@ class SafetyConfig:
     final_circle_stability: float = 12.0 # Minimum scene time in final circle
 
 
-class SafetyController:
+class SafetyController(BaseAgent):
     """
     Prevents chaotic broadcast behavior.
     
@@ -91,9 +93,10 @@ class SafetyController:
     8. Final circle stability (longer scenes)
     """
     
-    def __init__(self):
-        self.state = SafetyState()
-        self.config = SafetyConfig()
+    def __init__(self, config: AgentConfig, event_bus: EventBus):
+        super().__init__(config, event_bus)
+        self.safety_state = SafetyState()
+        self.safety_config = SafetyConfig()
         
         # Emergency override
         self.emergency_override: bool = False
@@ -113,39 +116,39 @@ class SafetyController:
             return True
         
         # Check if locked
-        if time.time() < self.state.locked_until:
-            self._log.debug(f"Switch prevented: locked until {self.state.locked_until}")
+        if time.time() < self.safety_state.locked_until:
+            self._log.debug(f"Switch prevented: locked until {self.safety_state.locked_until}")
             return False
         
         # Check minimum scene time
-        if self.state.current_scene_started_at > 0:
-            scene_duration = time.time() - self.state.current_scene_started_at
+        if self.safety_state.current_scene_started_at > 0:
+            scene_duration = time.time() - self.safety_state.current_scene_started_at
             
             # Different minimums for different situations
-            min_time = self.config.min_scene_time
+            min_time = self.safety_config.min_scene_time
             
-            if self.state.is_final_circle:
-                min_time = self.config.final_circle_stability
+            if self.safety_state.is_final_circle:
+                min_time = self.safety_config.final_circle_stability
             
-            if self.state.is_clutch:
-                min_time = self.config.clutch_lock_time
+            if self.safety_state.is_clutch:
+                min_time = self.safety_config.clutch_lock_time
             
             if scene_duration < min_time:
                 return False
         
         # Check max switches per minute
         recent_switches = [
-            t for t in self.state.switch_timestamps
+            t for t in self.safety_state.switch_timestamps
             if time.time() - t < 60
         ]
-        if len(recent_switches) >= self.config.max_switches_per_minute:
+        if len(recent_switches) >= self.safety_config.max_switches_per_minute:
             self._log.warning("Max switches per minute reached")
             return False
         
         # Check rapid switching
-        if self.state.switch_timestamps:
-            last_switch = self.state.switch_timestamps[-1]
-            if time.time() - last_switch < self.config.rapid_switch_threshold:
+        if self.safety_state.switch_timestamps:
+            last_switch = self.safety_state.switch_timestamps[-1]
+            if time.time() - last_switch < self.safety_config.rapid_switch_threshold:
                 return False
         
         return True
@@ -161,7 +164,7 @@ class SafetyController:
             return True
         
         # Don't switch during replay
-        if self.state.is_replay and new_scene.feed_type.value != "replay":
+        if self.safety_state.is_replay and new_scene.feed_type.value != "replay":
             self._record_violation(
                 SafetyViolation.REPLAY_INTERRUPTED,
                 "Cannot switch during replay",
@@ -169,7 +172,7 @@ class SafetyController:
             return False
         
         # Don't switch away from clutch
-        if self.state.is_clutch and not getattr(new_scene, 'is_clutch', False):
+        if self.safety_state.is_clutch and not getattr(new_scene, 'is_clutch', False):
             self._record_violation(
                 SafetyViolation.CLUTCH_INTERRUPTED,
                 "Cannot switch away from clutch",
@@ -181,8 +184,8 @@ class SafetyController:
             new_scene.team_id and 
             current_scene.team_id == new_scene.team_id):
             
-            if current_scene.team_id in self.state.team_cooldowns:
-                cooldown_until = self.state.team_cooldowns[current_scene.team_id]
+            if current_scene.team_id in self.safety_state.team_cooldowns:
+                cooldown_until = self.safety_state.team_cooldowns[current_scene.team_id]
                 if time.time() < cooldown_until:
                     self._record_violation(
                         SafetyViolation.SAME_TEAM_SWITCH,
@@ -203,13 +206,13 @@ class SafetyController:
         for candidate in candidates:
             # Check team cooldown
             if candidate.team_id:
-                cooldown_until = self.state.team_cooldowns.get(candidate.team_id, 0)
+                cooldown_until = self.safety_state.team_cooldowns.get(candidate.team_id, 0)
                 if time.time() < cooldown_until:
                     continue  # Skip this team
             
             # Check if switching to this would be rapid
-            if self.state.switch_timestamps:
-                last_switch = self.state.switch_timestamps[-1]
+            if self.safety_state.switch_timestamps:
+                last_switch = self.safety_state.switch_timestamps[-1]
                 if time.time() - last_switch < 1.0:
                     # Only allow critical candidates
                     if candidate.priority_score < 80:
@@ -226,60 +229,60 @@ class SafetyController:
     def record_switch(self, scene: Any) -> None:
         """Record that a switch occurred"""
         
-        self.state.switch_timestamps.append(time.time())
-        self.state.current_scene_started_at = time.time()
+        self.safety_state.switch_timestamps.append(time.time())
+        self.safety_state.current_scene_started_at = time.time()
         
         # Update team cooldowns
         if scene.team_id:
-            self.state.team_cooldowns[scene.team_id] = (
-                time.time() + self.config.team_cooldown_time
+            self.safety_state.team_cooldowns[scene.team_id] = (
+                time.time() + self.safety_config.team_cooldown_time
             )
-            self.state.recently_shown_teams.append(scene.team_id)
+            self.safety_state.recently_shown_teams.append(scene.team_id)
         
         # Track scene type
-        self.state.current_scene_type = scene.feed_type.value if hasattr(scene, 'feed_type') else ""
+        self.safety_state.current_scene_type = scene.feed_type.value if hasattr(scene, 'feed_type') else ""
         
         # Apply locks based on scene type
         if getattr(scene, 'is_clutch', False):
             self._apply_lock(
-                self.config.clutch_lock_time,
+                self.safety_config.clutch_lock_time,
                 "Clutch situation",
             )
-            self.state.is_clutch = True
+            self.safety_state.is_clutch = True
         else:
-            self.state.is_clutch = False
+            self.safety_state.is_clutch = False
         
         if getattr(scene, 'is_fight', False):
             self._apply_lock(
-                self.config.fight_lock_time,
+                self.safety_config.fight_lock_time,
                 "Active fight",
             )
         
         if scene.feed_type.value == "replay" if hasattr(scene, 'feed_type') else False:
-            self.state.is_replay = True
+            self.safety_state.is_replay = True
         else:
-            self.state.is_replay = False
+            self.safety_state.is_replay = False
     
     def _apply_lock(self, duration: float, reason: str) -> None:
         """Apply a safety lock"""
-        self.state.locked_until = time.time() + duration
-        self.state.lock_reason = reason
+        self.safety_state.locked_until = time.time() + duration
+        self.safety_state.lock_reason = reason
         self._log.debug(f"Safety lock applied: {reason} ({duration}s)")
     
     def release_lock(self) -> None:
         """Release safety lock"""
-        self.state.locked_until = 0.0
-        self.state.lock_reason = ""
+        self.safety_state.locked_until = 0.0
+        self.safety_state.lock_reason = ""
         self._log.debug("Safety lock released")
     
     def _record_violation(self, violation_type: SafetyViolation, details: str) -> None:
         """Record a safety violation"""
-        self.state.violations.append({
+        self.safety_state.violations.append({
             "type": violation_type,
             "details": details,
             "timestamp": time.time(),
         })
-        self.state.violation_count += 1
+        self.safety_state.violation_count += 1
         
         self._log.warning(f"Safety violation: {violation_type.value} - {details}")
     
@@ -316,29 +319,60 @@ class SafetyController:
     def get_state(self) -> Dict[str, Any]:
         """Get current safety state"""
         recent_switches = [
-            t for t in self.state.switch_timestamps
+            t for t in self.safety_state.switch_timestamps
             if time.time() - t < 60
         ]
         
         return {
-            "locked": time.time() < self.state.locked_until,
-            "lock_reason": self.state.lock_reason,
-            "lock_remaining": max(0, self.state.locked_until - time.time()),
-            "is_clutch": self.state.is_clutch,
-            "is_replay": self.state.is_replay,
+            "locked": time.time() < self.safety_state.locked_until,
+            "lock_reason": self.safety_state.lock_reason,
+            "lock_remaining": max(0, self.safety_state.locked_until - time.time()),
+            "is_clutch": self.safety_state.is_clutch,
+            "is_replay": self.safety_state.is_replay,
             "switches_last_minute": len(recent_switches),
-            "violation_count": self.state.violation_count,
+            "violation_count": self.safety_state.violation_count,
             "manual_override": self.manual_override,
             "emergency_override": self.emergency_override,
         }
     
     def get_violations(self, limit: int = 20) -> List[Dict[str, Any]]:
         """Get recent safety violations"""
-        return list(self.state.violations)[-limit:]
+        return list(self.safety_state.violations)[-limit:]
     
     def reset(self) -> None:
         """Reset safety state"""
-        self.state = SafetyState()
+        self.safety_state = SafetyState()
         self.manual_override = False
         self.emergency_override = False
         self._log.info("Safety controller reset")
+
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    # BaseAgent lifecycle
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+    async def setup(self) -> None:
+        """Subscribe to match events relevant to this agent."""
+        self.subscribe_to_event("fight_detected")
+        self.subscribe_to_event("clutch_detected")
+
+    async def tick(self) -> None:
+        """Periodic maintenance tick."""
+        # Heuristic engine is driven by direct method calls;
+        # nothing periodic is required here.
+
+    async def handle_event(self, record: EventRecord) -> None:
+        """Handle an event from the event bus.
+
+        The heuristic engine is driven synchronously via direct method
+        calls; this hook keeps match context current for future
+        event-driven use.
+        """
+        try:
+            data = record.event.data if hasattr(record, "event") else {}
+            if isinstance(data, dict) and data.get("match_id"):
+                self.config.match_id = data["match_id"]
+        except Exception:
+            pass
+
+    async def cleanup(self) -> None:
+        """Release agent resources."""

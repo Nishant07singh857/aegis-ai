@@ -3,15 +3,41 @@
 AEGIS AI - Voice Synthesizer
 Converts commentary text to speech using TTS engines.
 Supports multiple voices, languages, and emotional modulation.
+
+HONEST STATUS: no TTS engine is wired by default. synthesize() returns
+None (synthesized=False) and logs a clear warning until the operator
+configures a LOCAL engine. Nothing here fakes audio.
+
+Local (free) TTS options -- documented, NOT installed as dependencies:
+  * Piper (recommended):  pip install piper-tts
+                          download a voice, e.g.:
+                            python -m piper.download_voices en_US-lessac-medium
+                          then set:
+                            AEGIS_TTS_ENGINE=piper
+                            AEGIS_TTS_MODEL_PATH=/path/to/en_US-lessac-medium.onnx
+                          (a sibling .onnx.json config file must sit next to
+                          the .onnx file; piper-tts downloads both together)
+  * Coqui TTS:            pip install TTS
+                          then set AEGIS_TTS_ENGINE=coqui
+                          (wiring not implemented yet -- see _call_tts_engine)
+
+Paid cloud engines (ElevenLabs/Azure/Google) are intentionally NOT wired:
+the project has a zero-paid-API-spend constraint. Their enum values remain
+as documentation of what VoiceProfile.engine *could* hold one day behind
+an explicit opt-in, the same way backend/app/ai/optional_paid.py gates
+paid LLM providers.
 """
 
 import asyncio
+import os
 import time
 import hashlib
 from typing import Dict, List, Optional, Any, Tuple
 from dataclasses import dataclass, field
 from enum import Enum
 import structlog
+from ..base_agent import BaseAgent, AgentConfig
+from ...core.event_bus import EventBus, EventRecord
 
 logger = structlog.get_logger("aegis.agents.voice")
 
@@ -35,7 +61,15 @@ class VoiceStyle(str, Enum):
     SHOUT = "shout"
 
 class TTSEngine(str, Enum):
-    """Supported TTS engines"""
+    """
+    Supported TTS engines.
+
+    NONE is the default: no engine configured, synthesis honestly disabled.
+    PIPER is the supported local/free engine (see module docstring).
+    The cloud values are documentation-only under the zero-paid-spend rule.
+    """
+    NONE = "none"
+    PIPER = "piper"
     ELEVENLABS = "elevenlabs"
     AZURE = "azure"
     GOOGLE = "google"
@@ -47,7 +81,9 @@ class VoiceProfile:
     """Voice profile for a caster"""
     profile_id: str
     name: str
-    engine: TTSEngine = TTSEngine.ELEVENLABS
+    # Default NONE: no engine is configured until the operator sets
+    # AEGIS_TTS_ENGINE. Profiles must not claim a paid cloud engine.
+    engine: TTSEngine = TTSEngine.NONE
     voice_id: str = ""
     gender: VoiceGender = VoiceGender.MALE
     language: str = "hi"  # Hindi by default for BGMI
@@ -74,40 +110,56 @@ class VoiceProfile:
 
 @dataclass
 class SynthesizedAudio:
-    """Synthesized audio output"""
+    """
+    Synthesized audio output.
+
+    Honest-status contract:
+      * synthesized=False  -> no real audio was produced (no engine
+        configured, or synthesis failed). audio_data will be None.
+      * synthesized=True   -> audio_data holds real bytes from a real engine.
+      * naturalness_score  -> 0.0 means "not measured"; it is only set to a
+        real value when the engine actually reports one. Never hardcode it.
+    """
     audio_id: str
     text: str
     audio_data: Optional[bytes] = None
     audio_url: Optional[str] = None
     duration_seconds: float = 0.0
-    
+    synthesized: bool = False
+
     # Voice used
     profile: Optional[VoiceProfile] = None
-    
+
     # Metadata
     generated_at: float = field(default_factory=time.time)
-    engine_used: TTSEngine = TTSEngine.ELEVENLABS
+    engine_used: TTSEngine = TTSEngine.NONE
     latency_ms: float = 0.0
-    
-    # Quality
-    naturalness_score: float = 0.8
+
+    # Quality (0.0 = not measured / no real engine)
+    naturalness_score: float = 0.0
 
 
-class VoiceSynthesizer:
+class VoiceSynthesizer(BaseAgent):
     """
     Converts commentary text to speech.
-    
+
+    Honest-status design: synthesis is DISABLED until the operator sets
+    AEGIS_TTS_ENGINE to a real local engine (currently: piper). Until then
+    synthesize() returns None -- never fake audio, never a fake quality
+    score. See the module docstring for local setup instructions.
+
     Features:
-    - Multiple TTS engine support (ElevenLabs primary)
+    - Pluggable TTS engines (local Piper supported; cloud engines
+      intentionally not wired under the zero-paid-spend constraint)
     - Multiple voice profiles (play-by-play, analyst, Hindi)
     - Emotion-based voice modulation
     - Voice caching for common phrases
     - Batch synthesis for efficiency
     - Audio post-processing (pitch, speed)
-    - Real-time streaming support
     """
     
-    def __init__(self):
+    def __init__(self, config: AgentConfig, event_bus: EventBus):
+        super().__init__(config, event_bus)
         # Voice profiles
         self.profiles: Dict[str, VoiceProfile] = {}
         
@@ -121,6 +173,9 @@ class VoiceSynthesizer:
         # Active profile
         self.active_profile_id: str = ""
         
+        # Warn only once when synthesis is attempted with no engine
+        self._no_engine_warned = False
+
         # Statistics
         self.total_synthesized: int = 0
         self.total_cache_hits: int = 0
@@ -134,11 +189,11 @@ class VoiceSynthesizer:
     def _initialize_profiles(self) -> None:
         """Initialize default voice profiles"""
         
-        # Primary Hindi caster (ElevenLabs)
+        # Primary Hindi caster (engine configured via AEGIS_TTS_ENGINE; NONE by default)
         self.profiles["hindi_caster_1"] = VoiceProfile(
             profile_id="hindi_caster_1",
             name="Aryan - Hindi Hype Caster",
-            engine=TTSEngine.ELEVENLABS,
+            engine=TTSEngine.NONE,  # honest default: no engine configured
             voice_id="eleven_hindi_hype_01",
             gender=VoiceGender.MALE,
             language="hi",
@@ -154,11 +209,11 @@ class VoiceSynthesizer:
             emotion_boost=0.8,
         )
         
-        # English analyst caster
+        # English analyst caster (engine configured via AEGIS_TTS_ENGINE; NONE by default)
         self.profiles["english_analyst"] = VoiceProfile(
             profile_id="english_analyst",
             name="James - English Analyst",
-            engine=TTSEngine.ELEVENLABS,
+            engine=TTSEngine.NONE,  # honest default: no engine configured
             voice_id="eleven_english_analyst_01",
             gender=VoiceGender.MALE,
             language="en",
@@ -174,11 +229,11 @@ class VoiceSynthesizer:
             emotion_boost=0.4,
         )
         
-        # Hinglish caster
+        # Hinglish caster (engine configured via AEGIS_TTS_ENGINE; NONE by default)
         self.profiles["hinglish_caster"] = VoiceProfile(
             profile_id="hinglish_caster",
             name="Rahul - Hinglish Caster",
-            engine=TTSEngine.ELEVENLABS,
+            engine=TTSEngine.NONE,  # honest default: no engine configured
             voice_id="eleven_hinglish_01",
             gender=VoiceGender.MALE,
             language="hi",
@@ -302,49 +357,120 @@ class VoiceSynthesizer:
         profile: VoiceProfile,
         voice_params: Dict[str, Any],
     ) -> Optional[SynthesizedAudio]:
-        """Call the TTS engine for synthesis"""
-        
-        # In production, this would call:
-        # - ElevenLabs API
-        # - Azure Speech Services
-        # - Google Cloud TTS
-        # - Local Bark/Coqui model
-        
+        """
+        Call the configured TTS engine for synthesis.
+
+        Returns None when no engine is configured -- this is the HONEST
+        disabled state (callers see synthesized=False / None, never fake
+        audio). A real SynthesizedAudio with audio bytes is returned only
+        when a real engine actually produced audio.
+        """
+
+        engine = os.environ.get("AEGIS_TTS_ENGINE", "none").strip().lower()
+
+        if engine in ("", "none"):
+            if not self._no_engine_warned:
+                self._log.warning(
+                    "No TTS engine configured: voice synthesis is honestly "
+                    "DISABLED (synthesize() returns None). To enable local "
+                    "free TTS: pip install piper-tts, download a voice, then "
+                    "set AEGIS_TTS_ENGINE=piper and "
+                    "AEGIS_TTS_MODEL_PATH=/path/to/voice.onnx"
+                )
+                self._no_engine_warned = True
+            return None
+
+        if engine == "piper":
+            return await self._synthesize_with_piper(text, profile, voice_params)
+
+        # Anything else (elevenlabs/azure/google/coqui/...) is not wired:
+        # say so plainly instead of faking audio.
+        self._log.warning(
+            f"TTS engine '{engine}' is not implemented; synthesis disabled. "
+            "Supported local value: AEGIS_TTS_ENGINE=piper "
+            "(see module docstring). Paid cloud engines are intentionally "
+            "not wired (zero-paid-spend constraint)."
+        )
+        return None
+
+    async def _synthesize_with_piper(
+        self,
+        text: str,
+        profile: VoiceProfile,
+        voice_params: Dict[str, Any],
+    ) -> Optional[SynthesizedAudio]:
+        """
+        Real synthesis via local Piper TTS (free, offline).
+
+        Requires: pip install piper-tts, plus
+            AEGIS_TTS_MODEL_PATH=/path/to/<voice>.onnx
+        (with the matching <voice>.onnx.json beside it).
+        The piper_sdk import is lazy so the dependency stays optional.
+        """
         try:
-            # Simulated TTS call (replace with actual API)
-            
-            # ElevenLabs example:
-            # response = await elevenlabs.generate(
-            #     text=text,
-            #     voice=profile.voice_id,
-            #     model="eleven_multilingual_v2",
-            #     voice_settings={
-            #         "stability": voice_params.get("stability", 0.5),
-            #         "similarity_boost": voice_params.get("clarity", 0.75),
-            #         "style": voice_params.get("style", 0.5),
-            #         "use_speaker_boost": True,
-            #     },
-            # )
-            
-            # Estimate duration based on text length
-            words = len(text.split())
-            duration = max(1.5, words / 3.0 * voice_params.get("speed", 1.0))
-            
-            audio = SynthesizedAudio(
+            from piper import PiperVoice  # lazy: optional dependency
+        except ImportError:
+            self._log.error(
+                "AEGIS_TTS_ENGINE=piper but piper-tts is not installed. "
+                "Run: pip install piper-tts (synthesis disabled until then)."
+            )
+            return None
+
+        model_path = os.environ.get("AEGIS_TTS_MODEL_PATH", "").strip()
+        if not model_path or not os.path.exists(model_path):
+            self._log.error(
+                "AEGIS_TTS_ENGINE=piper but AEGIS_TTS_MODEL_PATH is missing "
+                "or not a file. Download a voice (python -m "
+                "piper.download_voices <voice>) and point AEGIS_TTS_MODEL_PATH "
+                "at the .onnx file."
+            )
+            return None
+
+        try:
+            start_time = time.time()
+            voice = PiperVoice.load(model_path)
+
+            # Piper synthesis is blocking; keep it off the event loop.
+            def _render() -> bytes:
+                import io
+                import wave
+
+                buf = io.BytesIO()
+                with wave.open(buf, "wb") as wav:
+                    voice.synthesize_wav(text, wav)
+                return buf.getvalue()
+
+            audio_bytes = await asyncio.to_thread(_render)
+            latency_ms = (time.time() - start_time) * 1000.0
+
+            # Duration from the WAV header when possible; estimate otherwise.
+            duration = max(1.5, len(text.split()) / 3.0)
+            try:
+                import io
+                import wave
+
+                with wave.open(io.BytesIO(audio_bytes), "rb") as wav:
+                    frames = wav.getnframes()
+                    rate = wav.getframerate() or 22050
+                    duration = frames / rate
+            except Exception:
+                pass
+
+            return SynthesizedAudio(
                 audio_id=hashlib.md5(
                     f"{text}_{profile.profile_id}_{time.time()}".encode()
                 ).hexdigest()[:16],
                 text=text,
+                audio_data=audio_bytes,
                 duration_seconds=duration,
+                synthesized=True,  # real bytes from a real engine
                 profile=profile,
-                engine_used=profile.engine,
-                naturalness_score=0.85,
+                engine_used=TTSEngine.PIPER,
+                latency_ms=latency_ms,
+                naturalness_score=0.0,  # not measured; never hardcode
             )
-            
-            return audio
-            
         except Exception as e:
-            self._log.error(f"TTS engine error: {e}")
+            self._log.error(f"Piper TTS synthesis failed: {e}")
             return None
     
     def _apply_emotion_modulation(
@@ -456,12 +582,16 @@ class VoiceSynthesizer:
     
     def get_stats(self) -> Dict[str, Any]:
         """Get synthesizer statistics"""
+        engine = os.environ.get("AEGIS_TTS_ENGINE", "none").strip().lower() or "none"
         return {
             "total_synthesized": self.total_synthesized,
             "cache_hits": self.total_cache_hits,
             "cache_size": len(self.audio_cache),
             "avg_latency_ms": round(self.total_latency_ms, 1),
             "active_profile": self.active_profile_id,
+            # Honest engine status: "none" means synthesis is disabled.
+            "tts_engine": engine,
+            "synthesis_enabled": engine not in ("", "none"),
             "profiles": {
                 pid: {
                     "name": p.name,
@@ -481,3 +611,33 @@ class VoiceSynthesizer:
         self.total_cache_hits = 0
         self.total_latency_ms = 0.0
         self._log.info("Voice synthesizer reset")
+
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    # BaseAgent lifecycle
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+    async def setup(self) -> None:
+        """Subscribe to match events relevant to this agent."""
+        self.subscribe_to_event("match_state_change")
+
+    async def tick(self) -> None:
+        """Periodic maintenance tick."""
+        # Heuristic engine is driven by direct method calls;
+        # nothing periodic is required here.
+
+    async def handle_event(self, record: EventRecord) -> None:
+        """Handle an event from the event bus.
+
+        The heuristic engine is driven synchronously via direct method
+        calls; this hook keeps match context current for future
+        event-driven use.
+        """
+        try:
+            data = record.event.data if hasattr(record, "event") else {}
+            if isinstance(data, dict) and data.get("match_id"):
+                self.config.match_id = data["match_id"]
+        except Exception:
+            pass
+
+    async def cleanup(self) -> None:
+        """Release agent resources."""

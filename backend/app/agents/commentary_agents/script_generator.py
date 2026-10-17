@@ -6,6 +6,7 @@ Handles multiple commentary styles, context-aware generation,
 and produces natural-sounding broadcast commentary.
 """
 
+import asyncio
 import time
 import random
 import hashlib
@@ -14,6 +15,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 from collections import deque
 import structlog
+from ..base_agent import BaseAgent, AgentConfig
+from ...core.event_bus import EventBus, EventRecord
 
 logger = structlog.get_logger("aegis.agents.commentary")
 
@@ -103,6 +106,10 @@ class CommentaryLine:
     generated_at: float = field(default_factory=time.time)
     llm_model: str = ""
     tokens_used: int = 0
+    # Honest provenance label. "heuristic-template" means the text came from
+    # human-written template pools (NOT AI). Any other value names the real
+    # provider/model, e.g. "ollama:llama3.1". Never mislabel this.
+    generation_source: str = "heuristic-template"
 
 @dataclass
 class CommentaryBuffer:
@@ -116,10 +123,12 @@ class CommentaryBuffer:
     total_lines_generated: int = 0
 
 
-class ScriptGenerator:
+class ScriptGenerator(BaseAgent):
     """
-    Generates AI commentary scripts using LLM.
-    
+    Generates commentary scripts via the zero-cost AI layer
+    (backend/app/ai): a local LLM (default Ollama) when one is reachable,
+    otherwise honest template pools labelled source="heuristic-template".
+
     Features:
     - Multiple commentary styles (Hype, Analytical, Hindi, Hinglish, Cinematic)
     - Context-aware generation using match state
@@ -135,7 +144,8 @@ class ScriptGenerator:
     professional BGMI casters.
     """
     
-    def __init__(self):
+    def __init__(self, config: AgentConfig, event_bus: EventBus):
+        super().__init__(config, event_bus)
         # Commentary buffer
         self.buffer = CommentaryBuffer()
         
@@ -159,7 +169,15 @@ class ScriptGenerator:
         self.max_tokens_per_line = 100
         self.temperature_default = 0.8
         self.min_confidence = 0.6
-        
+
+        # Zero-cost AI layer (backend/app/ai). Resolved lazily on first use
+        # so importing this module never triggers provider selection.
+        self._llm_provider = None
+        self._llm_provider_failed = False
+        # Provenance of the most recent _call_llm output (honest labelling).
+        self._last_generation_source = "heuristic-template"
+        self._last_generation_was_llm = False
+
         self._log = logger.bind(component="script_generator")
     
     def _load_prompt_templates(self) -> None:
@@ -356,13 +374,15 @@ Keep it informative but casual. Bridge the silence naturally.
                 example_text += f"Input: {ex['input']}\nOutput: {ex['output']}\n"
             prompt += example_text
         
-        # Generate using LLM (simulated for now)
+        # Generate via the zero-cost AI layer (LLM provider, else honest templates)
         text = await self._call_llm(prompt, style, tone)
-        
+
         if not text or len(text) < 5:
             return None
-        
-        # Create commentary line
+
+        # Create commentary line. Provenance is recorded honestly:
+        # generation_source is "heuristic-template" for template output
+        # (NOT AI) or the real provider label, e.g. "ollama:llama3.1".
         line = CommentaryLine(
             text=text,
             language=language,
@@ -372,6 +392,11 @@ Keep it informative but casual. Bridge the silence naturally.
             priority=self._get_trigger_priority(trigger),
             context=context,
             duration_estimate=self._estimate_duration(text),
+            generation_source=self._last_generation_source,
+            llm_model=self._last_generation_source
+            if self._last_generation_was_llm
+            else "",
+            confidence=0.85 if self._last_generation_was_llm else 0.5,
         )
         
         # Check novelty (avoid repetition)
@@ -506,6 +531,27 @@ Keep it informative but casual. Bridge the silence naturally.
     # LLM INTERACTION
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     
+    def _get_llm_provider(self):
+        """
+        Lazily resolve the text-generation provider from backend/app/ai.
+
+        The import is deliberately lazy: importing this module must never
+        trigger provider selection, network probes, or paid-SDK imports.
+        Returns None only if the ai package itself cannot be imported.
+        """
+        if self._llm_provider is None and not self._llm_provider_failed:
+            try:
+                from backend.app.ai import get_llm_provider
+                self._llm_provider = get_llm_provider()
+            except Exception as e:
+                self._log.warning(
+                    "AI provider layer unavailable; commentary will use "
+                    "honest template fallback only",
+                    error=str(e),
+                )
+                self._llm_provider_failed = True
+        return self._llm_provider
+
     async def _call_llm(
         self,
         prompt: str,
@@ -513,34 +559,66 @@ Keep it informative but casual. Bridge the silence naturally.
         tone: CommentaryTone,
     ) -> Optional[str]:
         """
-        Call LLM for commentary generation.
-        
-        In production, this would call:
-        - OpenAI API (GPT-4)
-        - Anthropic Claude
-        - Local LLM (Llama, Mistral)
-        - Fine-tuned commentary model
-        
-        For now, uses template-based generation with variation.
+        Generate commentary text via the zero-cost AI layer.
+
+        Order:
+          1. Active LLM provider (default: local Ollama; falls back to
+             heuristic automatically when Ollama is not reachable).
+          2. Honest template fallback, routed through HeuristicProvider so
+             the output is labelled source="heuristic-template".
+
+        Template output is NEVER presented as AI-generated: the provenance
+        is recorded on CommentaryLine.generation_source by the caller.
+        No paid API is ever called unless the operator explicitly opted in
+        via ENABLE_PAID_LLM=true (see backend/app/ai/optional_paid.py).
         """
-        
+
+        provider = self._get_llm_provider()
+
+        if provider is not None:
+            try:
+                # Providers are synchronous (blocking I/O); don't stall the
+                # event loop while a local model thinks.
+                text = await asyncio.to_thread(
+                    provider.generate,
+                    prompt,
+                    max_tokens=self.max_tokens_per_line,
+                    temperature=self.temperature_default,
+                )
+                if text and len(text.strip()) >= 5:
+                    self._last_generation_source = provider.last_source()
+                    self._last_generation_was_llm = (
+                        provider.name != "heuristic-template"
+                    )
+                    return text.strip()
+            except Exception as e:
+                # Provider looked available but the request failed
+                # (Ollama went away mid-call, model missing, ...).
+                # Fall through to the honest template path below.
+                self._log.warning(
+                    "LLM provider failed; using honest template fallback",
+                    provider=getattr(provider, "name", "unknown"),
+                    error=str(e),
+                )
+
+        # Honest template fallback via HeuristicProvider. The provider
+        # records source="heuristic-template" in its own metadata, and we
+        # mirror that provenance onto the CommentaryLine below.
         try:
-            # Simulate LLM call (replace with actual API call)
-            # In production:
-            # response = await openai.chat.completions.create(
-            #     model="gpt-4",
-            #     messages=[{"role": "user", "content": prompt}],
-            #     max_tokens=self.max_tokens_per_line,
-            #     temperature=self.temperature_default,
-            # )
-            # return response.choices[0].message.content
-            
-            # Template-based fallback with randomization
-            return self._generate_template_response(style, tone, prompt)
-            
+            from backend.app.ai import HeuristicProvider
+            heuristic = HeuristicProvider(
+                template_fn=lambda p, **kw: self._generate_template_response(
+                    style, tone, p
+                )
+            )
+            text = heuristic.generate(prompt)
         except Exception as e:
-            self._log.error(f"LLM call failed: {e}")
+            self._log.error(f"Template fallback failed: {e}")
             return None
+
+        self._last_generation_source = "heuristic-template"
+        self._last_generation_was_llm = False
+        return text
     
     def _generate_template_response(
         self,
@@ -772,3 +850,37 @@ Keep it informative but casual. Bridge the silence naturally.
         self.last_trigger_time.clear()
         self.recent_topics.clear()
         self._log.info("Script generator reset")
+
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    # BaseAgent lifecycle
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+    async def setup(self) -> None:
+        """Subscribe to match events relevant to this agent."""
+        self.subscribe_to_event("kill_confirmed")
+        self.subscribe_to_event("fight_detected")
+        self.subscribe_to_event("clutch_detected")
+        self.subscribe_to_event("highlight_moment")
+        self.subscribe_to_event("match_state_change")
+
+    async def tick(self) -> None:
+        """Periodic maintenance tick."""
+        # Heuristic engine is driven by direct method calls;
+        # nothing periodic is required here.
+
+    async def handle_event(self, record: EventRecord) -> None:
+        """Handle an event from the event bus.
+
+        The heuristic engine is driven synchronously via direct method
+        calls; this hook keeps match context current for future
+        event-driven use.
+        """
+        try:
+            data = record.event.data if hasattr(record, "event") else {}
+            if isinstance(data, dict) and data.get("match_id"):
+                self.config.match_id = data["match_id"]
+        except Exception:
+            pass
+
+    async def cleanup(self) -> None:
+        """Release agent resources."""

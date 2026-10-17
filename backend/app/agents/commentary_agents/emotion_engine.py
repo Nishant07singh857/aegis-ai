@@ -11,6 +11,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 from collections import deque
 import structlog
+from ..base_agent import BaseAgent, AgentConfig
+from ...core.event_bus import EventBus, EventRecord
 
 logger = structlog.get_logger("aegis.agents.emotion")
 
@@ -83,7 +85,7 @@ class EmotionalArc:
         return {"state": EmotionalState.CALM, "intensity": EmotionIntensity.LOW}
 
 
-class EmotionEngine:
+class EmotionEngine(BaseAgent):
     """
     Modulates commentary emotion based on match context.
     
@@ -102,7 +104,8 @@ class EmotionEngine:
     - Exhausting (always at max energy)
     """
     
-    def __init__(self):
+    def __init__(self, config: AgentConfig, event_bus: EventBus):
+        super().__init__(config, event_bus)
         self.profile = EmotionProfile()
         self.arc = EmotionalArc()
         
@@ -513,3 +516,35 @@ class EmotionEngine:
         self.profile = EmotionProfile()
         self.arc = EmotionalArc()
         self._log.info("Emotion engine reset")
+
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    # BaseAgent lifecycle
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+    async def setup(self) -> None:
+        """Subscribe to match events relevant to this agent."""
+        self.subscribe_to_event("kill_confirmed")
+        self.subscribe_to_event("clutch_detected")
+        self.subscribe_to_event("highlight_moment")
+
+    async def tick(self) -> None:
+        """Periodic maintenance tick."""
+        # Heuristic engine is driven by direct method calls;
+        # nothing periodic is required here.
+
+    async def handle_event(self, record: EventRecord) -> None:
+        """Handle an event from the event bus.
+
+        The heuristic engine is driven synchronously via direct method
+        calls; this hook keeps match context current for future
+        event-driven use.
+        """
+        try:
+            data = record.event.data if hasattr(record, "event") else {}
+            if isinstance(data, dict) and data.get("match_id"):
+                self.config.match_id = data["match_id"]
+        except Exception:
+            pass
+
+    async def cleanup(self) -> None:
+        """Release agent resources."""

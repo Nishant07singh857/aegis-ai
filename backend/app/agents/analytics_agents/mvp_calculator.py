@@ -9,6 +9,8 @@ from typing import Dict, List, Optional, Any
 from dataclasses import dataclass, field
 from enum import Enum
 import structlog
+from ..base_agent import BaseAgent, AgentConfig
+from ...core.event_bus import EventBus, EventRecord
 
 logger = structlog.get_logger("aegis.agents.mvp")
 
@@ -89,7 +91,7 @@ class MVPResult:
     compared_to_average: float = 0.0  # % above/below average
 
 
-class MVPCalculator:
+class MVPCalculator(BaseAgent):
     """
     Multi-factor MVP scoring engine.
     
@@ -108,7 +110,8 @@ class MVPCalculator:
     - Opponent strength
     """
     
-    def __init__(self):
+    def __init__(self, config: AgentConfig, event_bus: EventBus):
+        super().__init__(config, event_bus)
         # Scoring weights (sum to 1.0)
         self.weights = {
             PerformanceWeight.KILLS: 0.20,
@@ -513,3 +516,34 @@ class MVPCalculator:
         """Reset calculator"""
         self.tournament_mvps.clear()
         self._log.info("MVP calculator reset")
+
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    # BaseAgent lifecycle
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+    async def setup(self) -> None:
+        """Subscribe to match events relevant to this agent."""
+        self.subscribe_to_event("kill_confirmed")
+        self.subscribe_to_event("match_state_change")
+
+    async def tick(self) -> None:
+        """Periodic maintenance tick."""
+        # Heuristic engine is driven by direct method calls;
+        # nothing periodic is required here.
+
+    async def handle_event(self, record: EventRecord) -> None:
+        """Handle an event from the event bus.
+
+        The heuristic engine is driven synchronously via direct method
+        calls; this hook keeps match context current for future
+        event-driven use.
+        """
+        try:
+            data = record.event.data if hasattr(record, "event") else {}
+            if isinstance(data, dict) and data.get("match_id"):
+                self.config.match_id = data["match_id"]
+        except Exception:
+            pass
+
+    async def cleanup(self) -> None:
+        """Release agent resources."""

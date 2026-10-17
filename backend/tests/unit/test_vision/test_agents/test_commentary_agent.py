@@ -7,7 +7,9 @@ voice synthesis, caster memory, and language management.
 
 import pytest
 import time
+from unittest.mock import AsyncMock, Mock
 
+from app.agents.base_agent import AgentConfig
 from app.agents.commentary_agents.script_generator import (
     ScriptGenerator, CommentaryStyle, CommentaryTone, CommentaryTrigger,
     CommentaryLine,
@@ -29,6 +31,20 @@ from app.agents.commentary_agents.language_manager import (
 )
 
 
+def _make_bus():
+    """Create a mock event bus for agent construction."""
+    bus = AsyncMock()
+    bus.publish = AsyncMock(return_value="test-event-id")
+    bus.subscribe = Mock(return_value="subscriber-id")
+    bus.unsubscribe = Mock(return_value=True)
+    return bus
+
+
+def _make_config(agent_id: str, agent_type: str) -> AgentConfig:
+    """Create a minimal agent config for tests."""
+    return AgentConfig(agent_id=agent_id, agent_type=agent_type)
+
+
 @pytest.mark.unit
 @pytest.mark.agents
 class TestScriptGenerator:
@@ -37,7 +53,10 @@ class TestScriptGenerator:
     @pytest.fixture
     def generator(self):
         """Create ScriptGenerator instance"""
-        return ScriptGenerator()
+        return ScriptGenerator(
+            config=_make_config("script_generator", "script_generator"),
+            event_bus=_make_bus(),
+        )
     
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     # INITIALIZATION TESTS
@@ -408,7 +427,10 @@ class TestEmotionEngine:
     @pytest.fixture
     def engine(self):
         """Create EmotionEngine instance"""
-        return EmotionEngine()
+        return EmotionEngine(
+            config=_make_config("emotion_engine", "emotion_engine"),
+            event_bus=_make_bus(),
+        )
     
     def test_initialization(self, engine):
         """Test engine initializes with calm state"""
@@ -557,7 +579,10 @@ class TestHypeDetector:
     @pytest.fixture
     def detector(self):
         """Create HypeDetector instance"""
-        return HypeDetector()
+        return HypeDetector(
+            config=_make_config("hype_detector", "hype_detector"),
+            event_bus=_make_bus(),
+        )
     
     def test_initialization(self, detector):
         """Test detector initializes correctly"""
@@ -721,7 +746,10 @@ class TestVoiceSynthesizer:
     @pytest.fixture
     def synthesizer(self):
         """Create VoiceSynthesizer instance"""
-        return VoiceSynthesizer()
+        return VoiceSynthesizer(
+            config=_make_config("voice_synthesizer", "voice_synthesizer"),
+            event_bus=_make_bus(),
+        )
     
     def test_initialization(self, synthesizer):
         """Test synthesizer initializes with voice profiles"""
@@ -823,7 +851,10 @@ class TestCasterMemory:
     @pytest.fixture
     def memory(self):
         """Create CasterMemory instance"""
-        return CasterMemory()
+        return CasterMemory(
+            config=_make_config("caster_memory", "caster_memory"),
+            event_bus=_make_bus(),
+        )
     
     def test_initialization(self, memory):
         """Test memory initializes empty"""
@@ -944,7 +975,10 @@ class TestLanguageManager:
     @pytest.fixture
     def lang_manager(self):
         """Create LanguageManager instance"""
-        return LanguageManager()
+        return LanguageManager(
+            config=_make_config("language_manager", "language_manager"),
+            event_bus=_make_bus(),
+        )
     
     def test_initialization(self, lang_manager):
         """Test language manager initializes with profiles"""

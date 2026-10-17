@@ -9,6 +9,8 @@ import pytest
 import time
 from unittest.mock import AsyncMock, Mock
 
+from app.agents.base_agent import AgentConfig
+
 from app.agents.team_agents.team_tracker import (
     TeamTracker, PlayerState, TeamActivity, ThreatLevel,
 )
@@ -34,11 +36,12 @@ class TestTeamTracker:
     def team_agent(self, mock_event_bus):
         """Create a test team agent"""
         return TeamTracker(
+            config=AgentConfig(agent_id="test_team_001", agent_type="team_agent"),
+            event_bus=mock_event_bus,
             team_id="test_team_001",
             team_name="Test Team",
             short_name="TEST",
             player_names=["Player1", "Player2", "Player3", "Player4"],
-            event_bus=mock_event_bus,
         )
     
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

@@ -59,6 +59,18 @@ class Settings(BaseSettings):
     REFRESH_TOKEN_EXPIRE_DAYS: int = Field(default=7, ge=1)
     API_KEY_HEADER: str = "X-API-Key"
     BCRYPT_ROUNDS: int = Field(default=12, ge=4, le=31)
+    # Fernet key for at-rest encryption of sensitive data (e.g. stored API keys).
+    # MUST be set to a stable value in production; if unset, a random ephemeral
+    # key is used and anything encrypted becomes undecryptable after restart.
+    FERNET_KEY: Optional[SecretStr] = Field(default=None, description="Base64 Fernet key for at-rest encryption")
+    # Operator auth (Phase 1): there is no User table yet, so the control plane
+    # authenticates against a single configured admin credential and/or a
+    # static API-key allowlist. Set ADMIN_PASSWORD (and keep ADMIN_USERNAME
+    # secret if you change it) and/or ADMIN_API_KEYS in the environment.
+    # Treat these as real credentials: never commit them.
+    ADMIN_USERNAME: str = Field(default="admin", description="Operator username for /api/v1/auth/token login")
+    ADMIN_PASSWORD: Optional[SecretStr] = Field(default=None, description="Operator password; login disabled when unset")
+    ADMIN_API_KEYS: List[str] = Field(default=[], description="Static allowlist of operator API keys (dev/demo grade)")
     
     # Database
     DATABASE_URL: str = Field(
@@ -164,7 +176,10 @@ class Settings(BaseSettings):
     TEMP_DIR: Path = DATA_DIR / "temp"
     
     # CORS
-    CORS_ORIGINS: List[str] = Field(default=["*"])
+    # Default to explicit local origins. Wildcard "*" is supported but MUST NOT
+    # be combined with allow_credentials (browsers reject it); main.py disables
+    # allow_credentials automatically when the origin list is exactly ["*"].
+    CORS_ORIGINS: List[str] = Field(default=["http://localhost:3000", "http://localhost:3001"])
     CORS_METHODS: List[str] = Field(default=["*"])
     CORS_HEADERS: List[str] = Field(default=["*"])
     

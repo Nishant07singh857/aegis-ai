@@ -9,6 +9,8 @@ import pytest
 import time
 from unittest.mock import AsyncMock, Mock, patch
 
+from app.agents.base_agent import AgentConfig
+
 from app.agents.observer_agents.director_ai import (
     ObserverDirector, BroadcastState, DirectorDecision,
     BroadcastScene,
@@ -25,6 +27,15 @@ from app.agents.observer_agents.safety_controller import (
 from app.agents.observer_agents.playbook_manager import (
     PlaybookManager, PlaybookType,
 )
+
+
+def _make_bus():
+    """Create a mock event bus for agent construction."""
+    bus = AsyncMock()
+    bus.publish = AsyncMock(return_value="test-event-id")
+    bus.subscribe = Mock(return_value="subscriber-id")
+    bus.unsubscribe = Mock(return_value=True)
+    return bus
 
 
 @pytest.mark.unit
@@ -44,8 +55,11 @@ class TestObserverDirector:
     @pytest.fixture
     def director(self, mock_event_bus):
         """Create observer director instance"""
-        director = ObserverDirector(mock_event_bus)
-        director.state.match_id = "test_match_001"
+        director = ObserverDirector(
+            config=AgentConfig(agent_id="observer_director", agent_type="observer_director"),
+            event_bus=mock_event_bus,
+        )
+        director.director_state.match_id = "test_match_001"
         return director
     
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -57,7 +71,7 @@ class TestObserverDirector:
         assert director.config.agent_id == "observer_director"
         assert director.config.agent_type == "observer_director"
         assert director.config.priority.value == 100  # CRITICAL priority
-        assert director.state.broadcast_state == BroadcastState.IDLE
+        assert director.director_state.broadcast_state == BroadcastState.IDLE
         assert director.min_scene_duration > 0
         assert director.max_switches_per_minute > 0
     
@@ -74,50 +88,50 @@ class TestObserverDirector:
     
     def test_update_broadcast_state_early_game(self, director):
         """Test broadcast state transitions to early game"""
-        director.state.teams_alive = 16
-        director.state.match_time_seconds = 30
-        director.state.zone_phase = 0
+        director.director_state.teams_alive = 16
+        director.director_state.match_time_seconds = 30
+        director.director_state.zone_phase = 0
         
         director._update_broadcast_state()
         
-        assert director.state.broadcast_state == BroadcastState.EARLY_GAME
+        assert director.director_state.broadcast_state == BroadcastState.EARLY_GAME
     
     def test_update_broadcast_state_mid_game(self, director):
         """Test broadcast state transitions to mid game"""
-        director.state.teams_alive = 10
-        director.state.zone_phase = 3
-        director.state.match_time_seconds = 300
+        director.director_state.teams_alive = 10
+        director.director_state.zone_phase = 3
+        director.director_state.match_time_seconds = 300
         
         director._update_broadcast_state()
         
-        assert director.state.broadcast_state == BroadcastState.MID_GAME
+        assert director.director_state.broadcast_state == BroadcastState.MID_GAME
     
     def test_update_broadcast_state_late_game(self, director):
         """Test broadcast state transitions to late game"""
-        director.state.teams_alive = 5
-        director.state.zone_phase = 5
+        director.director_state.teams_alive = 5
+        director.director_state.zone_phase = 5
         
         director._update_broadcast_state()
         
-        assert director.state.broadcast_state == BroadcastState.LATE_GAME
+        assert director.director_state.broadcast_state == BroadcastState.LATE_GAME
     
     def test_update_broadcast_state_final_circle(self, director):
         """Test broadcast state transitions to final circle"""
-        director.state.teams_alive = 3
-        director.state.zone_phase = 7
+        director.director_state.teams_alive = 3
+        director.director_state.zone_phase = 7
         
         director._update_broadcast_state()
         
-        assert director.state.broadcast_state == BroadcastState.FINAL_CIRCLE
+        assert director.director_state.broadcast_state == BroadcastState.FINAL_CIRCLE
     
     def test_update_broadcast_state_match_end(self, director):
         """Test broadcast state transitions to match end"""
-        director.state.teams_alive = 1
-        director.state.zone_phase = 8
+        director.director_state.teams_alive = 1
+        director.director_state.zone_phase = 8
         
         director._update_broadcast_state()
         
-        assert director.state.broadcast_state == BroadcastState.MATCH_END
+        assert director.director_state.broadcast_state == BroadcastState.MATCH_END
     
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     # DECISION MAKING TESTS
@@ -126,8 +140,8 @@ class TestObserverDirector:
     @pytest.mark.asyncio
     async def test_make_decision_no_fights(self, director):
         """Test decision making when no fights are active"""
-        director.state.active_fights = {}
-        director.state.teams_alive = 12
+        director.director_state.active_fights = {}
+        director.director_state.teams_alive = 12
         
         decision = await director._make_director_decision()
         
@@ -137,7 +151,7 @@ class TestObserverDirector:
     @pytest.mark.asyncio
     async def test_make_decision_with_high_intensity_fight(self, director):
         """Test decision making with high intensity fight"""
-        director.state.active_fights = {
+        director.director_state.active_fights = {
             "fight_001": {
                 "teams": ["team_001", "team_002"],
                 "intensity": "high",
@@ -147,7 +161,7 @@ class TestObserverDirector:
                 "detected_at": time.time(),
             }
         }
-        director.state.teams_alive = 8
+        director.director_state.teams_alive = 8
         
         # Mock POV selector to return a candidate
         candidate = POVCandidate(
@@ -170,12 +184,12 @@ class TestObserverDirector:
     async def test_minimum_scene_time_enforced(self, director):
         """Test that minimum scene time prevents switching"""
         # Set current scene with short duration
-        director.state.current_scene = BroadcastScene(
+        director.director_state.current_scene = BroadcastScene(
             feed_type=FeedType.FIGHT,
             fight_id="fight_001",
             started_at=time.time() - 2,  # Only 2 seconds ago
         )
-        director.state.current_scene.duration = 2.0
+        director.director_state.current_scene.duration = 2.0
         director.min_scene_duration = 10.0
         
         decision = await director._make_director_decision()
@@ -200,17 +214,17 @@ class TestObserverDirector:
         
         await director._switch_feed(candidate, "Test switch")
         
-        assert director.state.current_scene is not None
-        assert director.state.current_scene.feed_type == FeedType.TEAM_POV
-        assert director.state.current_scene.team_id == "team_001"
-        assert director.state.total_scene_changes == 1
-        assert len(director.state.previous_scenes) == 0  # First switch
+        assert director.director_state.current_scene is not None
+        assert director.director_state.current_scene.feed_type == FeedType.TEAM_POV
+        assert director.director_state.current_scene.team_id == "team_001"
+        assert director.director_state.total_scene_changes == 1
+        assert len(director.director_state.previous_scenes) == 0  # First switch
     
     @pytest.mark.asyncio
     async def test_switch_feed_saves_previous(self, director):
         """Test that switching saves previous scene to history"""
         # Set initial scene
-        director.state.current_scene = BroadcastScene(
+        director.director_state.current_scene = BroadcastScene(
             feed_type=FeedType.TEAM_POV,
             team_id="team_001",
         )
@@ -225,14 +239,14 @@ class TestObserverDirector:
         
         await director._switch_feed(candidate, "Switch to fight")
         
-        assert len(director.state.previous_scenes) == 1
-        assert director.state.previous_scenes[0].team_id == "team_001"
-        assert director.state.current_scene.fight_id == "fight_001"
+        assert len(director.director_state.previous_scenes) == 1
+        assert director.director_state.previous_scenes[0].team_id == "team_001"
+        assert director.director_state.current_scene.fight_id == "fight_001"
     
     @pytest.mark.asyncio
     async def test_switch_to_fight(self, director):
         """Test switching to a specific fight"""
-        director.state.active_fights["fight_001"] = {
+        director.director_state.active_fights["fight_001"] = {
             "teams": ["team_001", "team_002"],
             "intensity": "high",
             "intensity_score": 80,
@@ -243,28 +257,28 @@ class TestObserverDirector:
         with patch.object(director.pov_selector, 'select_best_team_for_fight', return_value="team_001"):
             await director._switch_to_fight("fight_001", "Important fight")
         
-        assert director.state.current_scene is not None
-        assert director.state.current_scene.fight_id == "fight_001"
+        assert director.director_state.current_scene is not None
+        assert director.director_state.current_scene.fight_id == "fight_001"
     
     @pytest.mark.asyncio
     async def test_switch_to_clutch(self, director):
         """Test switching to clutch situation - highest priority"""
         await director._switch_to_clutch("clutch_001", "1v4 clutch!")
         
-        assert director.state.current_scene is not None
-        assert director.state.current_scene.feed_type == FeedType.PLAYER_POV
-        assert director.state.current_scene.is_clutch is True
-        assert director.state.current_scene.priority_score == 100
-        assert director.state.current_scene.camera_mode == CameraMode.CLUTCH
+        assert director.director_state.current_scene is not None
+        assert director.director_state.current_scene.feed_type == FeedType.PLAYER_POV
+        assert director.director_state.current_scene.is_clutch is True
+        assert director.director_state.current_scene.priority_score == 100
+        assert director.director_state.current_scene.camera_mode == CameraMode.CLUTCH
     
     @pytest.mark.asyncio
     async def test_follow_player(self, director):
         """Test following a specific player"""
         await director._follow_player("player_star_001", "Star player action")
         
-        assert director.state.current_scene is not None
-        assert director.state.current_scene.feed_type == FeedType.PLAYER_POV
-        assert director.state.current_scene.player_id == "player_star_001"
+        assert director.director_state.current_scene is not None
+        assert director.director_state.current_scene.feed_type == FeedType.PLAYER_POV
+        assert director.director_state.current_scene.player_id == "player_star_001"
     
     @pytest.mark.asyncio
     async def test_show_replay(self, director):
@@ -277,20 +291,20 @@ class TestObserverDirector:
         
         await director._show_replay(replay_data)
         
-        assert director.state.broadcast_state == BroadcastState.REPLAY
-        assert director.state.total_replays_shown == 1
+        assert director.director_state.broadcast_state == BroadcastState.REPLAY
+        assert director.director_state.total_replays_shown == 1
     
     @pytest.mark.asyncio
     async def test_replay_cooldown_respected(self, director):
         """Test that replay cooldown is enforced"""
-        director.state.last_replay_time = time.time()  # Just showed replay
+        director.director_state.last_replay_time = time.time()  # Just showed replay
         
         replay_data = {"type": "clutch", "priority": 90}
         
         await director._show_replay(replay_data)
         
         # Should not show because cooldown active
-        assert director.state.total_replays_shown == 0
+        assert director.director_state.total_replays_shown == 0
     
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     # EVENT HANDLING TESTS
@@ -310,26 +324,26 @@ class TestObserverDirector:
         
         await director._on_fight_detected(data)
         
-        assert "fight_critical" in director.state.active_fights
+        assert "fight_critical" in director.director_state.active_fights
         # Critical fight should trigger immediate switch
-        assert director.state.candidate_priority_score > 0
+        assert director.director_state.candidate_priority_score > 0
     
     @pytest.mark.asyncio
     async def test_on_fight_ended(self, director):
         """Test handling fight end event"""
-        director.state.active_fights["fight_001"] = {
+        director.director_state.active_fights["fight_001"] = {
             "teams": ["team_001", "team_002"],
             "intensity": "medium",
             "intensity_score": 50,
         }
-        director.state.current_scene = BroadcastScene(
+        director.director_state.current_scene = BroadcastScene(
             feed_type=FeedType.FIGHT,
             fight_id="fight_001",
         )
         
         await director._on_fight_ended({"fight_id": "fight_001"})
         
-        assert "fight_001" not in director.state.active_fights
+        assert "fight_001" not in director.director_state.active_fights
     
     @pytest.mark.asyncio
     async def test_on_clutch_detected(self, director):
@@ -344,7 +358,7 @@ class TestObserverDirector:
         await director._on_clutch_detected(data)
         
         # Clutch detection should force immediate switch
-        assert director.state.current_scene is not None
+        assert director.director_state.current_scene is not None
     
     @pytest.mark.asyncio
     async def test_on_clutch_resolved_win(self, director):
@@ -357,14 +371,14 @@ class TestObserverDirector:
         
         await director._on_clutch_resolved(data)
         
-        assert len(director.state.replay_buffer) == 1
-        assert director.state.replay_buffer[0]["type"] == "clutch"
-        assert director.state.replay_buffer[0]["priority"] == 100
+        assert len(director.director_state.replay_buffer) == 1
+        assert director.director_state.replay_buffer[0]["type"] == "clutch"
+        assert director.director_state.replay_buffer[0]["priority"] == 100
     
     @pytest.mark.asyncio
     async def test_on_kill_in_watched_fight(self, director):
         """Test handling kill in currently watched fight"""
-        director.state.current_scene = BroadcastScene(
+        director.director_state.current_scene = BroadcastScene(
             feed_type=FeedType.FIGHT,
             fight_id="fight_001",
         )
@@ -386,8 +400,8 @@ class TestObserverDirector:
         
         await director._on_zone_change(data)
         
-        assert director.state.zone_phase == 7
-        assert director.state.broadcast_state == BroadcastState.FINAL_CIRCLE
+        assert director.director_state.zone_phase == 7
+        assert director.director_state.broadcast_state == BroadcastState.FINAL_CIRCLE
     
     @pytest.mark.asyncio
     async def test_on_highlight_moment(self, director):
@@ -400,7 +414,7 @@ class TestObserverDirector:
         
         await director._on_highlight_moment(data)
         
-        assert len(director.state.replay_buffer) == 1
+        assert len(director.director_state.replay_buffer) == 1
     
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     # OBS COMMUNICATION TESTS
@@ -430,11 +444,11 @@ class TestObserverDirector:
     
     def test_calculate_current_scene_score_fight(self, director):
         """Test scene score for active fight"""
-        director.state.current_scene = BroadcastScene(
+        director.director_state.current_scene = BroadcastScene(
             feed_type=FeedType.FIGHT,
             fight_id="fight_001",
         )
-        director.state.active_fights["fight_001"] = {
+        director.director_state.active_fights["fight_001"] = {
             "intensity_score": 80,
             "is_clutch": False,
             "entertainment_score": 70,
@@ -446,11 +460,11 @@ class TestObserverDirector:
     
     def test_calculate_current_scene_score_clutch(self, director):
         """Test scene score for clutch situation"""
-        director.state.current_scene = BroadcastScene(
+        director.director_state.current_scene = BroadcastScene(
             feed_type=FeedType.FIGHT,
             fight_id="fight_clutch",
         )
-        director.state.active_fights["fight_clutch"] = {
+        director.director_state.active_fights["fight_clutch"] = {
             "intensity_score": 90,
             "is_clutch": True,
             "entertainment_score": 95,
@@ -462,7 +476,7 @@ class TestObserverDirector:
     
     def test_calculate_current_scene_score_priority_team(self, director):
         """Test scene score with priority team bonus"""
-        director.state.current_scene = BroadcastScene(
+        director.director_state.current_scene = BroadcastScene(
             feed_type=FeedType.TEAM_POV,
             team_id="team_priority",
         )
@@ -474,12 +488,12 @@ class TestObserverDirector:
     
     def test_calculate_current_scene_score_stale(self, director):
         """Test scene score decreases for stale scenes"""
-        director.state.current_scene = BroadcastScene(
+        director.director_state.current_scene = BroadcastScene(
             feed_type=FeedType.TEAM_POV,
             team_id="team_001",
             started_at=time.time() - 40,  # 40 seconds old
         )
-        director.state.current_scene.duration = 40.0
+        director.director_state.current_scene.duration = 40.0
         
         score = director._calculate_current_scene_score()
         
@@ -506,8 +520,8 @@ class TestObserverDirector:
         
         await director._execute_playbook_action(action)
         
-        assert director.state.current_scene is not None
-        assert director.state.current_scene.feed_type == FeedType.TEAM_POV
+        assert director.director_state.current_scene is not None
+        assert director.director_state.current_scene.feed_type == FeedType.TEAM_POV
     
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     # STATE MANAGEMENT TESTS
@@ -515,14 +529,14 @@ class TestObserverDirector:
     
     def test_update_match_context(self, director):
         """Test updating match context"""
-        director.state.recent_decisions.append({
+        director.director_state.recent_decisions.append({
             "timestamp": time.time(),
             "decision": "switch_feed",
         })
         
         director._update_match_context()
         
-        assert director.state.switch_count_last_minute == 1
+        assert director.director_state.switch_count_last_minute == 1
     
     def test_get_director_summary(self, director):
         """Test getting director summary"""
@@ -571,15 +585,15 @@ class TestObserverDirector:
     
     def test_reset_for_match(self, director):
         """Test resetting director for new match"""
-        director.state.total_scene_changes = 50
-        director.state.active_fights["fight_old"] = {}
+        director.director_state.total_scene_changes = 50
+        director.director_state.active_fights["fight_old"] = {}
         director.priority_teams.add("team_old")
         
         director.reset_for_match("new_match_002")
         
-        assert director.state.match_id == "new_match_002"
-        assert director.state.total_scene_changes == 0
-        assert len(director.state.active_fights) == 0
+        assert director.director_state.match_id == "new_match_002"
+        assert director.director_state.total_scene_changes == 0
+        assert len(director.director_state.active_fights) == 0
 
 
 @pytest.mark.unit
@@ -590,7 +604,10 @@ class TestPOVSelector:
     @pytest.fixture
     def selector(self):
         """Create POVSelector instance"""
-        return POVSelector()
+        return POVSelector(
+            config=AgentConfig(agent_id="pov_selector", agent_type="pov_selector"),
+            event_bus=_make_bus(),
+        )
     
     def test_initialization(self, selector):
         """Test selector initializes correctly"""
@@ -678,13 +695,16 @@ class TestSafetyController:
     @pytest.fixture
     def safety(self):
         """Create SafetyController instance"""
-        return SafetyController()
+        return SafetyController(
+            config=AgentConfig(agent_id="safety_controller", agent_type="safety_controller"),
+            event_bus=_make_bus(),
+        )
     
     def test_initialization(self, safety):
         """Test safety controller initializes correctly"""
         assert safety.config.min_scene_time > 0
         assert safety.config.max_switches_per_minute > 0
-        assert safety.state.locked_until == 0.0
+        assert safety.safety_state.locked_until == 0.0
     
     def test_can_switch_normal(self, safety):
         """Test switching is allowed in normal state"""
@@ -692,14 +712,14 @@ class TestSafetyController:
     
     def test_can_switch_when_locked(self, safety):
         """Test switching prevented when locked"""
-        safety.state.locked_until = time.time() + 10  # Locked for 10 seconds
-        safety.state.lock_reason = "Clutch situation"
+        safety.safety_state.locked_until = time.time() + 10  # Locked for 10 seconds
+        safety.safety_state.lock_reason = "Clutch situation"
         
         assert safety.can_switch(Mock()) is False
     
     def test_can_switch_manual_override(self, safety):
         """Test switching always allowed with manual override"""
-        safety.state.locked_until = time.time() + 10
+        safety.safety_state.locked_until = time.time() + 10
         safety.manual_override = True
         
         assert safety.can_switch(Mock()) is True
@@ -711,7 +731,7 @@ class TestSafetyController:
     
     def test_validate_switch_during_replay(self, safety):
         """Test switch validation during replay"""
-        safety.state.is_replay = True
+        safety.safety_state.is_replay = True
         
         new_scene = Mock()
         new_scene.feed_type = Mock()
@@ -724,23 +744,23 @@ class TestSafetyController:
         """Test applying safety lock"""
         safety._apply_lock(10.0, "Clutch focus")
         
-        assert safety.state.locked_until > time.time()
-        assert safety.state.lock_reason == "Clutch focus"
+        assert safety.safety_state.locked_until > time.time()
+        assert safety.safety_state.lock_reason == "Clutch focus"
     
     def test_release_lock(self, safety):
         """Test releasing safety lock"""
         safety._apply_lock(10.0, "Test lock")
         safety.release_lock()
         
-        assert safety.state.locked_until == 0.0
-        assert safety.state.lock_reason == ""
+        assert safety.safety_state.locked_until == 0.0
+        assert safety.safety_state.lock_reason == ""
     
     def test_record_violation(self, safety):
         """Test recording a safety violation"""
         safety._record_violation(SafetyViolation.SCENE_TOO_SHORT, "Scene was only 2 seconds")
         
-        assert safety.state.violation_count == 1
-        assert len(safety.state.violations) == 1
+        assert safety.safety_state.violation_count == 1
+        assert len(safety.safety_state.violations) == 1
     
     def test_enable_disable_manual_override(self, safety):
         """Test toggling manual override"""
@@ -768,7 +788,10 @@ class TestPlaybookManager:
     @pytest.fixture
     def playbook(self):
         """Create PlaybookManager instance"""
-        return PlaybookManager()
+        return PlaybookManager(
+            config=AgentConfig(agent_id="playbook_manager", agent_type="playbook_manager"),
+            event_bus=_make_bus(),
+        )
     
     def test_initialization(self, playbook):
         """Test playbook manager initializes with default playbooks"""

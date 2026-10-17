@@ -150,6 +150,11 @@ class AgentRegistry:
         self.agents_by_type[record.agent_type].remove(agent_id)
         self.agents_by_priority[record.priority].remove(agent_id)
         
+        # Remove from state index (avoid stale entries)
+        for state_list in self.agents_by_state.values():
+            if agent_id in state_list:
+                state_list.remove(agent_id)
+        
         # Clean up empty lists
         if not self.agents_by_type[record.agent_type]:
             del self.agents_by_type[record.agent_type]

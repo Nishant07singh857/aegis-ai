@@ -12,6 +12,8 @@ from dataclasses import dataclass, field
 from collections import deque
 from enum import Enum
 import structlog
+from ..base_agent import BaseAgent, AgentConfig
+from ...core.event_bus import EventBus, EventRecord
 
 logger = structlog.get_logger("aegis.agents.fight_detector")
 
@@ -203,7 +205,7 @@ class DetectedFight:
         return time.time() - self.last_activity_at
 
 
-class FightDetector:
+class FightDetector(BaseAgent):
     """
     Real-time fight detection engine.
     
@@ -222,8 +224,9 @@ class FightDetector:
     - Fight phases: initiation → engagement → peak → winding down → resolved
     """
     
-    def __init__(self):
-        self.state = FightDetectionState()
+    def __init__(self, config: AgentConfig, event_bus: EventBus):
+        super().__init__(config, event_bus)
+        self.detection_state = FightDetectionState()
         
         # Detection thresholds
         self.thresholds = {
@@ -262,7 +265,7 @@ class FightDetector:
         """
         
         # Add to buffer
-        self.state.signal_buffer.append(signal)
+        self.detection_state.signal_buffer.append(signal)
         
         # Clean old signals
         self._cleanup_old_signals()
@@ -278,7 +281,7 @@ class FightDetector:
             fight_id = self._create_potential_fight(signal)
         
         # Update potential fight
-        fight = self.state.potential_fights.get(fight_id)
+        fight = self.detection_state.potential_fights.get(fight_id)
         if fight:
             self._update_potential_fight(fight, signal)
             
@@ -419,14 +422,14 @@ class FightDetector:
         """Find existing fight related to this signal"""
         
         # Check active fights first
-        for fight_id, fight in self.state.active_fights.items():
+        for fight_id, fight in self.detection_state.active_fights.items():
             if signal.source_team_id in fight.teams_involved:
                 return fight_id
             if signal.target_team_id and signal.target_team_id in fight.teams_involved:
                 return fight_id
         
         # Check potential fights
-        for fight_id, fight in self.state.potential_fights.items():
+        for fight_id, fight in self.detection_state.potential_fights.items():
             if signal.source_team_id in fight.teams_involved:
                 return fight_id
             if signal.target_team_id and signal.target_team_id in fight.teams_involved:
@@ -434,7 +437,7 @@ class FightDetector:
         
         # Check for nearby fights by location
         if signal.location_x and signal.location_y:
-            for fight_id, fight in self.state.potential_fights.items():
+            for fight_id, fight in self.detection_state.potential_fights.items():
                 dist = math.sqrt(
                     (signal.location_x - fight.location_x) ** 2 +
                     (signal.location_y - fight.location_y) ** 2
@@ -458,7 +461,7 @@ class FightDetector:
         if signal.target_team_id:
             fight.teams_involved.add(signal.target_team_id)
         
-        self.state.potential_fights[fight_id] = fight
+        self.detection_state.potential_fights[fight_id] = fight
         
         self._log.debug(f"New potential fight: {fight_id} | Teams: {fight.teams_involved}")
         
@@ -560,7 +563,7 @@ class FightDetector:
     def _promote_to_active(self, fight_id: str) -> str:
         """Promote a potential fight to an active fight"""
         
-        potential = self.state.potential_fights.pop(fight_id)
+        potential = self.detection_state.potential_fights.pop(fight_id)
         
         # Generate active fight ID
         active_fight_id = f"fight_{int(time.time())}_{list(potential.teams_involved)[0][:8]}"
@@ -593,18 +596,18 @@ class FightDetector:
             active_fight.primary_attacker = teams[0]
             active_fight.primary_defender = teams[1]
         
-        self.state.active_fights[active_fight_id] = active_fight
-        self.state.total_fights_detected += 1
+        self.detection_state.active_fights[active_fight_id] = active_fight
+        self.detection_state.total_fights_detected += 1
         
         # Set cooldowns
         for team_id in potential.teams_involved:
-            self.state.team_fight_cooldowns[team_id] = time.time()
-            self.state.team_engagements.setdefault(team_id, set())
+            self.detection_state.team_fight_cooldowns[team_id] = time.time()
+            self.detection_state.team_engagements.setdefault(team_id, set())
         
         detection_time = (time.time() - potential.first_signal_time) * 1000
-        n = self.state.total_fights_detected
-        self.state.average_detection_time_ms = (
-            self.state.average_detection_time_ms * (n - 1) + detection_time
+        n = self.detection_state.total_fights_detected
+        self.detection_state.average_detection_time_ms = (
+            self.detection_state.average_detection_time_ms * (n - 1) + detection_time
         ) / n
         
         self._log.warning(
@@ -687,7 +690,7 @@ class FightDetector:
     ) -> None:
         """Update an active fight with new events"""
         
-        fight = self.state.active_fights.get(fight_id)
+        fight = self.detection_state.active_fights.get(fight_id)
         if not fight:
             return
         
@@ -760,7 +763,7 @@ class FightDetector:
     def check_fight_resolution(self, fight_id: str) -> bool:
         """Check if a fight should be resolved"""
         
-        fight = self.state.active_fights.get(fight_id)
+        fight = self.detection_state.active_fights.get(fight_id)
         if not fight:
             return False
         
@@ -781,7 +784,7 @@ class FightDetector:
     def resolve_fight(self, fight_id: str) -> Optional[Dict[str, Any]]:
         """Resolve a fight and return summary"""
         
-        fight = self.state.active_fights.pop(fight_id, None)
+        fight = self.detection_state.active_fights.pop(fight_id, None)
         if not fight:
             return None
         
@@ -823,12 +826,12 @@ class FightDetector:
         """Remove signals older than the buffer window"""
         cutoff = time.time() - self.thresholds["signal_buffer_window"]
         
-        while self.state.signal_buffer and self.state.signal_buffer[0].timestamp < cutoff:
-            self.state.signal_buffer.popleft()
+        while self.detection_state.signal_buffer and self.detection_state.signal_buffer[0].timestamp < cutoff:
+            self.detection_state.signal_buffer.popleft()
     
     def _is_in_cooldown(self, team_id: str) -> bool:
         """Check if a team is in fight cooldown"""
-        last_fight = self.state.team_fight_cooldowns.get(team_id, 0)
+        last_fight = self.detection_state.team_fight_cooldowns.get(team_id, 0)
         return (time.time() - last_fight) < self.thresholds["fight_cooldown_seconds"]
     
     def cleanup_stale_fights(self) -> List[str]:
@@ -837,16 +840,16 @@ class FightDetector:
         
         # Clean potential fights
         stale_potential = []
-        for fight_id, fight in self.state.potential_fights.items():
+        for fight_id, fight in self.detection_state.potential_fights.items():
             inactivity = time.time() - fight.last_signal_time
             if inactivity > self.thresholds["signal_buffer_window"] * 3:
                 stale_potential.append(fight_id)
         
         for fight_id in stale_potential:
-            self.state.potential_fights.pop(fight_id, None)
+            self.detection_state.potential_fights.pop(fight_id, None)
         
         # Resolve inactive active fights
-        for fight_id in list(self.state.active_fights.keys()):
+        for fight_id in list(self.detection_state.active_fights.keys()):
             if self.check_fight_resolution(fight_id):
                 summary = self.resolve_fight(fight_id)
                 if summary:
@@ -875,12 +878,12 @@ class FightDetector:
                 "location": (round(f.location_x, 1), round(f.location_y, 1)),
                 "is_clutch": f.is_clutch,
             }
-            for f in self.state.active_fights.values()
+            for f in self.detection_state.active_fights.values()
         ]
     
     def get_fight(self, fight_id: str) -> Optional[Dict[str, Any]]:
         """Get specific fight details"""
-        fight = self.state.active_fights.get(fight_id)
+        fight = self.detection_state.active_fights.get(fight_id)
         if not fight:
             return None
         
@@ -912,7 +915,7 @@ class FightDetector:
     
     def is_team_fighting(self, team_id: str) -> bool:
         """Check if a team is currently in an active fight"""
-        for fight in self.state.active_fights.values():
+        for fight in self.detection_state.active_fights.values():
             if team_id in fight.teams_involved:
                 return True
         return False
@@ -927,23 +930,55 @@ class FightDetector:
                 "phase": f.phase.value,
                 "duration": round(f.get_duration(), 1),
             }
-            for f in self.state.active_fights.values()
+            for f in self.detection_state.active_fights.values()
             if team_id in f.teams_involved
         ]
     
     def get_stats(self) -> Dict[str, Any]:
         """Get detection statistics"""
         return {
-            "total_fights_detected": self.state.total_fights_detected,
-            "active_fights": len(self.state.active_fights),
-            "potential_fights": len(self.state.potential_fights),
-            "false_positives": self.state.false_positives,
-            "missed_fights": self.state.missed_fights,
-            "average_detection_time_ms": round(self.state.average_detection_time_ms, 1),
-            "signal_buffer_size": len(self.state.signal_buffer),
+            "total_fights_detected": self.detection_state.total_fights_detected,
+            "active_fights": len(self.detection_state.active_fights),
+            "potential_fights": len(self.detection_state.potential_fights),
+            "false_positives": self.detection_state.false_positives,
+            "missed_fights": self.detection_state.missed_fights,
+            "average_detection_time_ms": round(self.detection_state.average_detection_time_ms, 1),
+            "signal_buffer_size": len(self.detection_state.signal_buffer),
         }
     
     def reset(self) -> None:
         """Reset detector state"""
-        self.state = FightDetectionState()
+        self.detection_state = FightDetectionState()
         self._log.info("Fight detector reset")
+
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    # BaseAgent lifecycle
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+    async def setup(self) -> None:
+        """Subscribe to match events relevant to this agent."""
+        self.subscribe_to_event("kill_confirmed")
+        self.subscribe_to_event("player_knocked")
+        self.subscribe_to_event("fight_detected")
+        self.subscribe_to_event("match_state_change")
+
+    async def tick(self) -> None:
+        """Periodic maintenance tick."""
+        self.cleanup_stale_fights()
+
+    async def handle_event(self, record: EventRecord) -> None:
+        """Handle an event from the event bus.
+
+        The heuristic engine is driven synchronously via direct method
+        calls; this hook keeps match context current for future
+        event-driven use.
+        """
+        try:
+            data = record.event.data if hasattr(record, "event") else {}
+            if isinstance(data, dict) and data.get("match_id"):
+                self.config.match_id = data["match_id"]
+        except Exception:
+            pass
+
+    async def cleanup(self) -> None:
+        """Release agent resources."""

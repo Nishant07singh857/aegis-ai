@@ -15,7 +15,7 @@ import jwt
 from passlib.context import CryptContext
 from cryptography.fernet import Fernet
 
-from ..config import settings
+from ..config import settings, Environment
 import structlog
 
 logger = structlog.get_logger("aegis.security")
@@ -39,8 +39,27 @@ class SecurityManager:
             bcrypt__rounds=settings.BCRYPT_ROUNDS,
         )
         
-        # Encryption for sensitive data
-        self._fernet = Fernet(Fernet.generate_key())
+        # Encryption for sensitive data.
+        # The Fernet key MUST be stable across restarts, otherwise anything
+        # encrypted (e.g. stored API keys) becomes undecryptable after a reboot.
+        # It is loaded from settings.FERNET_KEY (env var FERNET_KEY).
+        fernet_key = settings.FERNET_KEY.get_secret_value() if settings.FERNET_KEY else None
+        if fernet_key:
+            self._fernet = Fernet(fernet_key.encode() if isinstance(fernet_key, str) else fernet_key)
+        else:
+            if settings.ENVIRONMENT == Environment.PRODUCTION:
+                raise RuntimeError(
+                    "FERNET_KEY is not set: refusing to boot in production with an "
+                    "ephemeral encryption key (encrypted data would be lost on restart). "
+                    "Set FERNET_KEY to a stable base64 key, e.g. from `python -c "
+                    "'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())'`."
+                )
+            logger.warning(
+                "FERNET_KEY is not set — using an ephemeral encryption key. "
+                "Encrypted data will NOT survive a restart. Set FERNET_KEY for any "
+                "environment where encrypted data must persist."
+            )
+            self._fernet = Fernet(Fernet.generate_key())
         
         # API key hashing
         self._api_key_hasher = hashlib.sha256

@@ -11,14 +11,15 @@ from typing import Dict, List, Optional, Any
 from dataclasses import dataclass, field
 import structlog
 
-from .base_agent import BaseAgent, AgentPriority
+from .base_agent import BaseAgent, AgentConfig, AgentPriority
 from .agent_registry import AgentRegistry
 from ..core.event_bus import EventBus
 from ..config import settings
 
 # Import all agent types
 from .team_agents import (
-    TeamTracker, TeamMemory,
+    TeamTracker, TeamMemory, RotationAnalyzer,
+    UtilityTracker, PositioningAnalyzer,
 )
 from .fight_agents import (
     FightDetector, IntensityScorer, ClutchDetector, EngagementAnalyzer,
@@ -151,7 +152,12 @@ class AgentOrchestrator:
         self._log.info("Phase 1: Initializing CRITICAL agents...")
         
         # Observer Director (CRITICAL - controls broadcast)
-        self.observer_director = ObserverDirector(self.event_bus)
+        self.observer_director = ObserverDirector(
+            config=self._make_config(
+                "observer_director", "observer_director", AgentPriority.CRITICAL
+            ),
+            event_bus=self.event_bus,
+        )
         self._register_agent(
             "observer_director",
             "observer_director",
@@ -160,7 +166,10 @@ class AgentOrchestrator:
         )
         
         # Safety Controller
-        safety_controller = SafetyController()
+        safety_controller = SafetyController(
+            config=self._make_config("safety_controller", "safety_controller", AgentPriority.CRITICAL),
+            event_bus=self.event_bus,
+        )
         self._register_agent(
             "safety_controller",
             "safety_controller",
@@ -177,7 +186,12 @@ class AgentOrchestrator:
         self._log.info("Phase 2: Initializing HIGH priority agents...")
         
         # Fight Detection Coordinator
-        self.fight_coordinator = FightDetector()
+        self.fight_coordinator = FightDetector(
+            config=self._make_config(
+                "fight_coordinator", "fight_coordinator", AgentPriority.HIGH
+            ),
+            event_bus=self.event_bus,
+        )
         self._register_agent(
             "fight_coordinator",
             "fight_coordinator",
@@ -186,7 +200,10 @@ class AgentOrchestrator:
         )
         
         # Intensity Scorer
-        intensity_scorer = IntensityScorer()
+        intensity_scorer = IntensityScorer(
+            config=self._make_config("intensity_scorer", "intensity_scorer", AgentPriority.HIGH),
+            event_bus=self.event_bus,
+        )
         self._register_agent(
             "intensity_scorer",
             "intensity_scorer",
@@ -195,7 +212,10 @@ class AgentOrchestrator:
         )
         
         # Clutch Detector
-        clutch_detector = ClutchDetector()
+        clutch_detector = ClutchDetector(
+            config=self._make_config("clutch_detector", "clutch_detector", AgentPriority.HIGH),
+            event_bus=self.event_bus,
+        )
         self._register_agent(
             "clutch_detector",
             "clutch_detector",
@@ -204,7 +224,12 @@ class AgentOrchestrator:
         )
         
         # Commentary Agents
-        self.commentary_agent = ScriptGenerator()
+        self.commentary_agent = ScriptGenerator(
+            config=self._make_config(
+                "script_generator", "script_generator", AgentPriority.HIGH
+            ),
+            event_bus=self.event_bus,
+        )
         self._register_agent(
             "script_generator",
             "script_generator",
@@ -212,7 +237,10 @@ class AgentOrchestrator:
             AgentPriority.HIGH,
         )
         
-        emotion_engine = EmotionEngine()
+        emotion_engine = EmotionEngine(
+            config=self._make_config("emotion_engine", "emotion_engine", AgentPriority.HIGH),
+            event_bus=self.event_bus,
+        )
         self._register_agent(
             "emotion_engine",
             "emotion_engine",
@@ -220,7 +248,10 @@ class AgentOrchestrator:
             AgentPriority.HIGH,
         )
         
-        hype_detector = HypeDetector()
+        hype_detector = HypeDetector(
+            config=self._make_config("hype_detector", "hype_detector", AgentPriority.HIGH),
+            event_bus=self.event_bus,
+        )
         self._register_agent(
             "hype_detector",
             "hype_detector",
@@ -249,11 +280,14 @@ class AgentOrchestrator:
             
             # Create Team Agent
             team_agent = TeamTracker(
+                config=self._make_config(
+                    f"team_agent_{team_id}", "team_agent", AgentPriority.MEDIUM
+                ),
+                event_bus=self.event_bus,
                 team_id=team_id,
                 team_name=team_name,
                 short_name=short_name,
                 player_names=player_names,
-                event_bus=self.event_bus,
             )
             
             self._register_agent(
@@ -264,6 +298,52 @@ class AgentOrchestrator:
             )
             
             self.team_agents[team_id] = team_agent
+            
+            # Per-team analysis agents (previously never instantiated)
+            rotation_analyzer = RotationAnalyzer(
+                config=self._make_config(
+                    f"rotation_analyzer_{team_id}", "rotation_analyzer",
+                    AgentPriority.MEDIUM,
+                ),
+                event_bus=self.event_bus,
+                team_id=team_id,
+            )
+            self._register_agent(
+                f"rotation_analyzer_{team_id}",
+                "rotation_analyzer",
+                rotation_analyzer,
+                AgentPriority.MEDIUM,
+            )
+            
+            utility_tracker = UtilityTracker(
+                config=self._make_config(
+                    f"utility_tracker_{team_id}", "utility_tracker",
+                    AgentPriority.MEDIUM,
+                ),
+                event_bus=self.event_bus,
+                team_id=team_id,
+            )
+            self._register_agent(
+                f"utility_tracker_{team_id}",
+                "utility_tracker",
+                utility_tracker,
+                AgentPriority.MEDIUM,
+            )
+            
+            positioning_analyzer = PositioningAnalyzer(
+                config=self._make_config(
+                    f"positioning_analyzer_{team_id}", "positioning_analyzer",
+                    AgentPriority.MEDIUM,
+                ),
+                event_bus=self.event_bus,
+                team_id=team_id,
+            )
+            self._register_agent(
+                f"positioning_analyzer_{team_id}",
+                "positioning_analyzer",
+                positioning_analyzer,
+                AgentPriority.MEDIUM,
+            )
         
         self._log.info(f"Phase 3 complete: {len(self.agents)} agents")
         
@@ -274,28 +354,49 @@ class AgentOrchestrator:
         self._log.info("Phase 4: Initializing MEDIUM priority agents...")
         
         # Analytics Agents
-        mvp_calc = MVPCalculator()
+        mvp_calc = MVPCalculator(
+            config=self._make_config("mvp_calculator", "mvp_calculator", AgentPriority.MEDIUM),
+            event_bus=self.event_bus,
+        )
         self._register_agent("mvp_calculator", "mvp_calculator", mvp_calc, AgentPriority.MEDIUM)
         
-        player_profiler = PlayerProfiler()
+        player_profiler = PlayerProfiler(
+            config=self._make_config("player_profiler", "player_profiler", AgentPriority.MEDIUM),
+            event_bus=self.event_bus,
+        )
         self._register_agent("player_profiler", "player_profiler", player_profiler, AgentPriority.MEDIUM)
         
-        team_chemistry = TeamChemistryAnalyzer()
+        team_chemistry = TeamChemistryAnalyzer(
+            config=self._make_config("team_chemistry", "team_chemistry", AgentPriority.MEDIUM),
+            event_bus=self.event_bus,
+        )
         self._register_agent("team_chemistry", "team_chemistry", team_chemistry, AgentPriority.MEDIUM)
         
-        perf_tracker = PerformanceTracker()
+        perf_tracker = PerformanceTracker(
+            config=self._make_config("performance_tracker", "performance_tracker", AgentPriority.MEDIUM),
+            event_bus=self.event_bus,
+        )
         self._register_agent("performance_tracker", "performance_tracker", perf_tracker, AgentPriority.MEDIUM)
         
         # POV Selector
-        pov_selector = POVSelector()
+        pov_selector = POVSelector(
+            config=self._make_config("pov_selector", "pov_selector", AgentPriority.MEDIUM),
+            event_bus=self.event_bus,
+        )
         self._register_agent("pov_selector", "pov_selector", pov_selector, AgentPriority.MEDIUM)
         
         # Cinematic Controller
-        cinematic = CinematicController()
+        cinematic = CinematicController(
+            config=self._make_config("cinematic_controller", "cinematic_controller", AgentPriority.MEDIUM),
+            event_bus=self.event_bus,
+        )
         self._register_agent("cinematic_controller", "cinematic_controller", cinematic, AgentPriority.MEDIUM)
         
         # Playbook Manager
-        playbook = PlaybookManager()
+        playbook = PlaybookManager(
+            config=self._make_config("playbook_manager", "playbook_manager", AgentPriority.MEDIUM),
+            event_bus=self.event_bus,
+        )
         self._register_agent("playbook_manager", "playbook_manager", playbook, AgentPriority.MEDIUM)
         
         self._log.info(f"Phase 4 complete: {len(self.agents)} agents")
@@ -307,36 +408,66 @@ class AgentOrchestrator:
         self._log.info("Phase 5: Initializing LOW priority agents...")
         
         # Prediction Agents
-        fight_predictor = FightPredictor()
+        fight_predictor = FightPredictor(
+            config=self._make_config("fight_predictor", "fight_predictor", AgentPriority.LOW),
+            event_bus=self.event_bus,
+        )
         self._register_agent("fight_predictor", "fight_predictor", fight_predictor, AgentPriority.LOW)
         
-        survival_predictor = SurvivalPredictor()
+        survival_predictor = SurvivalPredictor(
+            config=self._make_config("survival_predictor", "survival_predictor", AgentPriority.LOW),
+            event_bus=self.event_bus,
+        )
         self._register_agent("survival_predictor", "survival_predictor", survival_predictor, AgentPriority.LOW)
         
-        zone_predictor = ZonePredictor()
+        zone_predictor = ZonePredictor(
+            config=self._make_config("zone_predictor", "zone_predictor", AgentPriority.LOW),
+            event_bus=self.event_bus,
+        )
         self._register_agent("zone_predictor", "zone_predictor", zone_predictor, AgentPriority.LOW)
         
-        winner_predictor = WinnerPredictor()
+        winner_predictor = WinnerPredictor(
+            config=self._make_config("winner_predictor", "winner_predictor", AgentPriority.LOW),
+            event_bus=self.event_bus,
+        )
         self._register_agent("winner_predictor", "winner_predictor", winner_predictor, AgentPriority.LOW)
         
         # Narrative Agents
-        storyline_builder = StorylineBuilder()
+        storyline_builder = StorylineBuilder(
+            config=self._make_config("storyline_builder", "storyline_builder", AgentPriority.LOW),
+            event_bus=self.event_bus,
+        )
         self._register_agent("storyline_builder", "storyline_builder", storyline_builder, AgentPriority.LOW)
         
-        rivalry_tracker = RivalryTracker()
+        rivalry_tracker = RivalryTracker(
+            config=self._make_config("rivalry_tracker", "rivalry_tracker", AgentPriority.LOW),
+            event_bus=self.event_bus,
+        )
         self._register_agent("rivalry_tracker", "rivalry_tracker", rivalry_tracker, AgentPriority.LOW)
         
-        comeback_detector = ComebackDetector()
+        comeback_detector = ComebackDetector(
+            config=self._make_config("comeback_detector", "comeback_detector", AgentPriority.LOW),
+            event_bus=self.event_bus,
+        )
         self._register_agent("comeback_detector", "comeback_detector", comeback_detector, AgentPriority.LOW)
         
         # Highlight Agents
-        clip_detector = ClipDetector()
+        clip_detector = ClipDetector(
+            config=self._make_config("clip_detector", "clip_detector", AgentPriority.LOW),
+            event_bus=self.event_bus,
+        )
         self._register_agent("clip_detector", "clip_detector", clip_detector, AgentPriority.LOW)
         
-        replay_director = ReplayDirector()
+        replay_director = ReplayDirector(
+            config=self._make_config("replay_director", "replay_director", AgentPriority.LOW),
+            event_bus=self.event_bus,
+        )
         self._register_agent("replay_director", "replay_director", replay_director, AgentPriority.LOW)
         
-        montage_generator = MontageGenerator()
+        montage_generator = MontageGenerator(
+            config=self._make_config("montage_generator", "montage_generator", AgentPriority.LOW),
+            event_bus=self.event_bus,
+        )
         self._register_agent("montage_generator", "montage_generator", montage_generator, AgentPriority.LOW)
         
         self._log.info(f"Phase 5 complete: {len(self.agents)} agents")
@@ -348,39 +479,73 @@ class AgentOrchestrator:
         self._log.info("Phase 6: Initializing BACKGROUND agents...")
         
         # Referee Agents
-        rule_enforcer = RuleEnforcer()
+        rule_enforcer = RuleEnforcer(
+            config=self._make_config("rule_enforcer", "rule_enforcer", AgentPriority.BACKGROUND),
+            event_bus=self.event_bus,
+        )
         self._register_agent("rule_enforcer", "rule_enforcer", rule_enforcer, AgentPriority.BACKGROUND)
         
-        cheating_detector = CheatingDetector()
+        cheating_detector = CheatingDetector(
+            config=self._make_config("cheating_detector", "cheating_detector", AgentPriority.BACKGROUND),
+            event_bus=self.event_bus,
+        )
         self._register_agent("cheating_detector", "cheating_detector", cheating_detector, AgentPriority.BACKGROUND)
         
-        dispute_resolver = DisputeResolver()
+        dispute_resolver = DisputeResolver(
+            config=self._make_config("dispute_resolver", "dispute_resolver", AgentPriority.BACKGROUND),
+            event_bus=self.event_bus,
+        )
         self._register_agent("dispute_resolver", "dispute_resolver", dispute_resolver, AgentPriority.BACKGROUND)
         
         # Additional agents
-        voice_synth = VoiceSynthesizer()
+        voice_synth = VoiceSynthesizer(
+            config=self._make_config("voice_synthesizer", "voice_synthesizer", AgentPriority.BACKGROUND),
+            event_bus=self.event_bus,
+        )
         self._register_agent("voice_synthesizer", "voice_synthesizer", voice_synth, AgentPriority.BACKGROUND)
         
-        caster_memory = CasterMemory()
+        caster_memory = CasterMemory(
+            config=self._make_config("caster_memory", "caster_memory", AgentPriority.BACKGROUND),
+            event_bus=self.event_bus,
+        )
         self._register_agent("caster_memory", "caster_memory", caster_memory, AgentPriority.BACKGROUND)
         
-        language_manager = LanguageManager()
+        language_manager = LanguageManager(
+            config=self._make_config("language_manager", "language_manager", AgentPriority.BACKGROUND),
+            event_bus=self.event_bus,
+        )
         self._register_agent("language_manager", "language_manager", language_manager, AgentPriority.BACKGROUND)
         
-        scouting_reporter = ScoutingReporter()
+        scouting_reporter = ScoutingReporter(
+            config=self._make_config("scouting_reporter", "scouting_reporter", AgentPriority.BACKGROUND),
+            event_bus=self.event_bus,
+        )
         self._register_agent("scouting_reporter", "scouting_reporter", scouting_reporter, AgentPriority.BACKGROUND)
         
-        documentary_gen = DocumentaryGenerator()
+        documentary_gen = DocumentaryGenerator(
+            config=self._make_config("documentary_generator", "documentary_generator", AgentPriority.BACKGROUND),
+            event_bus=self.event_bus,
+        )
         self._register_agent("documentary_generator", "documentary_generator", documentary_gen, AgentPriority.BACKGROUND)
         
-        content_publisher = ContentPublisher()
+        content_publisher = ContentPublisher(
+            config=self._make_config("content_publisher", "content_publisher", AgentPriority.BACKGROUND),
+            event_bus=self.event_bus,
+        )
         self._register_agent("content_publisher", "content_publisher", content_publisher, AgentPriority.BACKGROUND)
         
         # Memory agents
-        team_memory = TeamMemory(team_id="orchestrator", team_name="System")
+        team_memory = TeamMemory(
+            config=self._make_config("team_memory", "team_memory", AgentPriority.BACKGROUND),
+            event_bus=self.event_bus,
+            team_id="orchestrator", team_name="System",
+        )
         self._register_agent("team_memory", "team_memory", team_memory, AgentPriority.BACKGROUND)
         
-        engagement_analyzer = EngagementAnalyzer()
+        engagement_analyzer = EngagementAnalyzer(
+            config=self._make_config("engagement_analyzer", "engagement_analyzer", AgentPriority.BACKGROUND),
+            event_bus=self.event_bus,
+        )
         self._register_agent("engagement_analyzer", "engagement_analyzer", engagement_analyzer, AgentPriority.BACKGROUND)
         
         self._log.info(f"Phase 6 complete: {len(self.agents)} agents")
@@ -400,6 +565,21 @@ class AgentOrchestrator:
             medium=len(self.registry.get_agents_by_priority(AgentPriority.MEDIUM)),
             low=len(self.registry.get_agents_by_priority(AgentPriority.LOW)),
             background=len(self.registry.get_agents_by_priority(AgentPriority.BACKGROUND)),
+        )
+    
+    def _make_config(
+        self,
+        agent_id: str,
+        agent_type: str,
+        priority: AgentPriority,
+    ) -> AgentConfig:
+        """Build an AgentConfig carrying the current match context."""
+        return AgentConfig(
+            agent_id=agent_id,
+            agent_type=agent_type,
+            priority=priority,
+            match_id=self.state.match_id,
+            tournament_id=self.state.tournament_id,
         )
     
     def _register_agent(
@@ -522,14 +702,20 @@ class AgentOrchestrator:
     
     async def pause_all(self) -> None:
         """Pause all agents"""
-        for agent in self.agents.values():
-            await agent.pause()
+        for agent_id, agent in self.agents.items():
+            try:
+                await agent.pause()
+            except Exception as e:
+                self._log.error(f"Failed to pause agent {agent_id}: {e}")
         self._log.info("All agents paused")
     
     async def resume_all(self) -> None:
         """Resume all agents"""
-        for agent in self.agents.values():
-            await agent.resume()
+        for agent_id, agent in self.agents.items():
+            try:
+                await agent.resume()
+            except Exception as e:
+                self._log.error(f"Failed to resume agent {agent_id}: {e}")
         self._log.info("All agents resumed")
     
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

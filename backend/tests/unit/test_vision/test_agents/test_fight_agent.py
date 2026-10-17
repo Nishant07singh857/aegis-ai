@@ -7,6 +7,9 @@ and fight lifecycle management.
 
 import pytest
 import time
+from unittest.mock import AsyncMock, Mock
+
+from app.agents.base_agent import AgentConfig
 
 from app.agents.fight_agents.fight_detector import (
     FightDetector, PotentialFight,
@@ -21,9 +24,21 @@ class TestFightDetector:
     """Test FightDetector functionality"""
     
     @pytest.fixture
-    def detector(self):
+    def mock_event_bus(self):
+        """Create mock event bus"""
+        bus = AsyncMock()
+        bus.publish = AsyncMock(return_value="test-event-id")
+        bus.subscribe = Mock(return_value="subscriber-id")
+        bus.unsubscribe = Mock(return_value=True)
+        return bus
+
+    @pytest.fixture
+    def detector(self, mock_event_bus):
         """Create fight detector instance"""
-        return FightDetector()
+        return FightDetector(
+            config=AgentConfig(agent_id="fight_detector", agent_type="fight_detector"),
+            event_bus=mock_event_bus,
+        )
     
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     # SIGNAL PROCESSING TESTS
@@ -45,7 +60,7 @@ class TestFightDetector:
         
         # May or may not create a fight depending on thresholds
         # But should process the signal
-        assert len(detector.state.signal_buffer) >= 0
+        assert len(detector.detection_state.signal_buffer) >= 0
     
     def test_process_kill_feed_signal(self, detector):
         """Test processing kill feed as fight signal"""
@@ -62,7 +77,7 @@ class TestFightDetector:
         )
         
         # Kill feed is a strong signal
-        assert len(detector.state.signal_buffer) >= 0
+        assert len(detector.detection_state.signal_buffer) >= 0
     
     def test_process_proximity_signal(self, detector):
         """Test processing proximity as fight signal"""
@@ -74,7 +89,7 @@ class TestFightDetector:
             location_y=5000.0,
         )
         
-        assert len(detector.state.signal_buffer) >= 0
+        assert len(detector.detection_state.signal_buffer) >= 0
     
     def test_process_utility_signal(self, detector):
         """Test processing utility usage as fight signal"""
@@ -89,7 +104,7 @@ class TestFightDetector:
             hit_enemy=True,
         )
         
-        assert len(detector.state.signal_buffer) >= 0
+        assert len(detector.detection_state.signal_buffer) >= 0
     
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     # FIGHT DETECTION TESTS
@@ -112,9 +127,9 @@ class TestFightDetector:
         fight_id = detector._create_potential_fight(signal)
         
         assert fight_id is not None
-        assert fight_id in detector.state.potential_fights
+        assert fight_id in detector.detection_state.potential_fights
         
-        fight = detector.state.potential_fights[fight_id]
+        fight = detector.detection_state.potential_fights[fight_id]
         assert "team_001" in fight.teams_involved
         assert "team_002" in fight.teams_involved
     
@@ -189,7 +204,7 @@ class TestFightDetector:
         result = detector.process_kill_feed("p5", "team_002", "p1", "team_001", is_knock=True)
         
         # Should have detected a fight
-        assert len(detector.state.active_fights) + len(detector.state.potential_fights) >= 0
+        assert len(detector.detection_state.active_fights) + len(detector.detection_state.potential_fights) >= 0
     
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     # FIGHT PROBABILITY TESTS
@@ -301,7 +316,7 @@ class TestFightDetector:
             phase=FightPhase.ENGAGEMENT,
             teams_involved={"team_001", "team_002"},
         )
-        detector.state.active_fights["test_fight_001"] = fight
+        detector.detection_state.active_fights["test_fight_001"] = fight
         
         # Update with damage
         detector.update_active_fight(
@@ -335,7 +350,7 @@ class TestFightDetector:
             phase=FightPhase.RESOLVED,
             teams_involved={"team_001", "team_002"},
         )
-        detector.state.active_fights["test_fight_001"] = fight
+        detector.detection_state.active_fights["test_fight_001"] = fight
         
         should_resolve = detector.check_fight_resolution("test_fight_001")
         
@@ -351,14 +366,14 @@ class TestFightDetector:
             total_kills=3,
             total_damage=500,
         )
-        detector.state.active_fights["test_fight_001"] = fight
+        detector.detection_state.active_fights["test_fight_001"] = fight
         
         summary = detector.resolve_fight("test_fight_001")
         
         assert summary is not None
         assert summary["fight_id"] == "test_fight_001"
         assert summary["total_kills"] == 3
-        assert "test_fight_001" not in detector.state.active_fights
+        assert "test_fight_001" not in detector.detection_state.active_fights
     
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     # CLEANUP TESTS
@@ -368,7 +383,7 @@ class TestFightDetector:
         """Test cleaning up old signals"""
         # Add old signals
         old_time = time.time() - 20  # Older than buffer window
-        detector.state.signal_buffer.append(
+        detector.detection_state.signal_buffer.append(
             FightSignalData(
                 signal_type=FightSignal.HP_DROP,
                 timestamp=old_time,
@@ -379,7 +394,7 @@ class TestFightDetector:
         detector._cleanup_old_signals()
         
         # Old signal should be removed
-        assert len(detector.state.signal_buffer) == 0
+        assert len(detector.detection_state.signal_buffer) == 0
     
     def test_cleanup_stale_fights(self, detector):
         """Test cleaning up stale potential fights"""
@@ -389,11 +404,11 @@ class TestFightDetector:
             teams_involved={"team_001"},
             last_signal_time=old_time,
         )
-        detector.state.potential_fights["stale_fight"] = fight
+        detector.detection_state.potential_fights["stale_fight"] = fight
         
         detector.cleanup_stale_fights()
         
-        assert "stale_fight" not in detector.state.potential_fights
+        assert "stale_fight" not in detector.detection_state.potential_fights
     
     def test_is_team_fighting(self, detector):
         """Test checking if team is in active fight"""
@@ -401,7 +416,7 @@ class TestFightDetector:
             fight_id="test_fight_001",
             teams_involved={"team_001", "team_002"},
         )
-        detector.state.active_fights["test_fight_001"] = fight
+        detector.detection_state.active_fights["test_fight_001"] = fight
         
         assert detector.is_team_fighting("team_001") is True
         assert detector.is_team_fighting("team_003") is False
@@ -419,7 +434,7 @@ class TestFightDetector:
             teams_involved={"team_001", "team_002"},
             current_intensity=60.0,
         )
-        detector.state.active_fights["test_fight_001"] = fight
+        detector.detection_state.active_fights["test_fight_001"] = fight
         
         active = detector.get_active_fights()
         
@@ -440,7 +455,7 @@ class TestFightDetector:
             total_kills=2,
             is_clutch=False,
         )
-        detector.state.active_fights["test_fight_001"] = fight
+        detector.detection_state.active_fights["test_fight_001"] = fight
         
         detail = detector.get_fight("test_fight_001")
         
@@ -460,8 +475,8 @@ class TestFightDetector:
             teams_involved={"team_001", "team_003"},
         )
         
-        detector.state.active_fights["fight_001"] = fight1
-        detector.state.active_fights["fight_002"] = fight2
+        detector.detection_state.active_fights["fight_001"] = fight1
+        detector.detection_state.active_fights["fight_002"] = fight2
         
         team_fights = detector.get_team_fights("team_001")
         
@@ -477,10 +492,10 @@ class TestFightDetector:
     
     def test_reset(self, detector):
         """Test resetting detector"""
-        detector.state.active_fights["test"] = DetectedFight(fight_id="test", teams_involved={"t1"})
-        detector.state.total_fights_detected = 10
+        detector.detection_state.active_fights["test"] = DetectedFight(fight_id="test", teams_involved={"t1"})
+        detector.detection_state.total_fights_detected = 10
         
         detector.reset()
         
-        assert len(detector.state.active_fights) == 0
-        assert detector.state.total_fights_detected == 0
+        assert len(detector.detection_state.active_fights) == 0
+        assert detector.detection_state.total_fights_detected == 0

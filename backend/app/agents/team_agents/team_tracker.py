@@ -12,6 +12,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 from collections import deque
 import structlog
+from ..base_agent import BaseAgent, AgentConfig
+from ...core.event_bus import EventBus, EventRecord
 
 logger = structlog.get_logger("aegis.agents.team_tracker")
 
@@ -248,7 +250,7 @@ class TeamStateTracker:
         return self.alive_count == 0 and self.knocked_count > 0
 
 
-class TeamTracker:
+class TeamTracker(BaseAgent):
     """
     Core team state tracker.
     
@@ -263,7 +265,16 @@ class TeamTracker:
     - Activity detection
     """
     
-    def __init__(self, team_id: str, team_name: str, short_name: str):
+    def __init__(
+        self,
+        config: AgentConfig,
+        event_bus: EventBus,
+        team_id: str,
+        team_name: str,
+        short_name: str,
+        player_names: Optional[List[str]] = None,
+    ):
+        super().__init__(config, event_bus)
         self.team = TeamStateTracker(
             team_id=team_id,
             team_name=team_name,
@@ -282,6 +293,11 @@ class TeamTracker:
             team_name=team_name,
             team_id=team_id,
         )
+        
+        # Register the initial roster (if provided)
+        if player_names:
+            for i, player_name in enumerate(player_names):
+                self.add_player(f"{team_id}_player_{i + 1}", player_name)
     
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     # PLAYER MANAGEMENT
@@ -921,3 +937,35 @@ class TeamTracker:
             self.add_player(old.player_id, old.player_name)
         
         self._log.info("Team tracker reset for new match")
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    # BaseAgent lifecycle
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+    async def setup(self) -> None:
+        """Subscribe to match events relevant to this agent."""
+        self.subscribe_to_event("player_knocked")
+        self.subscribe_to_event("kill_confirmed")
+        self.subscribe_to_event("zone_change")
+        self.subscribe_to_event("match_state_change")
+
+    async def tick(self) -> None:
+        """Periodic maintenance tick."""
+        # Heuristic engine is driven by direct method calls;
+        # nothing periodic is required here.
+
+    async def handle_event(self, record: EventRecord) -> None:
+        """Handle an event from the event bus.
+
+        The heuristic engine is driven synchronously via direct method
+        calls; this hook keeps match context current for future
+        event-driven use.
+        """
+        try:
+            data = record.event.data if hasattr(record, "event") else {}
+            if isinstance(data, dict) and data.get("match_id"):
+                self.config.match_id = data["match_id"]
+        except Exception:
+            pass
+
+    async def cleanup(self) -> None:
+        """Release agent resources."""

@@ -11,6 +11,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 from collections import defaultdict
 import structlog
+from ..base_agent import BaseAgent, AgentConfig
+from ...core.event_bus import EventBus, EventRecord
 
 logger = structlog.get_logger("aegis.agents.rivalry")
 
@@ -106,7 +108,7 @@ class Rivalry:
     mention_count: int = 0
 
 
-class RivalryTracker:
+class RivalryTracker(BaseAgent):
     """
     Tracks rivalries between teams and players.
     
@@ -119,7 +121,8 @@ class RivalryTracker:
     - Broadcast priority for rivalry matchups
     """
     
-    def __init__(self):
+    def __init__(self, config: AgentConfig, event_bus: EventBus):
+        super().__init__(config, event_bus)
         # Active rivalries
         self.rivalries: Dict[str, Rivalry] = {}
         
@@ -404,3 +407,34 @@ class RivalryTracker:
         self.team_rivalries.clear()
         self.player_rivalries.clear()
         self._log.info("Rivalry tracker reset")
+
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    # BaseAgent lifecycle
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+    async def setup(self) -> None:
+        """Subscribe to match events relevant to this agent."""
+        self.subscribe_to_event("kill_confirmed")
+        self.subscribe_to_event("fight_detected")
+
+    async def tick(self) -> None:
+        """Periodic maintenance tick."""
+        # Heuristic engine is driven by direct method calls;
+        # nothing periodic is required here.
+
+    async def handle_event(self, record: EventRecord) -> None:
+        """Handle an event from the event bus.
+
+        The heuristic engine is driven synchronously via direct method
+        calls; this hook keeps match context current for future
+        event-driven use.
+        """
+        try:
+            data = record.event.data if hasattr(record, "event") else {}
+            if isinstance(data, dict) and data.get("match_id"):
+                self.config.match_id = data["match_id"]
+        except Exception:
+            pass
+
+    async def cleanup(self) -> None:
+        """Release agent resources."""

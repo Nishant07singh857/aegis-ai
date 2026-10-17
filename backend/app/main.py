@@ -5,13 +5,21 @@ import time
 import uuid
 import structlog
 from typing import Dict, List, Optional
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request
+from fastapi import Depends, FastAPI, WebSocket, WebSocketDisconnect, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from fastapi.security import OAuth2PasswordRequestForm
 from contextlib import asynccontextmanager
 
 from app.config import settings
 from app.core.event_bus import EventBus, EventPriority
+from app.core.security import security_manager
+from app.api.deps import (
+    TokenPayload,
+    authenticate_websocket,
+    require_admin,
+    verify_admin_login,
+)
 from app.intelligence.director_ai import DirectorAIEngine, BroadcastEvent, EventPriority as DirPriority
 from app.intelligence.commentary_engine import get_commentary_engine
 from app.db.session import init_db
@@ -165,8 +173,26 @@ chatter_task = None
 # ==========================================
 # ACTION HANDLERS
 # ==========================================
-async def handle_action(data: dict):
+# Every action below mutates server state or triggers a side effect, so the
+# whole control channel requires an authenticated principal (JWT or API key
+# passed as ?token= on the WebSocket connect). Unauthenticated frames are
+# dropped with an "unauthorized" ack — this closes revoke_key / restart_node /
+# stop_training / etc. to anonymous callers. Passive subscriptions (state
+# pushes, ping/pong) intentionally stay open.
+async def handle_action(data: dict, user: Optional[TokenPayload] = None):
     action = data.get("action")
+
+    if user is None:
+        await manager.broadcast({
+            "type": "action_ack",
+            "data": {
+                "action": action,
+                "status": "unauthorized",
+                "message": "Authentication required: reconnect with ?token=<jwt-or-api-key>.",
+            },
+        })
+        logger.warning(f"Rejected unauthenticated WS action: {action}")
+        return
 
     if action == "assign_agent":
         agent_id = data.get("agent_id")
@@ -520,12 +546,17 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="AEGIS AI", version="2.0.0", lifespan=lifespan)
 
+# CORS honors settings.CORS_ORIGINS (env CORS_ORIGINS). allow_credentials is
+# only safe with explicit origins — browsers reject it with "*", so it is
+# disabled automatically when the origin list is the wildcard.
+_cors_origins = settings.CORS_ORIGINS
+_cors_allow_credentials = not (len(_cors_origins) == 1 and _cors_origins[0] == "*")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=_cors_origins,
+    allow_credentials=_cors_allow_credentials,
+    allow_methods=settings.CORS_METHODS,
+    allow_headers=settings.CORS_HEADERS,
 )
 
 @app.get("/")
@@ -537,10 +568,44 @@ async def root():
     })
 
 # ==========================================
+# AUTH ENDPOINTS
+# ==========================================
+@app.post("/api/v1/auth/token")
+async def login(form_data: OAuth2PasswordRequestForm = Depends()):
+    """
+    Operator login. Validates ADMIN_USERNAME/ADMIN_PASSWORD from settings and
+    returns a JWT (HS256, ACCESS_TOKEN_EXPIRE_MINUTES expiry) usable as
+    `Authorization: Bearer <token>` on protected routes, or as `?token=` on
+    the /ws/live control channel. Headless clients can alternatively use a
+    static X-API-Key from ADMIN_API_KEYS.
+    """
+    if not verify_admin_login(form_data.username, form_data.password):
+        if not settings.ADMIN_PASSWORD:
+            return JSONResponse(
+                {"error": "Password login is not configured (set ADMIN_PASSWORD)."},
+                status_code=503,
+            )
+        return JSONResponse({"error": "Invalid credentials."}, status_code=401)
+    token = security_manager.create_access_token(
+        user_id="operator",
+        username=settings.ADMIN_USERNAME,
+        is_superuser=True,
+        scopes=["admin"],
+    )
+    return JSONResponse({"access_token": token, "token_type": "bearer"})
+
+# ==========================================
 # WEBSOCKET ENDPOINTS
 # ==========================================
 @app.websocket("/ws/live")
 async def websocket_live(websocket: WebSocket):
+    # Control-channel auth: browsers can't set WS headers, so the client
+    # passes ?token=<jwt-or-api-key>. Passive subscription stays public;
+    # mutating actions are gated inside handle_action().
+    ws_user = authenticate_websocket(
+        websocket,
+        token=websocket.query_params.get("token"),
+    )
     await manager.connect(websocket)
     try:
         while True:
@@ -550,7 +615,7 @@ async def websocket_live(websocket: WebSocket):
                 continue
             try:
                 payload = json.loads(data)
-                await handle_action(payload)
+                await handle_action(payload, user=ws_user)
             except Exception as e:
                 logger.error(f"Failed to handle WS action: {e}")
     except WebSocketDisconnect:
@@ -664,7 +729,7 @@ async def get_analytics_summary():
     })
 
 @app.post("/api/v1/broadcast/switch")
-async def switch_camera(request: Request):
+async def switch_camera(request: Request, _user: TokenPayload = Depends(require_admin)):
     data = await request.json()
     team_id = data.get("team_id")
     if team_id:
@@ -681,7 +746,7 @@ async def switch_camera(request: Request):
     return JSONResponse({"status": "error", "message": "Missing team_id"}, status_code=400)
 
 @app.post("/api/v1/broadcast/replay")
-async def trigger_replay(request: Request):
+async def trigger_replay(_user: TokenPayload = Depends(require_admin)):
     return JSONResponse({"status": "success", "message": "Replay triggered"})
 
 @app.get("/api/v1/broadcast/status")
@@ -689,7 +754,7 @@ async def get_broadcast_status():
     return JSONResponse({"data": MATCH_STATE["director_state"]})
 
 @app.post("/api/v1/broadcast/production-mode")
-async def set_production_mode(request: Request):
+async def set_production_mode(request: Request, _user: TokenPayload = Depends(require_admin)):
     data = await request.json()
     for key, value in data.items():
         if key in MATCH_STATE["modes_state"]:
@@ -706,7 +771,7 @@ async def get_highlights():
     return JSONResponse({"data": []})
 
 @app.get("/api/v1/admin/system")
-async def get_admin_system():
+async def get_admin_system(_user: TokenPayload = Depends(require_admin)):
     return JSONResponse({
         "status": "online",
         "health": MATCH_STATE["system_health"],
@@ -716,30 +781,30 @@ async def get_admin_system():
 
 @app.get("/api/v1/admin/agents")
 @app.get("/api/v1/agents")
-async def get_admin_agents():
+async def get_admin_agents(_user: TokenPayload = Depends(require_admin)):
     return JSONResponse({"data": MATCH_STATE["agents_state"]})
 
 # --- NEW REST ENDPOINTS ---
 @app.get("/api/v1/devices")
-async def get_devices():
+async def get_devices(_user: TokenPayload = Depends(require_admin)):
     return JSONResponse({"data": MATCH_STATE["devices"]})
 
 @app.get("/api/v1/agent-assignments")
-async def get_agent_assignments():
+async def get_agent_assignments(_user: TokenPayload = Depends(require_admin)):
     return JSONResponse({"data": MATCH_STATE["agent_assignments"]})
 
 @app.get("/api/v1/agent-logs")
-async def get_agent_logs():
+async def get_agent_logs(_user: TokenPayload = Depends(require_admin)):
     return JSONResponse({"data": MATCH_STATE["agent_logs"]})
 
 @app.post("/api/v1/scrims/start")
-async def start_scrim(request: Request):
+async def start_scrim(request: Request, _user: TokenPayload = Depends(require_admin)):
     data = await request.json()
-    await handle_action({"action": "start_scrim", **data})
+    await handle_action({"action": "start_scrim", **data}, user=_user)
     return JSONResponse({"status": "success", "scrim": MATCH_STATE["scrim_state"]})
 
 @app.post("/api/v1/content/generate-recap")
-async def generate_recap(request: Request):
+async def generate_recap(request: Request, _user: TokenPayload = Depends(require_admin)):
     data = await request.json()
-    await handle_action({"action": "generate_recap", **data})
+    await handle_action({"action": "generate_recap", **data}, user=_user)
     return JSONResponse({"status": "success", "jobs": MATCH_STATE["render_jobs"]})

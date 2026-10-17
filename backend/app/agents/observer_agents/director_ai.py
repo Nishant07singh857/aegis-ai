@@ -122,24 +122,37 @@ class ObserverDirector(BaseAgent):
     esports production team, not an AI automation system.
     """
     
-    def __init__(self, event_bus: EventBus):
-        config = AgentConfig(
-            agent_id="observer_director",
-            agent_type="observer_director",
-            priority=AgentPriority.CRITICAL,  # Highest priority
-            tick_interval_ms=200,  # 5Hz - needs to be responsive
-        )
-        
+    def __init__(self, config: AgentConfig, event_bus: EventBus):
         super().__init__(config, event_bus)
         
-        # Sub-modules
-        self.pov_selector = POVSelector()
-        self.cinematic = CinematicController()
-        self.safety = SafetyController()
-        self.playbook = PlaybookManager()
+        # Director needs a responsive but not frantic tick rate
+        self.config.tick_interval_ms = 200  # 5Hz
+        
+        # Sub-modules (owned components, not independently lifecycle-managed)
+        def _sub_config(name: str) -> AgentConfig:
+            return AgentConfig(
+                agent_id=f"{config.agent_id}_{name}",
+                agent_type=name,
+                priority=config.priority,
+                match_id=config.match_id,
+                tournament_id=config.tournament_id,
+            )
+        
+        self.pov_selector = POVSelector(
+            config=_sub_config("pov_selector"), event_bus=event_bus
+        )
+        self.cinematic = CinematicController(
+            config=_sub_config("cinematic_controller"), event_bus=event_bus
+        )
+        self.safety = SafetyController(
+            config=_sub_config("safety_controller"), event_bus=event_bus
+        )
+        self.playbook = PlaybookManager(
+            config=_sub_config("playbook_manager"), event_bus=event_bus
+        )
         
         # Director state
-        self.state = DirectorState()
+        self.director_state = DirectorState()
         
         # Configuration
         self.min_scene_duration = settings.MIN_SCENE_TIME_SECONDS
@@ -199,19 +212,19 @@ class ObserverDirector(BaseAgent):
         self._update_broadcast_state()
         
         # Check safety constraints
-        if not self.safety.can_switch(self.state):
+        if not self.safety.can_switch(self.director_state):
             return  # Safety prevents switching
         
         # Get current scene duration
-        if self.state.current_scene:
-            self.state.current_scene.duration = (
-                time.time() - self.state.current_scene.started_at
+        if self.director_state.current_scene:
+            self.director_state.current_scene.duration = (
+                time.time() - self.director_state.current_scene.started_at
             )
         
         # Run playbook for current state
         playbook_action = self.playbook.get_action(
-            self.state.broadcast_state,
-            self.state,
+            self.director_state.broadcast_state,
+            self.director_state,
         )
         
         if playbook_action:
@@ -262,7 +275,7 @@ class ObserverDirector(BaseAgent):
         is_clutch = data.get("is_clutch", False)
         entertainment = data.get("entertainment_score", 50)
         
-        self.state.active_fights[fight_id] = {
+        self.director_state.active_fights[fight_id] = {
             "teams": teams,
             "intensity": intensity,
             "intensity_score": intensity_score,
@@ -281,7 +294,7 @@ class ObserverDirector(BaseAgent):
                 is_clutch=is_clutch,
             )
             
-            self.state.candidate_priority_score = intensity_score
+            self.director_state.candidate_priority_score = intensity_score
             
             # Force switch if very important
             if intensity_score > 85 or is_clutch:
@@ -291,14 +304,14 @@ class ObserverDirector(BaseAgent):
         """Handle fight ending"""
         fight_id = data.get("fight_id")
         
-        if fight_id in self.state.active_fights:
-            del self.state.active_fights[fight_id]
+        if fight_id in self.director_state.active_fights:
+            del self.director_state.active_fights[fight_id]
         
         # If currently showing this fight, consider switching away
-        if (self.state.current_scene and 
-            self.state.current_scene.fight_id == fight_id):
+        if (self.director_state.current_scene and 
+            self.director_state.current_scene.fight_id == fight_id):
             # Don't switch immediately - let the scene play out naturally
-            self.state.current_scene.reason = "Fight ended - finding next scene"
+            self.director_state.current_scene.reason = "Fight ended - finding next scene"
     
     async def _on_clutch_detected(self, data: Dict[str, Any]) -> None:
         """Handle clutch situation detection - HIGHEST PRIORITY"""
@@ -322,7 +335,7 @@ class ObserverDirector(BaseAgent):
         
         if won:
             # Queue replay of the clutch
-            self.state.replay_buffer.append({
+            self.director_state.replay_buffer.append({
                 "type": "clutch",
                 "data": data,
                 "priority": 100,
@@ -336,8 +349,8 @@ class ObserverDirector(BaseAgent):
         # Check if this kill is part of an active fight we're watching
         fight_id = data.get("fight_id")
         
-        if fight_id and self.state.current_scene:
-            if self.state.current_scene.fight_id == fight_id:
+        if fight_id and self.director_state.current_scene:
+            if self.director_state.current_scene.fight_id == fight_id:
                 # We're already watching this fight - update POV to killer
                 killer_id = data.get("killer_id")
                 if killer_id:
@@ -348,22 +361,22 @@ class ObserverDirector(BaseAgent):
         fight_id = data.get("fight_id")
         
         # If in a fight, a knock is significant
-        if fight_id and fight_id in self.state.active_fights:
+        if fight_id and fight_id in self.director_state.active_fights:
             # Could switch to show the knock
             pass
     
     async def _on_zone_change(self, data: Dict[str, Any]) -> None:
         """Handle zone change"""
-        self.state.zone_phase = data.get("phase", self.state.zone_phase)
+        self.director_state.zone_phase = data.get("phase", self.director_state.zone_phase)
         
         # Final zones require different broadcast approach
-        if self.state.zone_phase >= 6:
-            self.state.broadcast_state = BroadcastState.FINAL_CIRCLE
+        if self.director_state.zone_phase >= 6:
+            self.director_state.broadcast_state = BroadcastState.FINAL_CIRCLE
     
     async def _on_highlight_moment(self, data: Dict[str, Any]) -> None:
         """Handle auto-detected highlight moment"""
         # Queue for replay consideration
-        self.state.replay_buffer.append({
+        self.director_state.replay_buffer.append({
             "type": "highlight",
             "data": data,
             "priority": data.get("priority", 50),
@@ -375,8 +388,8 @@ class ObserverDirector(BaseAgent):
         data = record.event.data
         fight_id = data.get("fight_id")
         
-        if fight_id and fight_id in self.state.active_fights:
-            self.state.active_fights[fight_id].update(data)
+        if fight_id and fight_id in self.director_state.active_fights:
+            self.director_state.active_fights[fight_id].update(data)
     
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     # DIRECTOR DECISION MAKING
@@ -386,14 +399,14 @@ class ObserverDirector(BaseAgent):
         """Make the main director decision - what to show next"""
         
         # Don't change if minimum scene time not met
-        if (self.state.current_scene and 
-            self.state.current_scene.duration < self.min_scene_duration):
+        if (self.director_state.current_scene and 
+            self.director_state.current_scene.duration < self.min_scene_duration):
             return None
         
         # Get all possible candidates for what to show
-        candidates = await self.pov_selector.get_candidates(
-            self.state,
-            self.state.active_fights,
+        candidates = self.pov_selector.get_candidates(
+            self.director_state,
+            self.director_state.active_fights,
         )
         
         if not candidates:
@@ -402,7 +415,7 @@ class ObserverDirector(BaseAgent):
         # Filter through safety controller
         safe_candidates = self.safety.filter_candidates(
             candidates,
-            self.state,
+            self.director_state,
         )
         
         if not safe_candidates:
@@ -411,14 +424,14 @@ class ObserverDirector(BaseAgent):
         # Select best candidate
         best_candidate = self.pov_selector.select_best_candidate(
             safe_candidates,
-            self.state,
+            self.director_state,
         )
         
         if not best_candidate:
             return None
         
         # Compare with current scene
-        if self.state.current_scene:
+        if self.director_state.current_scene:
             # Calculate current scene's score
             current_score = self._calculate_current_scene_score()
             
@@ -433,7 +446,7 @@ class ObserverDirector(BaseAgent):
                 min_difference = 5
             
             # Lower threshold if current scene is stale
-            if self.state.current_scene.duration > 20:
+            if self.director_state.current_scene.duration > 20:
                 min_difference = 10
             
             if score_difference < min_difference:
@@ -450,14 +463,14 @@ class ObserverDirector(BaseAgent):
     
     def _calculate_current_scene_score(self) -> float:
         """Calculate priority score for current scene"""
-        if not self.state.current_scene:
+        if not self.director_state.current_scene:
             return 0.0
         
         score = 50.0
         
         # Active fight bonus
-        if self.state.current_scene.fight_id:
-            fight = self.state.active_fights.get(self.state.current_scene.fight_id, {})
+        if self.director_state.current_scene.fight_id:
+            fight = self.director_state.active_fights.get(self.director_state.current_scene.fight_id, {})
             score = fight.get("intensity_score", score)
             
             # Clutch bonus
@@ -465,13 +478,13 @@ class ObserverDirector(BaseAgent):
                 score += 25
         
         # Priority team/player bonus
-        if self.state.current_scene.team_id in self.priority_teams:
+        if self.director_state.current_scene.team_id in self.priority_teams:
             score += 15
-        if self.state.current_scene.player_id in self.priority_players:
+        if self.director_state.current_scene.player_id in self.priority_players:
             score += 15
         
         # Recent scene penalty (prevent staying too long)
-        duration = self.state.current_scene.duration
+        duration = self.director_state.current_scene.duration
         if duration > 30:
             score -= (duration - 30) * 0.5  # Gradually decrease after 30 seconds
         
@@ -504,12 +517,12 @@ class ObserverDirector(BaseAgent):
         """Switch to a new feed"""
         
         # Save current scene to history
-        if self.state.current_scene:
-            self.state.previous_scenes.append(self.state.current_scene)
+        if self.director_state.current_scene:
+            self.director_state.previous_scenes.append(self.director_state.current_scene)
         
         # Determine transition type
         transition = self.cinematic.get_transition(
-            self.state.current_scene,
+            self.director_state.current_scene,
             candidate,
         )
         
@@ -525,18 +538,18 @@ class ObserverDirector(BaseAgent):
         )
         
         # Safety check
-        if not self.safety.validate_switch(self.state.current_scene, new_scene):
+        if not self.safety.validate_switch(self.director_state.current_scene, new_scene):
             self._log.warning(f"Safety prevented switch: {reason}")
             return
         
         # Execute the switch
-        self.state.current_scene = new_scene
-        self.state.last_switch_time = time.time()
-        self.state.switch_count_last_minute += 1
-        self.state.total_scene_changes += 1
+        self.director_state.current_scene = new_scene
+        self.director_state.last_switch_time = time.time()
+        self.director_state.switch_count_last_minute += 1
+        self.director_state.total_scene_changes += 1
         
         # Record decision
-        self.state.recent_decisions.append({
+        self.director_state.recent_decisions.append({
             "timestamp": time.time(),
             "decision": "switch_feed",
             "to": candidate.feed_type.value,
@@ -558,14 +571,14 @@ class ObserverDirector(BaseAgent):
     
     async def _switch_to_fight(self, fight_id: str, reason: str) -> None:
         """Switch to a specific fight"""
-        fight = self.state.active_fights.get(fight_id, {})
+        fight = self.director_state.active_fights.get(fight_id, {})
         teams = fight.get("teams", [])
         
         # Select best team POV for this fight
         best_team = self.pov_selector.select_best_team_for_fight(
             fight_id,
             teams,
-            self.state,
+            self.director_state,
         )
         
         candidate = POVCandidate(
@@ -606,16 +619,16 @@ class ObserverDirector(BaseAgent):
     async def _show_replay(self, replay_data: Dict[str, Any]) -> None:
         """Show a replay"""
         # Check replay cooldown
-        if time.time() - self.state.last_replay_time < self.replay_cooldown:
+        if time.time() - self.director_state.last_replay_time < self.replay_cooldown:
             return
         
         # Save current scene for return
-        return_scene = self.state.current_scene
+        return_scene = self.director_state.current_scene
         
         # Switch to replay
-        self.state.broadcast_state = BroadcastState.REPLAY
-        self.state.last_replay_time = time.time()
-        self.state.total_replays_shown += 1
+        self.director_state.broadcast_state = BroadcastState.REPLAY
+        self.director_state.last_replay_time = time.time()
+        self.director_state.total_replays_shown += 1
         
         # Send OBS replay command
         await self.event_bus.publish(
@@ -685,7 +698,7 @@ class ObserverDirector(BaseAgent):
             data=command,
             priority=EventPriority.CRITICAL,
             source=self.config.agent_id,
-            match_id=self.state.match_id,
+            match_id=self.director_state.match_id,
         )
     
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -696,34 +709,34 @@ class ObserverDirector(BaseAgent):
         """Update match context from event bus state"""
         # Update switch count per minute
         recent_switches = [
-            d for d in self.state.recent_decisions
+            d for d in self.director_state.recent_decisions
             if time.time() - d["timestamp"] < 60
             and d.get("decision") == "switch_feed"
         ]
-        self.state.switch_count_last_minute = len(recent_switches)
+        self.director_state.switch_count_last_minute = len(recent_switches)
     
     def _update_broadcast_state(self) -> None:
         """Update broadcast state based on match phase"""
         
         # Match start
-        if self.state.teams_alive == 16 and self.state.match_time_seconds < 60:
-            self.state.broadcast_state = BroadcastState.EARLY_GAME
+        if self.director_state.teams_alive == 16 and self.director_state.match_time_seconds < 60:
+            self.director_state.broadcast_state = BroadcastState.EARLY_GAME
         
         # Mid game
-        elif self.state.teams_alive > 5 and self.state.zone_phase < 6:
-            self.state.broadcast_state = BroadcastState.MID_GAME
+        elif self.director_state.teams_alive > 5 and self.director_state.zone_phase < 6:
+            self.director_state.broadcast_state = BroadcastState.MID_GAME
         
         # Late game
-        elif self.state.teams_alive <= 5 and self.state.zone_phase >= 5:
-            self.state.broadcast_state = BroadcastState.LATE_GAME
+        elif self.director_state.teams_alive <= 5 and self.director_state.zone_phase >= 5:
+            self.director_state.broadcast_state = BroadcastState.LATE_GAME
         
         # Final circle
-        elif self.state.zone_phase >= 7 and self.state.teams_alive <= 3:
-            self.state.broadcast_state = BroadcastState.FINAL_CIRCLE
+        elif self.director_state.zone_phase >= 7 and self.director_state.teams_alive <= 3:
+            self.director_state.broadcast_state = BroadcastState.FINAL_CIRCLE
         
         # Match end
-        elif self.state.teams_alive <= 1:
-            self.state.broadcast_state = BroadcastState.MATCH_END
+        elif self.director_state.teams_alive <= 1:
+            self.director_state.broadcast_state = BroadcastState.MATCH_END
     
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     # QUERIES & CONTROL
@@ -753,36 +766,36 @@ class ObserverDirector(BaseAgent):
     
     def get_current_scene(self) -> Optional[Dict[str, Any]]:
         """Get current broadcast scene info"""
-        if not self.state.current_scene:
+        if not self.director_state.current_scene:
             return None
         
         return {
-            "feed_type": self.state.current_scene.feed_type.value,
-            "team_id": self.state.current_scene.team_id,
-            "player_id": self.state.current_scene.player_id,
-            "fight_id": self.state.current_scene.fight_id,
-            "camera_mode": self.state.current_scene.camera_mode.value,
-            "duration": round(self.state.current_scene.duration, 1),
-            "reason": self.state.current_scene.reason,
+            "feed_type": self.director_state.current_scene.feed_type.value,
+            "team_id": self.director_state.current_scene.team_id,
+            "player_id": self.director_state.current_scene.player_id,
+            "fight_id": self.director_state.current_scene.fight_id,
+            "camera_mode": self.director_state.current_scene.camera_mode.value,
+            "duration": round(self.director_state.current_scene.duration, 1),
+            "reason": self.director_state.current_scene.reason,
         }
     
     def get_director_summary(self) -> Dict[str, Any]:
         """Get director state summary"""
         return {
-            "broadcast_state": self.state.broadcast_state.value,
+            "broadcast_state": self.director_state.broadcast_state.value,
             "current_scene": self.get_current_scene(),
-            "active_fights": len(self.state.active_fights),
-            "teams_alive": self.state.teams_alive,
-            "zone_phase": self.state.zone_phase,
-            "total_scene_changes": self.state.total_scene_changes,
-            "total_replays": self.state.total_replays_shown,
-            "switches_last_minute": self.state.switch_count_last_minute,
-            "replay_buffer_size": len(self.state.replay_buffer),
+            "active_fights": len(self.director_state.active_fights),
+            "teams_alive": self.director_state.teams_alive,
+            "zone_phase": self.director_state.zone_phase,
+            "total_scene_changes": self.director_state.total_scene_changes,
+            "total_replays": self.director_state.total_replays_shown,
+            "switches_last_minute": self.director_state.switch_count_last_minute,
+            "replay_buffer_size": len(self.director_state.replay_buffer),
         }
     
     def reset_for_match(self, match_id: str) -> None:
         """Reset for new match"""
-        self.state = DirectorState(match_id=match_id)
+        self.director_state = DirectorState(match_id=match_id)
         self.pov_selector.reset()
         self.safety.reset()
         self._log.info(f"Director reset for match: {match_id}")

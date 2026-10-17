@@ -13,9 +13,13 @@ venv/
 .venv/
 .env
 .env.local
+.env.development
 .env.development.local
 .env.test.local
+.env.production
 .env.production.local
+# NOTE: .env.example is intentionally NOT ignored — it is the committed
+# template with placeholder values only (zero real secrets).
 .ruff_cache/
 .pytest_cache/
 # Ignore video and training data

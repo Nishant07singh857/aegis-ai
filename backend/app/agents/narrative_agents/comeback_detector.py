@@ -11,6 +11,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 from collections import deque, defaultdict
 import structlog
+from ..base_agent import BaseAgent, AgentConfig
+from ...core.event_bus import EventBus, EventRecord
 
 logger = structlog.get_logger("aegis.agents.comeback")
 
@@ -71,7 +73,7 @@ class ComebackStory:
     key_events: List[Dict[str, Any]] = field(default_factory=list)
 
 
-class ComebackDetector:
+class ComebackDetector(BaseAgent):
     """
     Detects comeback stories in real-time.
     
@@ -83,7 +85,8 @@ class ComebackDetector:
     - Tournament comebacks across matches
     """
     
-    def __init__(self):
+    def __init__(self, config: AgentConfig, event_bus: EventBus):
+        super().__init__(config, event_bus)
         self.active_comebacks: Dict[str, ComebackStory] = {}
         self.comeback_history: deque = deque(maxlen=50)
         
@@ -320,3 +323,35 @@ class ComebackDetector:
         self.team_hp_history.clear()
         self.team_placement_history.clear()
         self._log.info("Comeback detector reset")
+
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    # BaseAgent lifecycle
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+    async def setup(self) -> None:
+        """Subscribe to match events relevant to this agent."""
+        self.subscribe_to_event("player_knocked")
+        self.subscribe_to_event("kill_confirmed")
+        self.subscribe_to_event("team_eliminated")
+
+    async def tick(self) -> None:
+        """Periodic maintenance tick."""
+        # Heuristic engine is driven by direct method calls;
+        # nothing periodic is required here.
+
+    async def handle_event(self, record: EventRecord) -> None:
+        """Handle an event from the event bus.
+
+        The heuristic engine is driven synchronously via direct method
+        calls; this hook keeps match context current for future
+        event-driven use.
+        """
+        try:
+            data = record.event.data if hasattr(record, "event") else {}
+            if isinstance(data, dict) and data.get("match_id"):
+                self.config.match_id = data["match_id"]
+        except Exception:
+            pass
+
+    async def cleanup(self) -> None:
+        """Release agent resources."""

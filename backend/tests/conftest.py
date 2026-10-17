@@ -207,12 +207,15 @@ async def team_agent(mock_event_bus):
     """Create a test team agent"""
     from app.agents.team_agents.team_tracker import TeamTracker
     
+    from app.agents.base_agent import AgentConfig
+
     agent = TeamTracker(
+        config=AgentConfig(agent_id="test_team_001", agent_type="team_agent"),
+        event_bus=mock_event_bus,
         team_id="test_team_001",
         team_name="Test Team",
         short_name="TEST",
         player_names=["Player1", "Player2", "Player3", "Player4"],
-        event_bus=mock_event_bus,
     )
     
     return agent
@@ -223,7 +226,12 @@ async def fight_detector(mock_event_bus):
     """Create a test fight detector"""
     from app.agents.fight_agents.fight_detector import FightDetector
     
-    detector = FightDetector()
+    from app.agents.base_agent import AgentConfig
+
+    detector = FightDetector(
+        config=AgentConfig(agent_id="fight_detector", agent_type="fight_detector"),
+        event_bus=mock_event_bus,
+    )
     return detector
 
 

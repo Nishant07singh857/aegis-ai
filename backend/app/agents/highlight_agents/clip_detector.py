@@ -11,6 +11,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 from collections import deque
 import structlog
+from ..base_agent import BaseAgent, AgentConfig
+from ...core.event_bus import EventBus, EventRecord
 
 logger = structlog.get_logger("aegis.agents.clip_detector")
 
@@ -90,7 +92,7 @@ class HighlightClip:
     thumbnail_path: str = ""
 
 
-class ClipDetector:
+class ClipDetector(BaseAgent):
     """
     Detects highlight-worthy moments in real-time.
     
@@ -110,7 +112,8 @@ class ClipDetector:
     - Platform suitability (YouTube, TikTok, Instagram)
     """
     
-    def __init__(self):
+    def __init__(self, config: AgentConfig, event_bus: EventBus):
+        super().__init__(config, event_bus)
         # Detected clips
         self.clips: Dict[str, HighlightClip] = {}
         self.clip_history: deque = deque(maxlen=100)
@@ -635,3 +638,36 @@ class ClipDetector:
         self.recent_kills.clear()
         self.recent_damage.clear()
         self._log.info("Clip detector reset")
+
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    # BaseAgent lifecycle
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+    async def setup(self) -> None:
+        """Subscribe to match events relevant to this agent."""
+        self.subscribe_to_event("kill_confirmed")
+        self.subscribe_to_event("clutch_detected")
+        self.subscribe_to_event("highlight_moment")
+        self.subscribe_to_event("fight_detected")
+
+    async def tick(self) -> None:
+        """Periodic maintenance tick."""
+        # Heuristic engine is driven by direct method calls;
+        # nothing periodic is required here.
+
+    async def handle_event(self, record: EventRecord) -> None:
+        """Handle an event from the event bus.
+
+        The heuristic engine is driven synchronously via direct method
+        calls; this hook keeps match context current for future
+        event-driven use.
+        """
+        try:
+            data = record.event.data if hasattr(record, "event") else {}
+            if isinstance(data, dict) and data.get("match_id"):
+                self.config.match_id = data["match_id"]
+        except Exception:
+            pass
+
+    async def cleanup(self) -> None:
+        """Release agent resources."""
