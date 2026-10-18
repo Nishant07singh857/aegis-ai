@@ -11,6 +11,9 @@ output page. Auth model:
   * POST /director/scene               — operator+, MANUAL mode only
   * POST /director/overlays            — operator+, MANUAL mode only
   * POST /director/lower-third         — operator+, MANUAL mode only
+  * POST /director/graphics           — operator+; graphics template
+                                         selection; MANUAL or SEMI-AUTO
+                                         mode only (409 in FULL_AUTO)
   * POST /director/suggestions/{id}/approve — operator+; applies the
                                          payload exactly like a manual
                                          operator write; 404 if unknown/
@@ -22,7 +25,9 @@ output page. Auth model:
 Status codes: 401 unauthenticated, 403 insufficient role, 422 invalid
 values, 404 unknown/decided/expired suggestion, 409 operator write or
 approval while the director mode conflicts (valid request, wrong mode —
-flip modes first).
+flip modes first). Graphics template selection is allowed in MANUAL and
+SEMI-AUTO; in FULL_AUTO it is rejected with 409 like any other operator
+write.
 """
 
 from __future__ import annotations
@@ -39,6 +44,7 @@ from app.services.director_service import (
 from .schemas import (
     DirectorState,
     DirectorSuggestion,
+    GraphicsRequest,
     LowerThirdRequest,
     ModeRequest,
     OverlaysRequest,
@@ -56,6 +62,18 @@ def _mode_conflict() -> HTTPException:
             "lower-third writes are rejected. In SEMI-AUTO, approve AI "
             "suggestions instead; switch to MANUAL for direct control via "
             'POST /api/v1/director/mode {"mode": "manual"}.'
+        ),
+    )
+
+
+def _graphics_mode_conflict() -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_409_CONFLICT,
+        detail=(
+            "Director is in FULL_AUTO mode: graphics template selection is "
+            "an operator write and is rejected here. Switch to SEMI-AUTO "
+            'or MANUAL first via POST /api/v1/director/mode '
+            '{"mode": "semi_auto"}.'
         ),
     )
 
@@ -186,3 +204,23 @@ async def set_director_lower_third(
         )
     except DirectorModeError:
         raise _mode_conflict()
+
+
+@router.post("/graphics", response_model=DirectorState)
+async def set_director_graphics(
+    payload: GraphicsRequest,
+    user: TokenPayload = Depends(require_operator),
+):
+    """Operator graphics template selection (partial update). Allowed in
+    MANUAL and SEMI_AUTO mode — template choice is a direct operator
+    write in both. 409 in FULL_AUTO mode, where the AI drives the output."""
+    try:
+        return await director_service.set_graphics(
+            scorebug_template_id=payload.scorebug_template_id,
+            lowerthird_template_id=payload.lowerthird_template_id,
+            standings_template_id=payload.standings_template_id,
+            killfeed_template_id=payload.killfeed_template_id,
+            updated_by=user.username,
+        )
+    except DirectorModeError:
+        raise _graphics_mode_conflict()

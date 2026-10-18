@@ -14,6 +14,12 @@ renders it.
   "scene": "main",                   // "main" | "standings" | "killfeed_focus" | "commentary"
   "overlays": {"scorebug": true, "killfeed": true},
   "lower_third": {"visible": false, "title": "", "subtitle": ""},
+  "graphics": {"scorebug_template_id": "scorebug-classic",
+               "lowerthird_template_id": "lowerthird-slide",
+               "standings_template_id": "standings-table",
+               "killfeed_template_id": "killfeed-ticker"},
+                        // template ids from the Phase 8 graphics template
+                        // gallery; ids are the frontend contract — never renamed
   "updated_by": "operator",          // username, or "director_ai:<team>" / "system"
   "updated_at": "2026-10-18T00:00:00+00:00"
 }
@@ -34,6 +40,13 @@ renders it.
 - **MANUAL**: operator API writes are authoritative. `system_publish()`
   and `propose_suggestion()` are both **no-ops**, so the AI is fully
   silent.
+- **Graphics exception**: template selection
+  (`POST /director/graphics`, `set_graphics()`) is a direct operator
+  write allowed in **MANUAL and SEMI-AUTO** — the AI never chooses
+  templates in semi-auto (it only proposes scene/overlay/lower-third
+  content). It is rejected in **FULL_AUTO** (409), where the AI drives
+  the output itself. This is the only operator write allowed in
+  semi-auto; scene/overlay/lower-third writes stay MANUAL-only there.
 - Transitions are **explicit**, via `POST /director/mode`. The legacy
   Phase 6 value `"auto"` is accepted and **normalised to `"full_auto"`**
   — the string `"auto"` is never stored.
@@ -92,6 +105,7 @@ Director AI's event priority (CRITICAL 0.9 / HIGH 0.75 / MEDIUM 0.6).
 | POST   | `/scene`                          | operator+       | manual only                        |
 | POST   | `/overlays`                       | operator+       | manual only, partial update        |
 | POST   | `/lower-third`                    | operator+       | manual only                        |
+| POST   | `/graphics`                       | operator+       | manual or semi_auto; partial update; 409 in full_auto |
 | POST   | `/suggestions/{id}/approve`       | operator+       | applies payload like a manual write; 404 unknown/decided/expired; 409 in full_auto |
 | POST   | `/suggestions/{id}/reject`        | operator+       | marks rejected, logged, dropped; 404 unknown/decided/expired |
 
@@ -102,7 +116,9 @@ Director AI's event priority (CRITICAL 0.9 / HIGH 0.75 / MEDIUM 0.6).
 - **404** — a suggestion id that is unknown, already decided, or expired.
 - **409 Conflict** — a *valid* operator write while the director is not
   in **MANUAL** mode, or a valid suggestion approval while the director
-  is in **FULL_AUTO** mode. 409 was chosen over 422 because the request
+  is in **FULL_AUTO** mode. Graphics template selection is rejected with
+  409 only in **FULL_AUTO** (it is a valid operator write in MANUAL and
+  SEMI-AUTO). 409 was chosen over 422 because the request
   itself is well-formed; it conflicts with the current director mode.
 - **401** unauthenticated, **403** insufficient role (viewer hitting a
   POST endpoint or GET /suggestions).

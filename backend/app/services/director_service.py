@@ -11,6 +11,12 @@ Holds the director state in memory (process-local, like MATCH_STATE):
     overlays    {"scorebug": bool, "killfeed": bool}  (default both true)
     lower_third {"visible": bool, "title": str, "subtitle": str}
                                                      (default hidden/empty)
+    graphics    {"scorebug_template_id": str, "lowerthird_template_id": str,
+                 "standings_template_id": str, "killfeed_template_id": str}
+        Template ids for the Phase 8 graphics template gallery. Defaults:
+        "scorebug-classic", "lowerthird-slide", "standings-table",
+        "killfeed-ticker". These ids are the contract with the frontend
+        team — they are never renamed.
     updated_by  str | None
     updated_at  ISO-8601 timestamp
 
@@ -26,7 +32,10 @@ Rules
   that an operator approves or rejects through the API. No suggestion
   ever auto-applies. Operator direct writes (scene/overlay/lower-third)
   are still rejected here — the approval queue is the operator's control
-  surface in this mode.
+  surface in this mode. The one exception is graphics template selection
+  (:meth:`set_graphics`), which is a direct operator write allowed in
+  both SEMI_AUTO and MANUAL mode: the AI never chooses templates in
+  semi-auto (it only suggests scene/overlay/lower-third content).
 * MANUAL mode: operator API writes are authoritative;
   :meth:`system_publish` and :meth:`propose_suggestion` are both no-ops,
   so the simulator/AI is fully silent.
@@ -82,6 +91,44 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional
 DIRECTOR_MODES = ("full_auto", "semi_auto", "manual")
 DIRECTOR_SCENES = ("main", "standings", "killfeed_focus", "commentary")
 
+#: Graphics template ids per graphics type (Phase 8). These ids are the
+#: contract with the frontend team — the graphics template gallery and the
+#: director console share exactly these strings. Do not rename them.
+SCOREBUG_TEMPLATES = (
+    "scorebug-classic",
+    "scorebug-modern",
+    "scorebug-minimal",
+)
+LOWER_THIRD_TEMPLATES = (
+    "lowerthird-slide",
+    "lowerthird-rise",
+    "lowerthird-banner",
+)
+STANDINGS_TEMPLATES = (
+    "standings-table",
+    "standings-cards",
+)
+KILLFEED_TEMPLATES = (
+    "killfeed-ticker",
+    "killfeed-stack",
+)
+
+#: Default template selected for each graphics type in a fresh state.
+GRAPHICS_TEMPLATE_DEFAULTS = {
+    "scorebug_template_id": "scorebug-classic",
+    "lowerthird_template_id": "lowerthird-slide",
+    "standings_template_id": "standings-table",
+    "killfeed_template_id": "killfeed-ticker",
+}
+
+#: All valid template ids per graphics type, for validation.
+GRAPHICS_TEMPLATE_OPTIONS = {
+    "scorebug_template_id": SCOREBUG_TEMPLATES,
+    "lowerthird_template_id": LOWER_THIRD_TEMPLATES,
+    "standings_template_id": STANDINGS_TEMPLATES,
+    "killfeed_template_id": KILLFEED_TEMPLATES,
+}
+
 #: Legacy mode value accepted by the mode API and normalised to "full_auto".
 #: Never stored in state.
 LEGACY_AUTO_MODE = "auto"
@@ -126,6 +173,7 @@ def _default_state() -> Dict[str, Any]:
         "scene": "main",
         "overlays": {"scorebug": True, "killfeed": True},
         "lower_third": {"visible": False, "title": "", "subtitle": ""},
+        "graphics": dict(GRAPHICS_TEMPLATE_DEFAULTS),
         "updated_by": None,
         "updated_at": _utcnow_iso(),
     }
@@ -154,6 +202,18 @@ def _validate_scene(scene: str) -> str:
             f"{', '.join(DIRECTOR_SCENES)}."
         )
     return scene
+
+
+def _validate_graphics_template(template_type: str, template_id: str) -> str:
+    """Validate a graphics template id against its type's known ids."""
+    options = GRAPHICS_TEMPLATE_OPTIONS[template_type]
+    template_id = (template_id or "").strip()
+    if template_id not in options:
+        raise ValueError(
+            f"Invalid template id {template_id!r} for {template_type}: "
+            f"must be one of {', '.join(options)}."
+        )
+    return template_id
 
 
 def _validate_suggestion_type(suggestion_type: str) -> str:
@@ -219,7 +279,10 @@ class DirectorService:
         """Return a deep copy of the current director state."""
         return copy.deepcopy(self._state)
 
-    # ── operator writes (MANUAL mode only, except set_mode) ─────
+    # ── operator writes ────────────────────────────────────────────
+    # scene/overlays/lower-third are MANUAL mode only; set_graphics is
+    # allowed in MANUAL and SEMI_AUTO (template choice is a direct
+    # operator write in both); set_mode is allowed in any mode.
 
     async def set_mode(
         self, mode: str, updated_by: Optional[str] = None
@@ -306,6 +369,56 @@ class DirectorService:
             self._require_manual()
             self._apply_lower_third(visible=visible, title=title,
                                     subtitle=subtitle, updated_by=updated_by)
+            state = copy.deepcopy(self._state)
+        await self._broadcast({"type": WS_MESSAGE_TYPE, "data": state})
+        return state
+
+    def _require_graphics_mode(self) -> None:
+        if self._state["mode"] == "full_auto":
+            raise DirectorModeError(
+                "Director is in FULL_AUTO mode: graphics template selection "
+                "is an operator write and is rejected here. Switch to "
+                "SEMI-AUTO or MANUAL first via POST /api/v1/director/mode."
+            )
+
+    async def set_graphics(
+        self,
+        scorebug_template_id: Optional[str] = None,
+        lowerthird_template_id: Optional[str] = None,
+        standings_template_id: Optional[str] = None,
+        killfeed_template_id: Optional[str] = None,
+        updated_by: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Operator graphics template selection (partial update).
+
+        Allowed in MANUAL and SEMI_AUTO mode: template choice is a direct
+        operator write in both — the AI never selects templates itself
+        (unlike scene/overlay/lower-third, which are MANUAL-only). Rejected
+        with :class:`DirectorModeError` in FULL_AUTO mode, where the AI
+        drives the output.
+        """
+        provided = {
+            "scorebug_template_id": scorebug_template_id,
+            "lowerthird_template_id": lowerthird_template_id,
+            "standings_template_id": standings_template_id,
+            "killfeed_template_id": killfeed_template_id,
+        }
+        if all(value is None for value in provided.values()):
+            raise ValueError(
+                "Nothing to update: provide at least one of "
+                "'scorebug_template_id', 'lowerthird_template_id', "
+                "'standings_template_id' or 'killfeed_template_id'."
+            )
+        validated = {
+            key: _validate_graphics_template(key, value)
+            for key, value in provided.items()
+            if value is not None
+        }
+        async with self._lock:
+            self._require_graphics_mode()
+            self._state["graphics"].update(validated)
+            self._state["updated_by"] = updated_by
+            self._state["updated_at"] = _utcnow_iso()
             state = copy.deepcopy(self._state)
         await self._broadcast({"type": WS_MESSAGE_TYPE, "data": state})
         return state

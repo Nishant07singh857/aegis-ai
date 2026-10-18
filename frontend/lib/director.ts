@@ -8,6 +8,10 @@
  *         "scene": "main"|"standings"|"killfeed_focus"|"commentary",
  *         "overlays": {"scorebug": bool, "killfeed": bool},
  *         "lower_third": {"visible": bool, "title": str, "subtitle": str},
+ *         "graphics": {"scorebug_template_id": str,
+ *                      "lowerthird_template_id": str,
+ *                      "standings_template_id": str,
+ *                      "killfeed_template_id": str},
  *         "updated_by": str|null, "updated_at": str}
  *   GET  /api/v1/director/suggestions
  *     -> [{"id": str, "type": "scene"|"overlay"|"lower_third",
@@ -19,6 +23,16 @@
  *   POST /api/v1/director/lower-third {"visible": bool, "title"?: str, "subtitle"?: str}
  *   POST /api/v1/director/suggestions/{id}/approve
  *   POST /api/v1/director/suggestions/{id}/reject
+ *
+ * Graphics template selection (Phase 8):
+ *   POST /api/v1/director/graphics
+ *     {"scorebug_template_id"?: str, "lowerthird_template_id"?: str,
+ *      "standings_template_id"?: str, "killfeed_template_id"?: str}
+ *     Operator+; allowed in SEMI_AUTO and MANUAL mode, rejected with 409
+ *     in FULL_AUTO (unlike scene/overlay/lower-third writes, which need
+ *     MANUAL). Unknown template ids are rejected with 422. At least one
+ *     id is required. The new graphics ship in the "director.state" WS
+ *     broadcast like every other director change.
  *
  * Scene/overlay/lower-third writes are rejected unless the director is in
  * MANUAL mode (409); the UI surfaces the backend's message honestly. No
@@ -43,11 +57,38 @@ export interface DirectorLowerThird {
   subtitle: string;
 }
 
+/**
+ * Active graphics template per type (Phase 8). Keys match the backend
+ * DirectorGraphics schema exactly. The frontend never invents ids: every
+ * value comes from the backend state or a ?template= override resolved
+ * against the template registry.
+ */
+export interface DirectorGraphics {
+  scorebug_template_id: string;
+  lowerthird_template_id: string;
+  standings_template_id: string;
+  killfeed_template_id: string;
+}
+
+/** Fresh-state defaults — mirrors the backend GRAPHICS_TEMPLATE_DEFAULTS. */
+export const DEFAULT_DIRECTOR_GRAPHICS: DirectorGraphics = {
+  scorebug_template_id: "scorebug-classic",
+  lowerthird_template_id: "lowerthird-slide",
+  standings_template_id: "standings-table",
+  killfeed_template_id: "killfeed-ticker",
+};
+
 export interface DirectorState {
   mode: DirectorMode;
   scene: DirectorScene;
   overlays: DirectorOverlays;
   lower_third: DirectorLowerThird;
+  /**
+   * Present on every state after normalizeDirectorState (defaults are
+   * filled in when the backend payload predates Phase 8). Consumers can
+   * read it directly — no undefined checks needed post-normalisation.
+   */
+  graphics: DirectorGraphics;
   updated_by: string | null;
   updated_at: string;
 }
@@ -112,13 +153,55 @@ export function isDirectorState(value: unknown): value is DirectorState {
   if (typeof lowerThird.visible !== "boolean") return false;
   // title/subtitle default to "" when absent; visible=false must never
   // crash the renderer.
+  // graphics is optional for backward compatibility (a backend predating
+  // Phase 8 emits no graphics block); when present it must be an object
+  // whose known keys are strings. Unknown ids are NOT rejected here —
+  // the template registry falls back to the per-type default at render.
+  const g = s.graphics;
+  if (g !== undefined && g !== null) {
+    if (typeof g !== "object") return false;
+    const graphics = g as Record<string, unknown>;
+    for (const key of [
+      "scorebug_template_id",
+      "lowerthird_template_id",
+      "standings_template_id",
+      "killfeed_template_id",
+    ] as const) {
+      const v = graphics[key];
+      if (v !== undefined && typeof v !== "string") return false;
+    }
+  }
   return true;
+}
+
+/** Strict shape check for the graphics block of a director state. */
+export function isDirectorGraphics(value: unknown): value is DirectorGraphics {
+  if (value === null || typeof value !== "object") return false;
+  const g = value as Record<string, unknown>;
+  return (
+    typeof g.scorebug_template_id === "string" &&
+    typeof g.lowerthird_template_id === "string" &&
+    typeof g.standings_template_id === "string" &&
+    typeof g.killfeed_template_id === "string"
+  );
 }
 
 /** Normalise a validated state so optional text fields are always strings. */
 export function normalizeDirectorState(state: DirectorState): DirectorState {
+  const rawGraphics = (state as { graphics?: unknown }).graphics;
+  const graphics: DirectorGraphics = { ...DEFAULT_DIRECTOR_GRAPHICS };
+  if (rawGraphics !== null && typeof rawGraphics === "object") {
+    const g = rawGraphics as Record<string, unknown>;
+    (Object.keys(graphics) as (keyof DirectorGraphics)[]).forEach((key) => {
+      const v = g[key];
+      // Empty/unknown ids are kept as-is when non-empty; the registry
+      // falls back to the per-type default at render time.
+      if (typeof v === "string" && v) graphics[key] = v;
+    });
+  }
   return {
     ...state,
+    graphics,
     lower_third: {
       visible: state.lower_third.visible,
       title:
@@ -240,6 +323,26 @@ export async function postDirectorLowerThird(
     method: "POST",
     token: token ?? undefined,
     body: lowerThird,
+  });
+}
+
+/**
+ * POST /api/v1/director/graphics — set the active template for one or more
+ * graphic types (Phase 8).
+ *
+ * Allowed in SEMI_AUTO and MANUAL mode; the backend answers 409 in
+ * FULL_AUTO (the AI drives the output there) and 422 for unknown template
+ * ids. apiFetch surfaces the backend's message, so the UI shows it
+ * honestly instead of guessing.
+ */
+export async function setGraphics(
+  token: string | null,
+  graphics: Partial<DirectorGraphics>
+): Promise<void> {
+  await apiFetch<unknown>("/api/v1/director/graphics", {
+    method: "POST",
+    token: token ?? undefined,
+    body: graphics,
   });
 }
 

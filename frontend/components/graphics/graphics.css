@@ -1,0 +1,101 @@
+/**
+ * AEGIS AI — graphics template animations (Phase 8).
+ *
+ * Shared keyframes for the broadcast graphics templates under
+ * components/graphics/templates/. Rules:
+ *  - transform / opacity ONLY (GPU-friendly; smooth inside an OBS
+ *    browser source, no layout thrash),
+ *  - classes are prefixed gfx- to avoid colliding with the overlay-kit's
+ *    ov-anim-* helpers.
+ */
+
+@keyframes gfx-slide-in-left {
+  from {
+    transform: translateX(-64px);
+    opacity: 0;
+  }
+  to {
+    transform: translateX(0);
+    opacity: 1;
+  }
+}
+
+@keyframes gfx-rise-up {
+  from {
+    transform: translateY(32px);
+    opacity: 0;
+  }
+  to {
+    transform: translateY(0);
+    opacity: 1;
+  }
+}
+
+/* Same as rise-up but keeps the element horizontally centred (left-1/2
+ * anchored lower-thirds must carry the -50% X offset inside the keyframes,
+ * because the animation's transform replaces any Tailwind translate). */
+@keyframes gfx-rise-up-centered {
+  from {
+    transform: translate(-50%, 32px);
+    opacity: 0;
+  }
+  to {
+    transform: translate(-50%, 0);
+    opacity: 1;
+  }
+}
+
+@keyframes gfx-drop-in {
+  from {
+    transform: translateY(-100%);
+    opacity: 0;
+  }
+  to {
+    transform: translateY(0);
+    opacity: 1;
+  }
+}
+
+@keyframes gfx-fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+/* Horizontal marquee: the animated track must contain two copies of the
+ * content side by side; translating -50% loops it seamlessly. */
+@keyframes gfx-ticker-scroll {
+  from {
+    transform: translateX(0);
+  }
+  to {
+    transform: translateX(-50%);
+  }
+}
+
+.gfx-anim-slide-in-left {
+  animation: gfx-slide-in-left 0.35s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.gfx-anim-rise-up {
+  animation: gfx-rise-up 0.35s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.gfx-anim-rise-up-centered {
+  animation: gfx-rise-up-centered 0.35s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.gfx-anim-drop-in {
+  animation: gfx-drop-in 0.4s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.gfx-anim-fade-in {
+  animation: gfx-fade-in 0.3s ease-out both;
+}
+
+.gfx-anim-ticker-scroll {
+  animation: gfx-ticker-scroll linear infinite;
+}

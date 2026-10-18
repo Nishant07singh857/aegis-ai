@@ -11,6 +11,8 @@
  *     (MANUAL mode only)
  *   - overlay toggles: scorebug, killfeed (MANUAL mode only)
  *   - lower-third composer: title + subtitle, Show/Hide (MANUAL mode only)
+ *   - graphics template picker: per-type template buttons
+ *     (SEMI_AUTO + MANUAL; the backend 409s in FULL_AUTO)
  *   - suggestion queue in SEMI-AUTO: live AI proposals with reason,
  *     confidence, expiry countdown, Approve / Reject
  *
@@ -28,6 +30,7 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import Link from "next/link";
 import { useAuth } from "@/lib/auth";
 import { useLiveSocket } from "@/lib/useLiveSocket";
 import { RequireRole } from "@/lib/guard";
@@ -46,13 +49,22 @@ import {
   postDirectorOverlays,
   postDirectorScene,
   rejectDirectorSuggestion,
+  setGraphics,
   suggestionExpiresIn,
 } from "@/lib/director";
 import type {
+  DirectorGraphics,
   DirectorMode,
   DirectorState,
   DirectorSuggestion,
 } from "@/lib/director";
+import {
+  GRAPHIC_STATE_KEYS,
+  GRAPHIC_TYPES,
+  GRAPHIC_TYPE_LABELS,
+  isActiveTemplate,
+  templatesFor,
+} from "@/lib/graphics";
 
 function actionErrorMessage(e: unknown): string {
   if (e instanceof Error) return e.message;
@@ -278,6 +290,10 @@ function DirectorConsoleInner() {
   const manual = mode === "manual";
   const semiAuto = mode === "semi_auto";
   const controlsDisabled = busy !== null || !manual;
+  // Graphics template selection is the one operator write allowed in
+  // SEMI_AUTO as well — only FULL_AUTO 409s (backend rule).
+  const graphicsLocked = mode === "full_auto";
+  const graphicsDisabled = busy !== null || graphicsLocked;
   const visibleSuggestions = suggestions.filter(
     (s) => suggestionExpiresIn(s, nowMs) > 0
   );
@@ -495,6 +511,81 @@ function DirectorConsoleInner() {
             </div>
           </Card>
 
+          {/* graphics templates */}
+          <Card
+            title="Graphics Templates"
+            action={
+              graphicsLocked ? (
+                <Badge tone="slate">Locked in Full Auto</Badge>
+              ) : (
+                <Badge tone="green">
+                  {semiAuto ? "Semi-Auto" : "Manual control"}
+                </Badge>
+              )
+            }
+          >
+            <div className="flex flex-col gap-3">
+              {GRAPHIC_TYPES.map((type) => (
+                <div
+                  key={type}
+                  className="rounded-lg border border-white/10 bg-black/30 px-4 py-3"
+                >
+                  <div className="mb-2 flex items-center justify-between gap-3">
+                    <span className="text-sm font-semibold text-white/90">
+                      {GRAPHIC_TYPE_LABELS[type]}
+                    </span>
+                    <Link
+                      href="/broadcast/graphics"
+                      className="font-mono text-[11px] uppercase tracking-wider text-[#00f0ff]/80 transition-colors hover:text-[#00f0ff]"
+                    >
+                      Gallery →
+                    </Link>
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    {templatesFor(type).map((def) => {
+                      const active = isActiveTemplate(state, type, def.id);
+                      const isBusy = busy === `gfx-${def.id}`;
+                      return (
+                        <button
+                          key={def.id}
+                          type="button"
+                          disabled={graphicsDisabled || active}
+                          title={
+                            graphicsLocked
+                              ? "Template changes need Semi-Auto or Manual mode — the backend rejects them in Full Auto (409)."
+                              : def.description
+                          }
+                          onClick={() => {
+                            const body: Partial<DirectorGraphics> = {};
+                            body[GRAPHIC_STATE_KEYS[type]] = def.id;
+                            void run(`gfx-${def.id}`, () =>
+                              setGraphics(token, body)
+                            );
+                          }}
+                          aria-pressed={active}
+                          className={`rounded-lg border px-3.5 py-2 font-mono text-xs font-bold uppercase tracking-wider transition-all ${
+                            active
+                              ? "border-[#00f0ff] bg-[#00f0ff]/15 text-[#00f0ff]"
+                              : "border-white/10 bg-white/5 text-white/55 hover:border-white/25 hover:text-white/85"
+                          } disabled:cursor-not-allowed disabled:opacity-40`}
+                        >
+                          {isBusy ? "Setting…" : def.name}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              ))}
+              {graphicsLocked && (
+                <p className="text-sm text-white/60">
+                  Template changes need Semi-Auto or Manual mode — the
+                  backend rejects them while the director is in Full Auto
+                  (409).
+                </p>
+              )}
+            </div>
+          </Card>
+
           {/* lower third composer */}
           <Card
             title="Lower third"
@@ -627,6 +718,21 @@ function DirectorConsoleInner() {
                   >
                     {state.lower_third.visible ? "visible" : "hidden"}
                   </Badge>
+                </dd>
+              </div>
+              <div className="flex items-center justify-between gap-3 rounded-lg bg-black/30 px-4 py-2.5 sm:col-span-2">
+                <dt className="shrink-0 text-white/50">Templates</dt>
+                <dd className="flex flex-wrap justify-end gap-2">
+                  {GRAPHIC_TYPES.map((type) => (
+                    <Badge key={type} tone="cyan">
+                      {GRAPHIC_TYPE_LABELS[type]}:{' '}
+                      {templatesFor(type).find(
+                        (t) =>
+                          t.id ===
+                          state.graphics[GRAPHIC_STATE_KEYS[type]]
+                      )?.name ?? state.graphics[GRAPHIC_STATE_KEYS[type]]}
+                    </Badge>
+                  ))}
                 </dd>
               </div>
             </dl>
