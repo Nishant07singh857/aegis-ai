@@ -107,6 +107,11 @@ LOWER_THIRD_TEMPLATES = (
 STANDINGS_TEMPLATES = (
     "standings-table",
     "standings-cards",
+    "standings-mvp",
+    "standings-eliminator",
+    "standings-igl",
+    "standings-finals-mvp",
+    "standings-spotlight",
 )
 KILLFEED_TEMPLATES = (
     "killfeed-ticker",

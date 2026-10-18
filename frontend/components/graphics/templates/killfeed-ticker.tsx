@@ -1,18 +1,30 @@
 /**
- * AEGIS AI — killfeed template: Ticker.
+ * AEGIS AI — killfeed template: Ticker (Phase 8, W2 excellence pass).
  *
  * Port of the original /overlays/killfeed design: top-right ticker where
- * the newest kill slides in at the top — killer → victim, weapon, and a
- * KNOCK badge for knocks (vs finishes).
+ * the newest kill slides in from the right — killer → victim, weapon, and
+ * a KNOCK badge for knocks (vs finishes).
+ *
+ * Exit animation: the page TTL-filters `events`, so an expired kill used
+ * to unmount instantly. Rows removed from the prop now stay mounted for
+ * one exit beat (gfx-anim-slide-out-right) via useExitingList before they
+ * unmount — no more pop-out.
  */
 
 import type { KillEvent } from '@/lib/useLiveSocket';
 import { WaitingFeed } from '@/components/overlay-kit';
 import type { KillfeedProps } from '../registry';
+import { useExitingList } from './_anim';
 
-function KillRow({ kill }: { kill: KillEvent }) {
+const killKey = (kill: KillEvent) => kill.id;
+
+function KillRow({ kill, exiting }: { kill: KillEvent; exiting: boolean }) {
   return (
-    <div className="ov-anim-slide-in flex items-center gap-2.5 rounded-lg bg-black/70 px-4 py-2 backdrop-blur-sm">
+    <div
+      className={`${
+        exiting ? 'gfx-anim-slide-out-right' : 'gfx-anim-slide-in-right'
+      } flex items-center gap-2.5 rounded-lg bg-black/70 px-4 py-2 backdrop-blur-sm`}
+    >
       <div className="min-w-0 flex-1 truncate text-right text-lg font-bold">
         <span className="text-white">{kill.killer}</span>
         <span className="ml-2 font-mono text-[11px] tracking-[0.15em] text-white/55">
@@ -47,12 +59,16 @@ function KillRow({ kill }: { kill: KillEvent }) {
 }
 
 export default function KillfeedTicker({ events }: KillfeedProps) {
-  if (events.length === 0) return <WaitingFeed what="KILL FEED" />;
+  const rows = useExitingList(events, killKey);
+
+  // `rows` (not `events`): when the last kill's TTL expires it still gets
+  // its exit animation instead of cutting straight to the empty state.
+  if (rows.length === 0) return <WaitingFeed what="KILL FEED" />;
 
   return (
     <div className="absolute right-5 top-5 flex w-[380px] flex-col gap-2">
-      {events.map((kill) => (
-        <KillRow key={kill.id} kill={kill} />
+      {rows.map(({ key, item, exiting }) => (
+        <KillRow key={key} kill={item} exiting={exiting} />
       ))}
     </div>
   );

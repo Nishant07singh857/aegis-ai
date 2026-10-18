@@ -7,6 +7,7 @@
 
 import { WaitingFeed } from '@/components/overlay-kit';
 import type { StandingsProps } from '../registry';
+import { GFX_STAGGER_CARD_MS, staggerDelay } from './_anim';
 
 export default function StandingsCards({ standings }: StandingsProps) {
   if (standings.length === 0) return <WaitingFeed what="STANDINGS FEED" />;
@@ -25,7 +26,7 @@ export default function StandingsCards({ standings }: StandingsProps) {
               className={`gfx-anim-fade-in overflow-hidden rounded-lg bg-black/70 backdrop-blur-sm ${
                 eliminated ? 'opacity-45' : ''
               }`}
-              style={{ animationDelay: `${Math.min(i, 9) * 45}ms` }}
+              style={{ animationDelay: staggerDelay(i, GFX_STAGGER_CARD_MS) }}
             >
               <div className="flex items-center gap-2.5 px-3.5 py-2.5">
                 <span className="font-mono text-lg font-black tabular-nums text-white/60">

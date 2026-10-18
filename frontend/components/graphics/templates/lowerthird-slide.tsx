@@ -1,13 +1,17 @@
 /**
- * AEGIS AI — lower-third template: Slide.
+ * AEGIS AI — lower-third template: Slide (Phase 8, W2 excellence pass).
  *
  * Port of the original /overlays/lower-third design: bottom-left card with
  * an accent bar, the event label and the commentary line, sliding in from
- * the left whenever a new line arrives.
+ * the left whenever a new line arrives (key={animKey} re-triggers the
+ * entrance). Hiding the graphic plays a mirrored slide-out exit before
+ * the standby pill returns — the last-shown line stays frozen while it
+ * exits, never a blank card.
  */
 
 import type { LowerThirdProps } from '../registry';
-import { LowerThirdStandby } from './lowerthird-standby';
+import { useExitingContent } from './_anim';
+import { LowerThirdStandby } from './_lowerthird-standby';
 
 export default function LowerThirdSlide({
   visible,
@@ -16,12 +20,22 @@ export default function LowerThirdSlide({
   status,
   animKey,
 }: LowerThirdProps) {
-  if (!visible || !subtitle) {
+  const { phase, content } = useExitingContent(visible && subtitle !== '', {
+    title,
+    subtitle,
+  });
+
+  if (phase === 'gone') {
     return <LowerThirdStandby status={status} />;
   }
 
   return (
-    <div key={animKey} className="gfx-anim-slide-in-left absolute bottom-12 left-8 max-w-[46rem]">
+    <div
+      key={animKey}
+      className={`absolute bottom-12 left-8 max-w-[46rem] ${
+        phase === 'exit' ? 'gfx-anim-slide-out-left' : 'gfx-anim-slide-in-left'
+      }`}
+    >
       <div className="overflow-hidden rounded-r-xl rounded-l-sm bg-black/75 backdrop-blur-sm">
         <div className="flex items-stretch">
           <div
@@ -33,10 +47,10 @@ export default function LowerThirdSlide({
               className="mb-1 font-mono text-xs font-bold tracking-[0.35em]"
               style={{ color: 'var(--ov-accent)' }}
             >
-              {title}
+              {content.title}
             </div>
             <div className="text-3xl font-extrabold leading-snug">
-              {subtitle}
+              {content.subtitle}
             </div>
           </div>
         </div>

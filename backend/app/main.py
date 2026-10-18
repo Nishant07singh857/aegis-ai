@@ -29,8 +29,29 @@ from app.api.v1.teams.router import router as teams_router
 from app.api.v1.stream.router import router as stream_router
 from app.api.v1.director.router import router as director_router
 from app.api.v1.cluster.router import router as cluster_router
+# Phase 10: replay/highlights, feed adapter, broadcast flow, observer visuals.
+from app.api.v1.replay.router import router as replay_router
+from app.api.v1.feed.router import router as feed_router
+from app.api.v1.preshow import router as preshow_router
+from app.api.v1.ceremony import router as ceremony_router
+from app.api.v1.match_point import router as match_point_router
+from app.api.v1.zone import router as zone_router
+from app.api.v1.rundown import router as rundown_router
+from app.api.v1.pip import router as pip_router
+# Phase 11: team analysis product (rotations/drops/zones + dossiers/PDF reports).
+from app.analysis.router import router as analysis_router
+from app.dossiers.router import router as dossiers_router
 from app.cluster.registry import node_registry
 from app.services.director_service import director_service
+# Phase 10: new domain services (singletons; listeners wired in lifespan).
+from app.services.replay.service import replay_service
+from app.services.feed_adapter.service import feed_service
+from app.services.preshow import preshow_service
+from app.services.ceremony import ceremony_service
+from app.services.match_point import match_point_service
+from app.services.zone import zone_service
+from app.services.rundown import rundown_service
+from app.services.pip import pip_service
 from app.intelligence.director_ai import DirectorAIEngine, BroadcastEvent, EventPriority as DirPriority
 from app.intelligence.commentary_engine import get_commentary_engine
 from app.db.session import init_db
@@ -142,6 +163,13 @@ class ConnectionManager:
         await websocket.send_json({"type": "director_state", "data": MATCH_STATE["director_state"]})
         # Phase 6: current director output state on connect.
         await websocket.send_json({"type": "director.state", "data": director_service.snapshot()})
+        # Phase 10: seed new domain states on connect.
+        await websocket.send_json({"type": "preshow.state", "data": preshow_service.snapshot()})
+        await websocket.send_json({"type": "ceremony.step", "data": ceremony_service.snapshot()})
+        await websocket.send_json({"type": "matchpoint.state", "data": match_point_service.snapshot()})
+        await websocket.send_json({"type": "zone.tick", "data": zone_service.snapshot()})
+        await websocket.send_json({"type": "rundown.state", "data": rundown_service.snapshot()})
+        await websocket.send_json({"type": "pip.state", "data": pip_service.snapshot()})
         await websocket.send_json({"type": "system_health", "data": MATCH_STATE["system_health"]})
         await websocket.send_json({"type": "agents_state", "data": MATCH_STATE["agents_state"]})
         await websocket.send_json({"type": "modes_state", "data": MATCH_STATE["modes_state"]})
@@ -696,12 +724,25 @@ async def lifespan(app: FastAPI):
     # Phase 6: fan director.state changes out over /ws/live, and seed the
     # first admin user when ADMIN_EMAIL/ADMIN_PASSWORD are configured.
     director_service.add_listener(manager.broadcast)
+    # Phase 10: fan new domain events out over /ws/live.
+    replay_service.add_listener(manager.broadcast)
+    preshow_service.add_listener(manager.broadcast)
+    ceremony_service.add_listener(manager.broadcast)
+    match_point_service.add_listener(manager.broadcast)
+    zone_service.add_listener(manager.broadcast)
+    rundown_service.add_listener(manager.broadcast)
+    pip_service.add_listener(manager.broadcast)
     await _seed_first_admin()
         
     try:
         await event_bus.connect()
     except Exception as e:
         logger.warning(f"EventBus connection failed, continuing with in-memory broadcasting: {e}")
+
+    # Phase 10: replay buffer fills from the bus; feed adapter activates
+    # (after connect so attach() sees a running bus).
+    replay_service.buffer.subscribe_to(event_bus)
+    await feed_service.attach(event_bus)
 
     # Phase 7 / W3: register this process in the distributed cluster registry
     # (Redis-backed, standalone fallback when Redis is unreachable).
@@ -761,6 +802,19 @@ app.include_router(director_router, prefix="/api/v1", tags=["Director"])
 
 # Phase 7 / W3: cluster introspection API (read-only; any authenticated user).
 app.include_router(cluster_router, prefix="/api/v1", tags=["Cluster"])
+
+# Phase 10: replay + highlights, feed adapter, broadcast flow, observer visuals.
+app.include_router(replay_router, prefix="/api/v1", tags=["Replay"])
+app.include_router(feed_router, prefix="/api/v1", tags=["Feed"])
+app.include_router(preshow_router, prefix="/api/v1", tags=["Preshow"])
+app.include_router(ceremony_router, prefix="/api/v1", tags=["Ceremony"])
+app.include_router(match_point_router, prefix="/api/v1", tags=["Match Point"])
+app.include_router(zone_router, prefix="/api/v1", tags=["Zone"])
+app.include_router(rundown_router, prefix="/api/v1", tags=["Rundown"])
+app.include_router(pip_router, prefix="/api/v1", tags=["PiP"])
+# Phase 11: analysis product.
+app.include_router(analysis_router, prefix="/api/v1", tags=["Analysis"])
+app.include_router(dossiers_router, prefix="/api/v1", tags=["Dossiers"])
 
 @app.get("/")
 async def root():
@@ -908,6 +962,77 @@ async def get_mvp():
 @app.get("/api/v1/matches")
 async def get_matches():
     return JSONResponse({"data": MATCH_STATE["matches"]})
+
+@app.get("/api/v1/matches/{match_id}/player-stats")
+async def get_match_player_stats_endpoint(match_id: str):
+    """Per-player stat lines for one match.
+
+    Feeds the MVP / Best IGL / Finals MVP graphics templates
+    (frontend PlayerStat contract). Returns ONLY what a game-stats feed
+    has genuinely recorded via MatchService.record_player_stats — the
+    table is empty until such a feed exists, so the boards render their
+    honest empty states. Per-player damage, ratings, knocks etc. are
+    NEVER derived from team totals here (see docs/GRAPHICS.md honesty
+    rule). Any DB/schema failure degrades to an empty list, never a 500.
+    """
+    try:
+        from app.services import match_service as _ms
+        from app.db.models.player import Player
+        from app.db.models.team import Team
+
+        MatchPlayerStats = _ms.MatchPlayerStats  # noqa: F841 - documents source
+        async with get_db_context() as db:
+            svc = _ms.MatchService(db)
+            stats = await svc.get_match_player_stats(match_id)
+            player_ids = [s.player_id for s in stats]
+            players = {}
+            if player_ids:
+                res = await db.execute(
+                    select(Player).where(Player.id.in_(player_ids))
+                )
+                players = {p.id: p for p in res.scalars().all()}
+            team_ids = {s.team_id for s in stats} | {
+                p.team_id for p in players.values() if p.team_id
+            }
+            teams = {}
+            if team_ids:
+                res = await db.execute(
+                    select(Team).where(Team.id.in_(team_ids))
+                )
+                teams = {t.id: t for t in res.scalars().all()}
+            out = []
+            for s in stats:
+                p = players.get(s.player_id)
+                t = teams.get(s.team_id)
+                out.append(
+                    {
+                        "player_id": s.player_id,
+                        "player_name": (p.ign or p.name) if p else s.player_id,
+                        "team_id": s.team_id,
+                        "team_tag": (t.tag or t.name) if t else s.team_id,
+                        "team_color": (
+                            (t.colors or {}).get("primary") if t else None
+                        ),
+                        "finishes": s.kills,
+                        "damage": s.damage_dealt,
+                        "survival_seconds": s.survived_time_seconds,
+                        "knocks": None,  # not in the feed schema yet
+                        "rating": s.mvp_score,
+                        "igl_rating": None,  # needs a dedicated IGL feed
+                        "finals_mvp_rating": None,
+                        "is_igl": bool(p and (p.role or "").upper() == "IGL"),
+                        "avg_points": None,  # tournament-wide feed only
+                        "wwcd": None,  # joined from team frames client-side
+                        "top_5s": None,
+                        "avg_finishes": None,
+                    }
+                )
+        return JSONResponse({"data": {"match_id": match_id, "players": out}})
+    except Exception as e:  # honest degrade: empty, never invented
+        logger.warning(
+            "player-stats unavailable", match_id=match_id, error=str(e)
+        )
+        return JSONResponse({"data": {"match_id": match_id, "players": []}})
 
 @app.get("/api/v1/matches/live")
 async def get_live_match():

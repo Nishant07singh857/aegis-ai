@@ -48,6 +48,7 @@ import {
 } from '@/lib/director';
 import type { DirectorState } from '@/lib/director';
 import { useLatestCommentary } from '@/lib/useCommentary';
+import { usePlayerStats } from '@/lib/usePlayerStats';
 import { resolveTemplate } from '@/lib/graphics';
 import type { TemplateDef } from '@/lib/graphics';
 import type { ScorebugSummary } from '@/components/graphics/registry';
@@ -183,6 +184,9 @@ export function DirectorOutputView({
   const { status, retryCount, reconnect, standings, killFeed, directorState } =
     useLiveSocket(api);
   const { token } = useAuth();
+  // Per-player stats for the player-leaderboard standings templates; []
+  // until a game-stats feed records them (those templates render honestly).
+  const players = usePlayerStats(api);
   const [polledState, setPolledState] = useState<DirectorState | null>(null);
   const [stateError, setStateError] = useState<string | null>(null);
 
@@ -328,6 +332,8 @@ export function DirectorOutputView({
               standings={standingsTop8}
               accent={accent}
               status={status}
+              killFeed={killFeed}
+              players={players}
             />
           )}
           {manual && scene === 'killfeed_focus' && showKillfeed && (

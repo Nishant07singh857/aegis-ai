@@ -8,6 +8,7 @@
 
 import { WaitingFeed } from '@/components/overlay-kit';
 import { fmtClock, type ScorebugProps } from '../registry';
+import { useScorebugData } from './_scorebug-data';
 
 export default function ScorebugModern({
   standings,
@@ -15,13 +16,10 @@ export default function ScorebugModern({
   status,
   matchLabel,
 }: ScorebugProps) {
-  const sorted = [...standings].sort(
-    (a, b) => (b.total_pts ?? 0) - (a.total_pts ?? 0)
+  const { sorted, first, second, teamsAlive, teamsTotal } = useScorebugData(
+    standings,
+    summary
   );
-  const [first, second] = sorted;
-  const teamsAlive =
-    summary?.teams_alive ?? standings.filter((t) => t.alive).length;
-  const teamsTotal = standings.length;
 
   if (sorted.length === 0) return <WaitingFeed />;
 

@@ -26,6 +26,11 @@ import LowerThirdRise from './templates/lowerthird-rise';
 import LowerThirdBanner from './templates/lowerthird-banner';
 import StandingsTable from './templates/standings-table';
 import StandingsCards from './templates/standings-cards';
+import StandingsMvp from './templates/standings-mvp';
+import StandingsEliminator from './templates/standings-eliminator';
+import StandingsIgl from './templates/standings-igl';
+import StandingsFinalsMvp from './templates/standings-finals-mvp';
+import StandingsSpotlight from './templates/standings-spotlight';
 import KillfeedTicker from './templates/killfeed-ticker';
 import KillfeedStack from './templates/killfeed-stack';
 
@@ -62,11 +67,72 @@ export interface LowerThirdProps {
   animKey?: string;
 }
 
+/**
+ * Per-player stat line for the player-leaderboard standings templates
+ * (MVP, Eliminator, Best IGL, Finals MVP).
+ *
+ * Honesty contract: every numeric field is `number | null | undefined`.
+ * `null`/missing means the feed has not delivered that value — the
+ * templates render "—" and never invent it. Population sources:
+ *   - finishes:   GET /api/v1/matches/{id}/player-stats (recorded by a
+ *                 game-stats feed), or the live kill feed for the
+ *                 Eliminator board (killer names, this match only).
+ *   - damage / survival_seconds / knocks: player-stats feed only.
+ *   - rating:     feed-provided MVP/IGL rating only — NEVER derived from
+ *                 team totals (see the honesty note in docs/GRAPHICS.md).
+ *   - is_igl:     from the roster (Player.role = "IGL").
+ *   - wwcd:       joined from the team standings frames (team-level data).
+ *   - avg_points / top_5s / avg_finishes: tournament feeds only.
+ */
+export interface PlayerStat {
+  /** Stable id (DB player id, or a feed-provided id). */
+  playerId: string;
+  /** Display name (IGN); falls back to playerId when unknown. */
+  playerName: string;
+  teamId: string;
+  teamTag: string;
+  teamColor?: string;
+  finishes?: number | null;
+  damage?: number | null;
+  survivalSeconds?: number | null;
+  knocks?: number | null;
+  /** MVP rating (~1.0x scale) — feed-provided only. */
+  rating?: number | null;
+  /** IGL rating — feed-provided only. */
+  iglRating?: number | null;
+  /** Finals MVP rating (higher scale) — feed-provided only. */
+  finalsMvpRating?: number | null;
+  isIgl?: boolean;
+  avgPoints?: number | null;
+  wwcd?: number | null;
+  top5s?: number | null;
+  avgFinishes?: number | null;
+}
+
 export interface StandingsProps {
   /** Already sorted + sliced to the visible row count by the page. */
   standings: Team[];
   accent: string;
   status: ConnStatus;
+  /**
+   * Movement vs the previous match per team id, for standings-table.
+   * Absent = the feed has no previous-match snapshot, so the template
+   * renders no arrows (never fakes them).
+   */
+  movement?: Record<string, 'up' | 'down' | 'same'>;
+  /**
+   * TTL-filtered live kill events, newest-first (from useLiveSocket).
+   * Used by standings-eliminator to tally per-player finishes for the
+   * current match — real feed data.
+   */
+  killFeed?: KillEvent[];
+  /**
+   * Per-player stat lines for the player-leaderboard templates
+   * (standings-mvp / standings-igl / standings-finals-mvp), fetched by
+   * the page from GET /api/v1/matches/{id}/player-stats. Empty = no
+   * feed data yet; those templates render their honest empty state.
+   */
+  players?: PlayerStat[];
 }
 
 export interface KillfeedProps {
@@ -150,6 +216,46 @@ export const TEMPLATES: TemplateDef[] = [
     description:
       'Team cards in a grid: rank, colour chip, tag, total points and kills per card with a staggered fade-in.',
     component: StandingsCards,
+  },
+  {
+    id: 'standings-mvp',
+    name: 'Standings — MVP Board',
+    type: 'standings',
+    description:
+      'Per-player MVP board: rank, player, team, MVP rating, finishes, damage, survival and knocks with staggered row reveals. Feeds deliver player stats via GET /api/v1/matches/{id}/player-stats; unavailable fields render "—", never invented.',
+    component: StandingsMvp,
+  },
+  {
+    id: 'standings-eliminator',
+    name: 'Standings — Eliminator Race',
+    type: 'standings',
+    description:
+      'Top-5 finish leaders tallied live from the kill feed (this match), with a callout emphasising the #1 vs #2 gap. No kill feed yet → honest empty state.',
+    component: StandingsEliminator,
+  },
+  {
+    id: 'standings-igl',
+    name: 'Standings — Best IGL',
+    type: 'standings',
+    description:
+      'Best-IGL board: rank, IGL, team, IGL rating, avg points, WWCD (from team frames), top-5s, avg survival and avg finishes. Fields the feed has not delivered render "—".',
+    component: StandingsIgl,
+  },
+  {
+    id: 'standings-finals-mvp',
+    name: 'Standings — Finals MVP',
+    type: 'standings',
+    description:
+      'Finals MVP board on the higher finals rating scale. Same honest-data contract as the MVP board.',
+    component: StandingsFinalsMvp,
+  },
+  {
+    id: 'standings-spotlight',
+    name: 'Standings — Team Spotlight',
+    type: 'standings',
+    description:
+      'Big bold featured-team card for the current leader: rank, tag, points, kills, logo, plus damage / knocks / avg survival when a feed provides them (otherwise "—").',
+    component: StandingsSpotlight,
   },
   {
     id: 'killfeed-ticker',

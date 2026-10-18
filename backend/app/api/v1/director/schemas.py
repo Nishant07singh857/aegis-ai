@@ -111,7 +111,9 @@ class GraphicsRequest(BaseModel):
     standings_template_id: Optional[str] = Field(
         default=None,
         description='Standings template: "standings-table" | '
-        '"standings-cards". MANUAL or SEMI-AUTO mode.',
+        '"standings-cards" | "standings-mvp" | "standings-eliminator" | '
+        '"standings-igl" | "standings-finals-mvp" | '
+        '"standings-spotlight". MANUAL or SEMI-AUTO mode.',
     )
     killfeed_template_id: Optional[str] = Field(
         default=None,

@@ -7,14 +7,13 @@
 
 import { WaitingFeed } from '@/components/overlay-kit';
 import type { ScorebugProps } from '../registry';
+import { useScorebugData } from './_scorebug-data';
 
 export default function ScorebugMinimal({ standings, summary }: ScorebugProps) {
-  const sorted = [...standings].sort(
-    (a, b) => (b.total_pts ?? 0) - (a.total_pts ?? 0)
+  const { sorted, teamsAlive, teamsTotal } = useScorebugData(
+    standings,
+    summary
   );
-  const teamsAlive =
-    summary?.teams_alive ?? standings.filter((t) => t.alive).length;
-  const teamsTotal = standings.length;
 
   if (sorted.length === 0) return <WaitingFeed />;
 

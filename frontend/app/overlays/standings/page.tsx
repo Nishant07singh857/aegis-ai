@@ -25,6 +25,7 @@ import { Suspense, useMemo } from 'react';
 import { useSearchParams } from 'next/navigation';
 import { useLiveSocket } from '@/lib/useLiveSocket';
 import { useOverlayParams } from '@/lib/overlay-params';
+import { usePlayerStats } from '@/lib/usePlayerStats';
 import { resolveTemplate } from '@/lib/graphics';
 import { OverlayRoot, ConnBadge } from '@/components/overlay-kit';
 
@@ -38,9 +39,11 @@ function StandingsInner() {
   const params = useOverlayParams();
   const sp = useSearchParams();
   const rowCount = useMemo(() => clampRows(sp.get('rows')), [sp]);
-  const { status, retryCount, standings, directorState } = useLiveSocket(
-    params.api
-  );
+  const { status, retryCount, standings, killFeed, directorState } =
+    useLiveSocket(params.api);
+  // Per-player stats for the MVP/IGL/Finals-MVP boards; [] until a
+  // game-stats feed records them (those templates render honestly then).
+  const players = usePlayerStats(params.api);
 
   const rows = useMemo(
     () =>
@@ -55,7 +58,13 @@ function StandingsInner() {
 
   return (
     <OverlayRoot accent={params.accent}>
-      <Template standings={rows} accent={params.accent} status={status} />
+      <Template
+        standings={rows}
+        accent={params.accent}
+        status={status}
+        killFeed={killFeed}
+        players={players}
+      />
       <ConnBadge status={status} retryCount={retryCount} />
     </OverlayRoot>
   );

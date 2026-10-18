@@ -42,6 +42,60 @@ export interface ActionAck {
   message?: string;
 }
 
+/** Phase 10 PiP service state ("pip.state" frames); null until received. */
+export interface PiPStateFrame {
+  enabled: boolean;
+  main_source: string;
+  inset_source: string;
+  inset_position: 'top_left' | 'top_right' | 'bottom_left' | 'bottom_right';
+  updated_by?: string | null;
+  updated_at: string;
+}
+
+/** Phase 10 rundown segment ("rundown.state" frames). */
+export interface RundownSegmentFrame {
+  id: string;
+  title: string;
+  planned_duration_s: number;
+  notes: string;
+  order: number;
+}
+
+/** Phase 10 rundown state ("rundown.state" frames); null until received. */
+export interface RundownStateFrame {
+  segments: RundownSegmentFrame[];
+  /** -1 = not started yet; otherwise the index on air. */
+  current_index: number;
+  started_at?: string | null;
+  segment_started_at?: string | null;
+  updated_by?: string | null;
+  updated_at?: string | null;
+}
+
+/** Type guard for pip.state frames — malformed frames are ignored. */
+function isPiPStateFrame(data: any): data is PiPStateFrame {
+  return (
+    data !== null &&
+    typeof data === 'object' &&
+    typeof data.enabled === 'boolean' &&
+    typeof data.main_source === 'string' &&
+    typeof data.inset_source === 'string' &&
+    ['top_left', 'top_right', 'bottom_left', 'bottom_right'].includes(
+      data.inset_position
+    )
+  );
+}
+
+/** Type guard for rundown.state frames — malformed frames are ignored. */
+function isRundownStateFrame(data: any): data is RundownStateFrame {
+  return (
+    data !== null &&
+    typeof data === 'object' &&
+    Array.isArray(data.segments) &&
+    typeof data.current_index === 'number'
+  );
+}
+
 const MAX_BACKOFF_MS = 30_000;
 const MAX_ATTEMPTS = 10;
 const PING_INTERVAL_MS = 25_000;
@@ -69,6 +123,10 @@ export function useLiveSocket(apiBase?: string): {
   directorSuggestion: DirectorSuggestion | null;
   /** Monotonic counter of received suggestion frames (drives queue reconciliation). */
   suggestionSeq: number;
+  /** Phase 10 PiP layout state ("pip.state" frames); null until received. */
+  pipState: PiPStateFrame | null;
+  /** Phase 10 rundown state ("rundown.state" frames); null until received. */
+  rundownState: RundownStateFrame | null;
   health: any;
   agents: any[];
   modes: Record<string, boolean>;
@@ -86,6 +144,8 @@ export function useLiveSocket(apiBase?: string): {
   const [directorState, setDirectorState] = useState<DirectorState | null>(null);
   const [directorSuggestion, setDirectorSuggestion] = useState<DirectorSuggestion | null>(null);
   const [suggestionSeq, setSuggestionSeq] = useState(0);
+  const [pipState, setPipState] = useState<PiPStateFrame | null>(null);
+  const [rundownState, setRundownState] = useState<RundownStateFrame | null>(null);
   const [health, setHealth] = useState<any>(null);
   const [agents, setAgents] = useState<any[]>([]);
   const [modes, setModes] = useState<Record<string, boolean>>({});
@@ -210,6 +270,20 @@ export function useLiveSocket(apiBase?: string): {
           setAck(data as ActionAck);
         }
         break;
+      case 'pip.state':
+        // Phase 10 PiP layout state (every PiP change). Malformed frames
+        // are ignored — the page re-fetches GET /pip/state on reconnect.
+        if (isPiPStateFrame(data)) {
+          setPipState(data);
+        }
+        break;
+      case 'rundown.state':
+        // Phase 10 rundown state (every rundown change). Malformed frames
+        // are ignored — the page re-fetches GET /rundown/state on reconnect.
+        if (isRundownStateFrame(data)) {
+          setRundownState(data);
+        }
+        break;
       default:
         // commentary and other streams are not consumed by this dashboard
         break;
@@ -322,6 +396,8 @@ export function useLiveSocket(apiBase?: string): {
     directorState,
     directorSuggestion,
     suggestionSeq,
+    pipState,
+    rundownState,
     health,
     agents,
     modes,

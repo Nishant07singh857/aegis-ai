@@ -1,17 +1,53 @@
 /**
- * AEGIS AI — graphics template animations (Phase 8).
+ * AEGIS AI — graphics template animations (Phase 8, W2 excellence pass).
  *
- * Shared keyframes for the broadcast graphics templates under
- * components/graphics/templates/. Rules:
+ * Shared keyframes + animation tokens for the broadcast graphics
+ * templates under components/graphics/templates/. Rules:
  *  - transform / opacity ONLY (GPU-friendly; smooth inside an OBS
  *    browser source, no layout thrash),
  *  - classes are prefixed gfx- to avoid colliding with the overlay-kit's
- *    ov-anim-* helpers.
+ *    ov-anim-* helpers,
+ *  - timing comes from the --gfx-dur-* / --gfx-ease-* tokens below — use
+ *    the tokens, never hard-code a duration in a new animation class.
  */
+
+/* ------------------------------------------------------------------ */
+/* Animation tokens: durations                                        */
+/* ------------------------------------------------------------------ */
+:root {
+  /* Exits and quick fades. Mirrors GFX_EXIT_MS in templates/_anim.ts —
+   * the two must stay equal so a row unmounts exactly when its exit
+   * animation finishes. */
+  --gfx-dur-fast: 280ms;
+  /* Standard entrances (slides, rises, fades). */
+  --gfx-dur-normal: 380ms;
+  /* Statement entrances (drop-in, pop). */
+  --gfx-dur-slow: 520ms;
+
+  /* Entrances: fast start, soft landing. */
+  --gfx-ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+  /* Exits: accelerate away. */
+  --gfx-ease-in: cubic-bezier(0.55, 0.06, 0.68, 0.19);
+}
+
+/* ------------------------------------------------------------------ */
+/* Entrance keyframes                                                 */
+/* ------------------------------------------------------------------ */
 
 @keyframes gfx-slide-in-left {
   from {
     transform: translateX(-64px);
+    opacity: 0;
+  }
+  to {
+    transform: translateX(0);
+    opacity: 1;
+  }
+}
+
+@keyframes gfx-slide-in-right {
+  from {
+    transform: translateX(64px);
     opacity: 0;
   }
   to {
@@ -65,37 +101,144 @@
   }
 }
 
-/* Horizontal marquee: the animated track must contain two copies of the
- * content side by side; translating -50% loops it seamlessly. */
-@keyframes gfx-ticker-scroll {
+/* Entrance with a slight overshoot (spotlight card, gap callouts). */
+@keyframes gfx-pop {
   from {
-    transform: translateX(0);
+    transform: scale(0.92);
+    opacity: 0;
   }
   to {
-    transform: translateX(-50%);
+    transform: scale(1);
+    opacity: 1;
   }
 }
 
+/* ------------------------------------------------------------------ */
+/* Exit keyframes (paired with the entrances above)                    */
+/* ------------------------------------------------------------------ */
+
+@keyframes gfx-fade-out {
+  from {
+    opacity: 1;
+  }
+  to {
+    opacity: 0;
+  }
+}
+
+@keyframes gfx-slide-out-left {
+  from {
+    transform: translateX(0);
+    opacity: 1;
+  }
+  to {
+    transform: translateX(-64px);
+    opacity: 0;
+  }
+}
+
+@keyframes gfx-slide-out-right {
+  from {
+    transform: translateX(0);
+    opacity: 1;
+  }
+  to {
+    transform: translateX(64px);
+    opacity: 0;
+  }
+}
+
+@keyframes gfx-slide-out-up {
+  from {
+    transform: translateY(0);
+    opacity: 1;
+  }
+  to {
+    transform: translateY(-100%);
+    opacity: 0;
+  }
+}
+
+/* Mirror of rise-up-centered: sinks back down while staying centred. */
+@keyframes gfx-sink-down-centered {
+  from {
+    transform: translate(-50%, 0);
+    opacity: 1;
+  }
+  to {
+    transform: translate(-50%, 32px);
+    opacity: 0;
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* Entrance classes                                                  */
+/*                                                                   */
+/* Fill mode is `backwards` (not `both`): during a stagger delay the  */
+/* `from` keyframe applies, but once the entrance finishes the        */
+/* element falls back to its own styles — so a row/card that is also */
+/* dimmed (e.g. `opacity-40` for an eliminated team) stays dimmed     */
+/* instead of the animation's `opacity: 1` winning forever.          */
+/* The one exception is rise-up-centered: its final keyframe carries  */
+/* the -50% X centering offset, which must persist, so it keeps      */
+/* `both`.                                                           */
+/* ------------------------------------------------------------------ */
+
 .gfx-anim-slide-in-left {
-  animation: gfx-slide-in-left 0.35s cubic-bezier(0.22, 1, 0.36, 1) both;
+  animation: gfx-slide-in-left var(--gfx-dur-normal) var(--gfx-ease-out)
+    backwards;
+}
+
+.gfx-anim-slide-in-right {
+  animation: gfx-slide-in-right var(--gfx-dur-normal) var(--gfx-ease-out)
+    backwards;
 }
 
 .gfx-anim-rise-up {
-  animation: gfx-rise-up 0.35s cubic-bezier(0.22, 1, 0.36, 1) both;
+  animation: gfx-rise-up var(--gfx-dur-normal) var(--gfx-ease-out) backwards;
 }
 
 .gfx-anim-rise-up-centered {
-  animation: gfx-rise-up-centered 0.35s cubic-bezier(0.22, 1, 0.36, 1) both;
+  animation: gfx-rise-up-centered var(--gfx-dur-normal) var(--gfx-ease-out)
+    both;
 }
 
 .gfx-anim-drop-in {
-  animation: gfx-drop-in 0.4s cubic-bezier(0.22, 1, 0.36, 1) both;
+  animation: gfx-drop-in var(--gfx-dur-slow) var(--gfx-ease-out) backwards;
+}
+
+.gfx-anim-pop {
+  animation: gfx-pop var(--gfx-dur-slow) var(--gfx-ease-out) backwards;
 }
 
 .gfx-anim-fade-in {
-  animation: gfx-fade-in 0.3s ease-out both;
+  animation: gfx-fade-in var(--gfx-dur-fast) var(--gfx-ease-out) backwards;
 }
 
-.gfx-anim-ticker-scroll {
-  animation: gfx-ticker-scroll linear infinite;
+/* ------------------------------------------------------------------ */
+/* Exit classes (fill: forwards — the element holds its faded state    */
+/* until the JS exit orchestration in templates/_anim.ts unmounts it)  */
+/* ------------------------------------------------------------------ */
+
+.gfx-anim-fade-out {
+  animation: gfx-fade-out var(--gfx-dur-fast) var(--gfx-ease-in) forwards;
+}
+
+.gfx-anim-slide-out-left {
+  animation: gfx-slide-out-left var(--gfx-dur-fast) var(--gfx-ease-in)
+    forwards;
+}
+
+.gfx-anim-slide-out-right {
+  animation: gfx-slide-out-right var(--gfx-dur-fast) var(--gfx-ease-in)
+    forwards;
+}
+
+.gfx-anim-slide-out-up {
+  animation: gfx-slide-out-up var(--gfx-dur-fast) var(--gfx-ease-in) forwards;
+}
+
+.gfx-anim-sink-down-centered {
+  animation: gfx-sink-down-centered var(--gfx-dur-fast) var(--gfx-ease-in)
+    forwards;
 }

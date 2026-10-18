@@ -7,7 +7,7 @@ Operators pick the active template per graphic type in the
 the choice is stored in the director state (`graphics` block) and
 broadcast to every surface over WS `director.state`.
 
-## The 12 templates
+## The 15 templates
 
 | Type        | ID                 | Name               | Default |
 |-------------|--------------------|--------------------|---------|
@@ -19,6 +19,11 @@ broadcast to every surface over WS `director.state`.
 | lower-third | `lowerthird-banner`| Lower-third — Banner|        |
 | standings   | `standings-table`  | Standings — Table  | ✓       |
 | standings   | `standings-cards`  | Standings — Cards  |         |
+| standings   | `standings-mvp`    | Standings — MVP Board |      |
+| standings   | `standings-eliminator` | Standings — Eliminator Race |  |
+| standings   | `standings-igl`    | Standings — Best IGL |        |
+| standings   | `standings-finals-mvp` | Standings — Finals MVP |    |
+| standings   | `standings-spotlight` | Standings — Team Spotlight | |
 | killfeed    | `killfeed-ticker`  | Killfeed — Ticker  | ✓       |
 | killfeed    | `killfeed-stack`   | Killfeed — Stack   |         |
 
@@ -103,10 +108,66 @@ ID with 422. Update the ID tables in this doc and in
   status: ConnStatus }` (events are TTL-filtered, newest-first, by the
   page).
 - **standings** — `{ standings: Team[], accent: string,
-  status: ConnStatus }` (already sorted and sliced to the visible row
-  count by the page).
+  status: ConnStatus, movement?: Record<teamId, 'up'|'down'|'same'>,
+  killFeed?: KillEvent[], players?: PlayerStat[] }` (standings already
+  sorted and sliced to the visible row count by the page).
+  - `movement` — per-team rank movement vs the previous match; rendered
+    by `standings-table` as ▲/▼/— with a legend. Absent = no
+    previous-match snapshot exists, so no arrows render (never faked).
+  - `killFeed` — TTL-filtered live kill events, newest-first; rendered
+    by `standings-eliminator`, which tallies per-player finishes for
+    the current match (real feed data).
+  - `players` — per-player stat lines (the `PlayerStat` interface in
+    `registry.ts`) from `GET /api/v1/matches/{id}/player-stats`,
+    rendered by `standings-mvp`, `standings-igl` and
+    `standings-finals-mvp`. `[]` until a game-stats feed records them.
 - **lower-third** — `{ visible: boolean, title: string, subtitle: string,
   accent: string, status: ConnStatus, animKey?: string }`
   (`title` = event label e.g. "WIPE", `subtitle` = commentary line
   text; the page owns show/hide timing, the template owns the design
   and the standby state).
+
+## Player-leaderboard data contract (honest-data rule)
+
+The five player-focused standings templates (`standings-mvp`,
+`standings-eliminator`, `standings-igl`, `standings-finals-mvp`,
+`standings-spotlight`) never invent numbers. How each field is sourced:
+
+| Field | Real source today | Status |
+|-------|-------------------|--------|
+| Team rank / tag / name / logo / color / total_pts / kills / wwcd | WS standings frames (`Team`) | ✅ real |
+| Player finishes (Eliminator) | Live kill feed (`killer` + `killerTeam` per event) | ✅ real, this match only |
+| Player finishes / damage / survival / kills (MVP/IGL/Finals boards) | `GET /api/v1/matches/{id}/player-stats` ← `MatchPlayerStats` rows recorded by a game-stats feed | ⚠️ API exists, empty until a feed records data |
+| IGL flag | Roster `Player.role = "IGL"` via the same endpoint | ⚠️ real when rosters exist |
+| MVP rating, IGL rating, Finals MVP rating | Feed-provided only | ❌ unavailable — renders "—" |
+| Knocks, avg points, top-5s, avg survival, avg finishes | Not in any feed schema | ❌ unavailable — renders "—" |
+| Team damage / knocks / avg survival (Spotlight) | Not in team frames | ❌ unavailable — renders "—" |
+| Movement arrows (Table) | `movement` prop, previous-match snapshot | ❌ unavailable — no arrows |
+
+Deliberate anti-patterns the templates (and this API) avoid:
+
+- **Distributing team kills across players** (e.g. `team.kills // 4`) and
+  presenting the result as per-player data — the existing ad-hoc
+  `/api/v1/players/mvp` and `/api/v1/matches/mvp` demo endpoints do this
+  (`damage: team.kills * 100`); the player boards must never read them.
+- **Deriving a rating from finishes** — an MVP rating on the ~1.0x (or
+  finals ~3.2x) scale from kills alone is a fabricated scale, so the
+  boards render "—" until a feed supplies real ratings.
+- **Tournament-wide eliminator from one match's feed** — the Eliminator
+  board is labelled "THIS MATCH"; extrapolating a tournament race is not
+  honest.
+
+### What a feed needs to deliver to light these boards up
+
+1. A game-stats ingestion path that calls
+   `MatchService.record_player_stats(match_id, [...])` (already exists;
+   nothing calls it yet). That immediately populates finishes, damage
+   and survival on the MVP / Finals boards via
+   `GET /api/v1/matches/{id}/player-stats`.
+2. Roster `Player` rows with `role: "IGL"` to light up the IGL board's
+   row list (WWCD joins from team frames automatically).
+3. An IGL/finals rating feed writing `mvp_score` (or a dedicated column
+   per board) to replace the "—" rating cells.
+4. A previous-match standings snapshot service to populate the
+   `movement` prop on the standings overlay (currently unfilled —
+   `standings-table` renders no arrows until it exists).

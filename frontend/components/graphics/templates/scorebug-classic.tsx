@@ -9,6 +9,7 @@
 import type { Team } from '@/lib/useLiveSocket';
 import { WaitingFeed } from '@/components/overlay-kit';
 import { fmtClock, type ScorebugProps } from '../registry';
+import { useScorebugData } from './_scorebug-data';
 
 function TeamBlock({
   team,
@@ -53,19 +54,16 @@ export default function ScorebugClassic({
   status,
   matchLabel,
 }: ScorebugProps) {
-  const sorted = [...standings].sort(
-    (a, b) => (b.total_pts ?? 0) - (a.total_pts ?? 0)
+  const { sorted, first, second, teamsAlive, teamsTotal } = useScorebugData(
+    standings,
+    summary
   );
-  const [first, second] = sorted;
-  const teamsAlive =
-    summary?.teams_alive ?? standings.filter((t) => t.alive).length;
-  const teamsTotal = standings.length;
 
   if (sorted.length === 0) return <WaitingFeed />;
 
   return (
     <div className="absolute left-1/2 top-4 -translate-x-1/2">
-      <div className="overflow-hidden rounded-xl bg-black/70 backdrop-blur-sm">
+      <div className="gfx-anim-drop-in overflow-hidden rounded-xl bg-black/70 backdrop-blur-sm">
         <div
           className="h-1 w-full"
           style={{ backgroundColor: 'var(--ov-accent)' }}

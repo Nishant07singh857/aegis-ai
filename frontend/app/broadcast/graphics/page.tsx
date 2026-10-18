@@ -29,6 +29,7 @@ import { Badge, Card, EmptyState, ErrorState, Loading } from '@/components/ui';
 import { API_BASE } from '@/lib/api';
 import { DEFAULT_ACCENT } from '@/lib/overlay-params';
 import { useLatestCommentary } from '@/lib/useCommentary';
+import { usePlayerStats } from '@/lib/usePlayerStats';
 import {
   formatDirectorUpdatedAt,
   getDirectorState,
@@ -66,12 +67,14 @@ function TemplatePreview({
   standings,
   summary,
   killFeed,
+  players,
   status,
 }: {
   def: TemplateDef;
   standings: ReturnType<typeof useLiveSocket>['standings'];
   summary: SummaryData | null;
   killFeed: ReturnType<typeof useLiveSocket>['killFeed'];
+  players: ReturnType<typeof usePlayerStats>;
   status: ReturnType<typeof useLiveSocket>['status'];
 }) {
   const Component = def.component;
@@ -100,14 +103,26 @@ function TemplatePreview({
         const rows = [...standings]
           .sort((a, b) => (b.total_pts ?? 0) - (a.total_pts ?? 0))
           .slice(0, 5);
-        return <Component standings={rows} accent={accent} status={status} />;
+        const nowSec = Date.now() / 1000;
+        const recentKills = killFeed
+          .filter((k) => nowSec - k.timestamp <= KILL_TTL_SECONDS)
+          .slice(0, 30);
+        return (
+          <Component
+            standings={rows}
+            accent={accent}
+            status={status}
+            killFeed={recentKills}
+            players={players}
+          />
+        );
       }
       case 'lower-third':
         // The commentary line is fetched in TemplateCard below so the
         // preview body stays a pure function of its props; unreachable.
         return null;
     }
-  }, [def, standings, summary, killFeed, status, accent]);
+  }, [def, standings, summary, killFeed, players, status, accent]);
 
   return (
     <div
@@ -167,6 +182,7 @@ function TemplateCard({
   standings,
   summary,
   killFeed,
+  players,
   status,
   onActivate,
 }: {
@@ -178,6 +194,7 @@ function TemplateCard({
   standings: ReturnType<typeof useLiveSocket>['standings'];
   summary: SummaryData | null;
   killFeed: ReturnType<typeof useLiveSocket>['killFeed'];
+  players: ReturnType<typeof usePlayerStats>;
   status: ReturnType<typeof useLiveSocket>['status'];
   onActivate: () => void;
 }) {
@@ -208,6 +225,7 @@ function TemplateCard({
           standings={standings}
           summary={summary}
           killFeed={killFeed}
+          players={players}
           status={status}
         />
       )}
@@ -236,6 +254,9 @@ function TemplateCard({
 function GalleryInner() {
   const { token } = useAuth();
   const { status, standings, killFeed, directorState } = useLiveSocket();
+  // Per-player stats for the player-leaderboard previews; [] until a
+  // game-stats feed records them (those previews render honestly then).
+  const players = usePlayerStats();
   const [state, setState] = useState<DirectorState | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -413,6 +434,7 @@ function GalleryInner() {
                       standings={standings}
                       summary={summary}
                       killFeed={killFeed}
+                      players={players}
                       status={status}
                       onActivate={() => void activate(type, def)}
                     />

@@ -1,18 +1,29 @@
 /**
- * AEGIS AI — killfeed template: Stack.
+ * AEGIS AI — killfeed template: Stack (Phase 8, W2 excellence pass).
  *
  * Stacked kill cards that fade in as kills land: each card carries an
  * accent edge, the killer → victim line and the weapon underneath.
- * Expired kills drop off the stack (expiry is driven by the page's ?ttl=).
+ *
+ * Exit animation: the page TTL-filters `events`, so an expired kill used
+ * to unmount instantly. Cards removed from the prop now stay mounted for
+ * one exit beat (gfx-anim-fade-out) via useExitingList before they
+ * unmount — no more pop-out.
  */
 
 import type { KillEvent } from '@/lib/useLiveSocket';
 import { WaitingFeed } from '@/components/overlay-kit';
 import type { KillfeedProps } from '../registry';
+import { useExitingList } from './_anim';
 
-function KillCard({ kill }: { kill: KillEvent }) {
+const killKey = (kill: KillEvent) => kill.id;
+
+function KillCard({ kill, exiting }: { kill: KillEvent; exiting: boolean }) {
   return (
-    <div className="gfx-anim-fade-in overflow-hidden rounded-lg bg-black/70 backdrop-blur-sm">
+    <div
+      className={`${
+        exiting ? 'gfx-anim-fade-out' : 'gfx-anim-fade-in'
+      } overflow-hidden rounded-lg bg-black/70 backdrop-blur-sm`}
+    >
       <div className="flex items-stretch">
         <div
           className="w-1.5 shrink-0"
@@ -48,12 +59,16 @@ function KillCard({ kill }: { kill: KillEvent }) {
 }
 
 export default function KillfeedStack({ events }: KillfeedProps) {
-  if (events.length === 0) return <WaitingFeed what="KILL FEED" />;
+  const rows = useExitingList(events, killKey);
+
+  // `rows` (not `events`): when the last kill's TTL expires it still gets
+  // its exit animation instead of cutting straight to the empty state.
+  if (rows.length === 0) return <WaitingFeed what="KILL FEED" />;
 
   return (
     <div className="absolute right-5 top-5 flex w-[380px] flex-col gap-2">
-      {events.map((kill) => (
-        <KillCard key={kill.id} kill={kill} />
+      {rows.map(({ key, item, exiting }) => (
+        <KillCard key={key} kill={item} exiting={exiting} />
       ))}
     </div>
   );
