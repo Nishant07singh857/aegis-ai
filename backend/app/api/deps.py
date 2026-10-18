@@ -60,9 +60,13 @@ PROTECTED (require_admin) — state-mutating, admin, broadcast control:
 
 PROTECTED (require_operator — operator or admin) — broadcast control:
   POST /api/v1/stream/start, /stream/stop  spend CPU, broadcast to the world
-  POST /api/v1/director/mode               auto<->manual director switching
+  POST /api/v1/director/mode               full_auto<->semi_auto<->manual switching
+                                           (legacy "auto" normalised to "full_auto")
   POST /api/v1/director/scene              manual-mode scene select
-                                           (409 while director is in AUTO)
+                                           (409 while director is not in MANUAL)
+  POST /api/v1/director/suggestions/{id}/approve   apply an AI suggestion
+                                           (409 in FULL_AUTO)
+  POST /api/v1/director/suggestions/{id}/reject    drop an AI suggestion
   POST /api/v1/director/overlays           manual-mode overlay toggles
   POST /api/v1/director/lower-third        manual-mode lower third
 

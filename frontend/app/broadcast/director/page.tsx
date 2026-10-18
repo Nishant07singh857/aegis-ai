@@ -1,22 +1,30 @@
 "use client";
 
 /**
- * AEGIS AI — DIRECTOR CONSOLE (Phase 6).
+ * AEGIS AI — DIRECTOR CONSOLE (Phase 7).
  *
  * Route: /broadcast/director (operator + admin).
  *
  * Live control surface for the director service:
- *   - big AUTO/MANUAL mode toggle (always enabled)
+ *   - 3-way mode selector: Full Auto / Semi-Auto / Manual (always enabled)
  *   - scene buttons: Main / Standings / Killfeed focus / Commentary
- *   - overlay toggles: scorebug, killfeed
- *   - lower-third composer: title + subtitle, Show/Hide
+ *     (MANUAL mode only)
+ *   - overlay toggles: scorebug, killfeed (MANUAL mode only)
+ *   - lower-third composer: title + subtitle, Show/Hide (MANUAL mode only)
+ *   - suggestion queue in SEMI-AUTO: live AI proposals with reason,
+ *     confidence, expiry countdown, Approve / Reject
  *
- * In AUTO mode the scene/overlay/lower-third controls are disabled with an
- * explanation ("Switch to MANUAL to take control"); the mode toggle stays
- * enabled. The current director state is polled on mount and kept fresh
- * via the WS "director.state" frames (reconciled on reconnect). Failed
- * calls (e.g. 409 in auto mode) surface the backend's message honestly —
- * no state is invented client-side.
+ * Modes:
+ *   - FULL_AUTO: the AI drives scenes/overlays directly; no approvals.
+ *   - SEMI_AUTO: the AI never writes — it proposes suggestions; the
+ *     operator approves (applies like a manual write) or rejects.
+ *   - MANUAL: the operator controls everything directly; the AI is silent.
+ *
+ * The current director state is polled on mount and kept fresh via the WS
+ * "director.state" frames; the suggestion queue is seeded from
+ * GET /director/suggestions and kept fresh via "director.suggestion"
+ * frames, reconciled on reconnect. Failed calls surface the backend's
+ * message honestly — no state is invented client-side.
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -25,16 +33,26 @@ import { useLiveSocket } from "@/lib/useLiveSocket";
 import { RequireRole } from "@/lib/guard";
 import { Badge, Card, EmptyState, ErrorState, Loading } from "@/components/ui";
 import {
+  DIRECTOR_MODE_OPTIONS,
   DIRECTOR_SCENES,
   SCENE_LABELS,
+  approveDirectorSuggestion,
+  describeSuggestion,
   formatDirectorUpdatedAt,
   getDirectorState,
+  getDirectorSuggestions,
   postDirectorLowerThird,
   postDirectorMode,
   postDirectorOverlays,
   postDirectorScene,
+  rejectDirectorSuggestion,
+  suggestionExpiresIn,
 } from "@/lib/director";
-import type { DirectorState } from "@/lib/director";
+import type {
+  DirectorMode,
+  DirectorState,
+  DirectorSuggestion,
+} from "@/lib/director";
 
 function actionErrorMessage(e: unknown): string {
   if (e instanceof Error) return e.message;
@@ -77,27 +95,119 @@ function Toggle({
   );
 }
 
+function modeBadgeTone(mode: DirectorMode): "cyan" | "amber" | "green" {
+  if (mode === "full_auto") return "cyan";
+  if (mode === "semi_auto") return "amber";
+  return "green";
+}
+
+function modeLabel(mode: DirectorMode): string {
+  return (
+    DIRECTOR_MODE_OPTIONS.find((o) => o.value === mode)?.label ?? mode
+  );
+}
+
+function SuggestionCard({
+  suggestion,
+  nowMs,
+  busy,
+  onApprove,
+  onReject,
+}: {
+  suggestion: DirectorSuggestion;
+  nowMs: number;
+  busy: boolean;
+  onApprove: () => void;
+  onReject: () => void;
+}) {
+  const secondsLeft = suggestionExpiresIn(suggestion, nowMs);
+  const confidencePct = Math.round(suggestion.confidence * 100);
+  const urgent = secondsLeft <= 15;
+  return (
+    <div className="rounded-xl border border-amber-300/25 bg-amber-300/[0.04] px-4 py-3">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <div className="text-sm font-bold text-white/95">
+            {describeSuggestion(suggestion)}
+          </div>
+          <p className="mt-1 text-xs text-white/55">{suggestion.reason}</p>
+        </div>
+        <Badge tone={urgent ? "red" : "slate"}>
+          {secondsLeft > 0 ? `${secondsLeft}s` : "expired"}
+        </Badge>
+      </div>
+      <div className="mt-3 flex items-center gap-3">
+        <div className="h-1.5 min-w-0 flex-1 overflow-hidden rounded-full bg-white/10">
+          <div
+            className="h-full rounded-full bg-[#00f0ff]"
+            style={{ width: `${confidencePct}%` }}
+            aria-hidden="true"
+          />
+        </div>
+        <span className="shrink-0 font-mono text-[11px] text-white/50">
+          {confidencePct}% confident
+        </span>
+      </div>
+      <div className="mt-3 flex gap-2">
+        <button
+          type="button"
+          disabled={busy}
+          onClick={onApprove}
+          className="rounded-lg bg-emerald-400 px-5 py-2 font-mono text-xs font-bold uppercase tracking-[0.15em] text-black transition-opacity disabled:cursor-not-allowed disabled:opacity-40"
+        >
+          Approve
+        </button>
+        <button
+          type="button"
+          disabled={busy}
+          onClick={onReject}
+          className="rounded-lg border border-white/15 bg-white/5 px-5 py-2 font-mono text-xs font-bold uppercase tracking-[0.15em] text-zinc-200 transition-colors hover:border-[#ff3366]/60 hover:text-[#ff3366] disabled:cursor-not-allowed disabled:opacity-40"
+        >
+          Reject
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function DirectorConsoleInner() {
   const { token } = useAuth();
-  const { directorState, status: wsStatus } = useLiveSocket();
+  const {
+    directorState,
+    directorSuggestion,
+    suggestionSeq,
+    status: wsStatus,
+  } = useLiveSocket();
 
   const [state, setState] = useState<DirectorState | null>(null);
+  const [suggestions, setSuggestions] = useState<DirectorSuggestion[]>([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [title, setTitle] = useState("");
   const [subtitle, setSubtitle] = useState("");
+  const [nowMs, setNowMs] = useState(() => Date.now());
+
+  // Live expiry countdowns for the suggestion queue.
+  useEffect(() => {
+    const timer = setInterval(() => setNowMs(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, []);
 
   const load = useCallback(async () => {
     setLoadError(null);
     try {
-      const s = await getDirectorState(token);
+      const [s, q] = await Promise.all([
+        getDirectorState(token),
+        getDirectorSuggestions(token),
+      ]);
       setState(s);
       // Seed the composer from the live lower-third so the operator sees
       // what is currently on screen.
       setTitle(s.lower_third.title);
       setSubtitle(s.lower_third.subtitle);
+      setSuggestions(q);
     } catch (e) {
       setLoadError(actionErrorMessage(e));
     } finally {
@@ -118,6 +228,26 @@ function DirectorConsoleInner() {
       setSubtitle(directorState.lower_third.subtitle);
     }
   }, [directorState]);
+
+  // Suggestion frames: pending proposals join the queue; decided ones
+  // (approved/rejected/expired) leave it. Local countdowns prune expired
+  // entries at render time; the backend prunes lazily too.
+  useEffect(() => {
+    if (!directorSuggestion) return;
+    const frame = directorSuggestion;
+    setSuggestions((prev) => {
+      if (frame.status === "pending") {
+        if (prev.some((s) => s.id === frame.id)) {
+          return prev.map((s) => (s.id === frame.id ? frame : s));
+        }
+        return [...prev, frame].sort((a, b) =>
+          a.created_at < b.created_at ? -1 : 1
+        );
+      }
+      return prev.filter((s) => s.id !== frame.id);
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [suggestionSeq]);
 
   // Reconcile on reconnect: a missed WS broadcast must not leave a stale
   // console behind.
@@ -144,15 +274,21 @@ function DirectorConsoleInner() {
     [load]
   );
 
-  const auto = state?.mode !== "manual";
-  const controlsDisabled = busy !== null || auto;
+  const mode: DirectorMode = state?.mode ?? "full_auto";
+  const manual = mode === "manual";
+  const semiAuto = mode === "semi_auto";
+  const controlsDisabled = busy !== null || !manual;
+  const visibleSuggestions = suggestions.filter(
+    (s) => suggestionExpiresIn(s, nowMs) > 0
+  );
 
   return (
     <div className="mx-auto max-w-4xl space-y-6 px-4 py-8 text-white">
       <div>
         <h1 className="text-2xl font-bold text-[#00f0ff]">Director Console</h1>
         <p className="text-sm text-white/50">
-          Take manual control of the broadcast output, or hand it to the AI
+          Run the broadcast on AI, approve AI suggestions, or drive it
+          yourself
         </p>
       </div>
 
@@ -168,53 +304,118 @@ function DirectorConsoleInner() {
 
       {!loading && state && (
         <>
-          {/* mode toggle */}
+          {/* 3-way mode selector */}
           <Card title="Mode">
             <div className="flex flex-col gap-3">
-              <div className="grid grid-cols-2 gap-3">
-                {(["auto", "manual"] as const).map((mode) => {
-                  const active = state.mode === mode;
-                  const isBusy = busy === `mode-${mode}`;
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+                {DIRECTOR_MODE_OPTIONS.map((option) => {
+                  const active = mode === option.value;
+                  const isBusy = busy === `mode-${option.value}`;
+                  const tone =
+                    option.value === "full_auto"
+                      ? "cyan"
+                      : option.value === "semi_auto"
+                        ? "amber"
+                        : "green";
                   return (
                     <button
-                      key={mode}
+                      key={option.value}
                       type="button"
                       disabled={busy !== null}
                       onClick={() =>
-                        void run(`mode-${mode}`, () =>
-                          postDirectorMode(token, mode)
+                        void run(`mode-${option.value}`, () =>
+                          postDirectorMode(token, option.value)
                         )
                       }
                       aria-pressed={active}
-                      className={`rounded-xl border-2 px-6 py-5 font-mono text-lg font-bold uppercase tracking-[0.2em] transition-all ${
+                      className={`flex flex-col items-center gap-1 rounded-xl border-2 px-4 py-4 text-center transition-all ${
                         active
-                          ? mode === "auto"
-                            ? "border-[#00f0ff] bg-[#00f0ff]/15 text-[#00f0ff] shadow-[0_0_24px_rgba(0,240,255,0.25)]"
-                            : "border-amber-300 bg-amber-300/15 text-amber-300 shadow-[0_0_24px_rgba(252,211,77,0.25)]"
-                          : "border-white/10 bg-white/5 text-white/40 hover:border-white/25 hover:text-white/70"
+                          ? tone === "cyan"
+                            ? "border-[#00f0ff] bg-[#00f0ff]/15 shadow-[0_0_24px_rgba(0,240,255,0.25)]"
+                            : tone === "amber"
+                              ? "border-amber-300 bg-amber-300/15 shadow-[0_0_24px_rgba(252,211,77,0.25)]"
+                              : "border-emerald-300 bg-emerald-300/15 shadow-[0_0_24px_rgba(110,231,183,0.25)]"
+                          : "border-white/10 bg-white/5 hover:border-white/25"
                       } ${busy !== null ? "cursor-wait opacity-70" : ""}`}
                     >
-                      {isBusy ? "Switching…" : mode}
+                      <span
+                        className={`font-mono text-base font-bold uppercase tracking-[0.15em] ${
+                          active
+                            ? tone === "cyan"
+                              ? "text-[#00f0ff]"
+                              : tone === "amber"
+                                ? "text-amber-300"
+                                : "text-emerald-300"
+                            : "text-white/40"
+                        }`}
+                      >
+                        {isBusy ? "Switching…" : option.label}
+                      </span>
+                      <span className="text-xs text-white/50">
+                        {option.description}
+                      </span>
                     </button>
                   );
                 })}
               </div>
               <p className="text-sm text-white/50">
-                {state.mode === "auto"
-                  ? "AUTO: the AI director chooses scenes and overlays. Switch to MANUAL to take control."
-                  : "MANUAL: you are driving the output. Switch to AUTO to hand control back to the AI."}
+                {mode === "full_auto" &&
+                  "FULL AUTO: the AI director drives scenes and overlays. No approvals needed."}
+                {mode === "semi_auto" &&
+                  "SEMI-AUTO: the AI proposes suggestions below but never acts on its own. Approve or reject each one — nothing applies without you."}
+                {mode === "manual" &&
+                  "MANUAL: you are driving the output directly. The AI is silent."}
               </p>
             </div>
           </Card>
+
+          {/* suggestion queue (SEMI-AUTO) */}
+          {semiAuto && (
+            <Card
+              title="Suggestion queue"
+              action={
+                <Badge tone={visibleSuggestions.length ? "amber" : "slate"}>
+                  {visibleSuggestions.length} pending
+                </Badge>
+              }
+            >
+              {visibleSuggestions.length === 0 ? (
+                <EmptyState message="No pending suggestions — the AI proposes only when it has something genuine (e.g. a fight worth a killfeed focus)." />
+              ) : (
+                <div className="flex flex-col gap-3">
+                  {visibleSuggestions.map((s) => (
+                    <SuggestionCard
+                      key={s.id}
+                      suggestion={s}
+                      nowMs={nowMs}
+                      busy={busy !== null}
+                      onApprove={() =>
+                        void run(`approve-${s.id}`, () =>
+                          approveDirectorSuggestion(token, s.id)
+                        )
+                      }
+                      onReject={() =>
+                        void run(`reject-${s.id}`, () =>
+                          rejectDirectorSuggestion(token, s.id)
+                        )
+                      }
+                    />
+                  ))}
+                </div>
+              )}
+            </Card>
+          )}
 
           {/* scenes */}
           <Card
             title="Scene"
             action={
-              auto ? (
-                <Badge tone="slate">Locked in AUTO</Badge>
+              manual ? (
+                <Badge tone="green">Manual control</Badge>
               ) : (
-                <Badge tone="amber">Manual control</Badge>
+                <Badge tone="slate">
+                  {semiAuto ? "Approve suggestions" : "Locked in Full Auto"}
+                </Badge>
               )
             }
           >
@@ -251,10 +452,12 @@ function DirectorConsoleInner() {
           <Card
             title="Overlays"
             action={
-              auto ? (
-                <Badge tone="slate">Locked in AUTO</Badge>
+              manual ? (
+                <Badge tone="green">Manual control</Badge>
               ) : (
-                <Badge tone="amber">Manual control</Badge>
+                <Badge tone="slate">
+                  {semiAuto ? "Approve suggestions" : "Locked in Full Auto"}
+                </Badge>
               )
             }
           >
@@ -296,12 +499,16 @@ function DirectorConsoleInner() {
           <Card
             title="Lower third"
             action={
-              auto ? (
-                <Badge tone="slate">Locked in AUTO</Badge>
-              ) : state.lower_third.visible ? (
-                <Badge tone="green">On air</Badge>
+              manual ? (
+                state.lower_third.visible ? (
+                  <Badge tone="green">On air</Badge>
+                ) : (
+                  <Badge tone="slate">Hidden</Badge>
+                )
               ) : (
-                <Badge tone="slate">Hidden</Badge>
+                <Badge tone="slate">
+                  {semiAuto ? "Approve suggestions" : "Locked in Full Auto"}
+                </Badge>
               )
             }
           >
@@ -369,11 +576,12 @@ function DirectorConsoleInner() {
             </div>
           </Card>
 
-          {auto && (
-            <div className="rounded-xl border border-[#00f0ff]/25 bg-[#00f0ff]/5 px-4 py-3">
-              <p className="text-sm text-[#00f0ff]">
-                Scene, overlay and lower-third controls are disabled in AUTO
-                mode. Switch to MANUAL to take control.
+          {!manual && (
+            <div className="rounded-xl border border-white/15 bg-white/5 px-4 py-3">
+              <p className="text-sm text-white/60">
+                {mode === "full_auto"
+                  ? "AI is driving — no approvals needed. Scene, overlay and lower-third controls are disabled; switch to Semi-Auto or Manual to take control."
+                  : "Scene, overlay and lower-third controls are disabled in Semi-Auto. Approve a suggestion above to apply it, or switch to Manual for direct control."}
               </p>
             </div>
           )}
@@ -391,9 +599,7 @@ function DirectorConsoleInner() {
               <div className="flex items-center justify-between gap-3 rounded-lg bg-black/30 px-4 py-2.5">
                 <dt className="text-white/50">Mode</dt>
                 <dd>
-                  <Badge tone={state.mode === "auto" ? "cyan" : "amber"}>
-                    {state.mode}
-                  </Badge>
+                  <Badge tone={modeBadgeTone(mode)}>{modeLabel(mode)}</Badge>
                 </dd>
               </div>
               <div className="flex items-center justify-between gap-3 rounded-lg bg-black/30 px-4 py-2.5">

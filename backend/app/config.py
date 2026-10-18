@@ -92,6 +92,22 @@ class Settings(BaseSettings):
     REDIS_EVENT_TTL: int = Field(default=86400, ge=3600, description="Event TTL seconds")
     REDIS_SOCKET_TIMEOUT: int = Field(default=5, ge=1)
     REDIS_RETRY_ON_TIMEOUT: bool = True
+
+    # Distributed cluster identity (Phase 7 / W3).
+    # NODE_ROLES: comma-separated roles this node serves. Valid: api,
+    # ai-worker, streamer. All nodes must share REDIS_URL (+ DATABASE_URL)
+    # for the cluster registry to see each other.
+    NODE_ROLES: str = Field(
+        default="api,ai-worker",
+        description="Comma-separated roles this node serves: api, ai-worker, streamer",
+    )
+    # NODE_ID: stable override for this node's registry id. When unset, a
+    # fresh uuid4 hex is generated per process start (so N workers on one
+    # host appear as N distinct nodes instead of clobbering one key).
+    NODE_ID: Optional[str] = Field(
+        default=None,
+        description="Stable node id override; default is uuid4 hex per process start",
+    )
     
     # GPU / Computer Vision
     CUDA_DEVICES: List[int] = Field(default=[0])

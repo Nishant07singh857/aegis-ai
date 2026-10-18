@@ -68,7 +68,7 @@ def director_with_listener(director: DirectorService, messages: list):
 class TestDirectorStateMachine:
     async def test_defaults(self, director: DirectorService):
         state = director.snapshot()
-        assert state["mode"] == "auto"
+        assert state["mode"] == "full_auto"
         assert state["scene"] == "main"
         assert state["overlays"] == {"scorebug": True, "killfeed": True}
         assert state["lower_third"] == {
@@ -79,19 +79,21 @@ class TestDirectorStateMachine:
         assert state["updated_by"] is None
         assert state["updated_at"]
 
-    async def test_mode_auto_to_manual_and_back(self, director: DirectorService):
+    async def test_mode_full_auto_to_manual_and_back(
+        self, director: DirectorService
+    ):
         state = await director.set_mode("manual", updated_by="op1")
         assert state["mode"] == "manual"
         assert state["updated_by"] == "op1"
-        state = await director.set_mode("auto", updated_by="op1")
-        assert state["mode"] == "auto"
+        state = await director.set_mode("full_auto", updated_by="op1")
+        assert state["mode"] == "full_auto"
 
     async def test_set_mode_invalid(self, director: DirectorService):
         with pytest.raises(ValueError, match="Invalid director mode"):
             await director.set_mode("turbo", updated_by="op1")
 
-    async def test_set_scene_rejected_in_auto(self, director: DirectorService):
-        assert director.snapshot()["mode"] == "auto"
+    async def test_set_scene_rejected_in_full_auto(self, director: DirectorService):
+        assert director.snapshot()["mode"] == "full_auto"
         with pytest.raises(DirectorModeError):
             await director.set_scene("standings", updated_by="op1")
 
@@ -116,7 +118,7 @@ class TestDirectorStateMachine:
         with pytest.raises(ValueError, match="at least one"):
             await director.set_overlays(updated_by="op1")
 
-    async def test_set_overlays_rejected_in_auto(self, director: DirectorService):
+    async def test_set_overlays_rejected_in_full_auto(self, director: DirectorService):
         with pytest.raises(DirectorModeError):
             await director.set_overlays(scorebug=False, updated_by="op1")
 
@@ -133,18 +135,18 @@ class TestDirectorStateMachine:
         state = await director.set_lower_third(visible=False, updated_by="op1")
         assert state["lower_third"]["visible"] is False
 
-    async def test_set_lower_third_rejected_in_auto(self, director: DirectorService):
+    async def test_set_lower_third_rejected_in_full_auto(self, director: DirectorService):
         with pytest.raises(DirectorModeError):
             await director.set_lower_third(visible=True, updated_by="op1")
 
-    async def test_system_publish_applies_in_auto(
+    async def test_system_publish_applies_in_full_auto(
         self, director_with_listener: DirectorService, messages: list
     ):
         # Drive a visible change: manual -> standings -> auto, then the
         # system pulls the program feed back to main.
         await director_with_listener.set_mode("manual", updated_by="op1")
         await director_with_listener.set_scene("standings", updated_by="op1")
-        await director_with_listener.set_mode("auto", updated_by="op1")
+        await director_with_listener.set_mode("full_auto", updated_by="op1")
         messages.clear()
 
         result = await director_with_listener.system_publish(

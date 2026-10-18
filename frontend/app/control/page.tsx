@@ -15,8 +15,9 @@
  * real WS frame; empty feeds render honest empty states.
  */
 
-import { useCallback, useMemo } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useAuth } from "@/lib/auth";
+import { apiFetch } from "@/lib/api";
 import { useLiveSocket } from "@/lib/useLiveSocket";
 import { RequireRole } from "@/lib/guard";
 import { Badge, Card, EmptyState } from "@/components/ui";
@@ -79,6 +80,129 @@ interface LogRow {
   to?: string;
   message?: string;
   level?: string;
+}
+
+/** One row of GET /api/v1/cluster/nodes (Phase 7 / W3). */
+interface ClusterNode {
+  node_id: string;
+  hostname: string;
+  roles: string[];
+  started_at: string;
+  version: string;
+  heartbeat_age_s: number;
+  status: string;
+  agent_count: number;
+  standalone: boolean;
+}
+
+function heartbeatDotClass(status: string | undefined): string {
+  const s = (status ?? "").toLowerCase();
+  if (s === "healthy") return "bg-emerald-400";
+  if (s === "degraded") return "bg-amber-400";
+  return "bg-red-400";
+}
+
+function shortId(nodeId: string): string {
+  return nodeId.length > 10 ? `${nodeId.slice(0, 10)}…` : nodeId;
+}
+
+/**
+ * Cluster card — "Cluster — sare nodes connected rahe".
+ *
+ * Polls GET /api/v1/cluster/nodes every 15s (same cadence as the backend
+ * heartbeat). Lists every connected node with role badges, agent count,
+ * heartbeat age and a health dot (green <30s, amber 30–45s, red stale /
+ * unreachable). Data is 100% live from the backend registry — no mock
+ * nodes; when Redis is down the backend honestly reports a single
+ * `standalone` entry for this process instead of inventing peers.
+ */
+function ClusterCard({ token }: { token: string | null }) {
+  const [nodes, setNodes] = useState<ClusterNode[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    const load = async () => {
+      try {
+        const data = await apiFetch<ClusterNode[]>("/api/v1/cluster/nodes", {
+          token,
+        });
+        if (!cancelled) {
+          setNodes(Array.isArray(data) ? data : []);
+          setError(null);
+        }
+      } catch (e) {
+        if (!cancelled) {
+          setNodes(null);
+          setError(e instanceof Error ? e.message : String(e));
+        }
+      }
+    };
+    load();
+    const timer = setInterval(load, 15000);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [token]);
+
+  return (
+    <Card title="Cluster — sare nodes connected rahe">
+      {error && (
+        <EmptyState
+          message={`Cluster API unreachable: ${error} — retrying every 15s.`}
+        />
+      )}
+      {!error && nodes === null && (
+        <EmptyState message="Loading cluster nodes…" />
+      )}
+      {!error && nodes !== null && nodes.length === 0 && (
+        <EmptyState message="No nodes registered — the registry heartbeat may not have run yet." />
+      )}
+      {!error && nodes !== null && nodes.length > 0 && (
+        <ul className="space-y-2">
+          {nodes.map((n) => (
+            <li
+              key={n.node_id}
+              className="flex flex-wrap items-center gap-3 rounded-lg bg-white/5 px-3 py-2.5"
+            >
+              <span
+                className={`h-2.5 w-2.5 shrink-0 rounded-full ${heartbeatDotClass(
+                  n.status
+                )}`}
+                title={`status: ${n.status ?? "unknown"}`}
+              />
+              <div className="min-w-0">
+                <div className="truncate font-mono text-sm font-medium">
+                  {shortId(n.node_id)}
+                  <span className="ml-2 font-sans text-white/50">
+                    {n.hostname}
+                  </span>
+                </div>
+                <div className="text-xs text-white/40">
+                  {n.agent_count} agents ·{" "}
+                  {typeof n.heartbeat_age_s === "number"
+                    ? `${Math.round(n.heartbeat_age_s)}s ago`
+                    : "—"}{" "}
+                  · v{n.version}
+                  {n.standalone && " · standalone (Redis unreachable)"}
+                </div>
+              </div>
+              <div className="ml-auto flex flex-wrap items-center gap-1.5">
+                {(Array.isArray(n.roles) ? n.roles : []).map((r) => (
+                  <Badge key={r} tone="cyan">
+                    {r}
+                  </Badge>
+                ))}
+                {n.standalone && <Badge tone="amber">standalone</Badge>}
+                <Badge tone={statusTone(n.status)}>{n.status ?? "—"}</Badge>
+              </div>
+            </li>
+          ))}
+        </ul>
+      )}
+    </Card>
+  );
 }
 
 function ControlRoomInner() {
@@ -157,43 +281,84 @@ function ControlRoomInner() {
 
         <StreamControl token={token} onSessionExpired={handleExpired} />
 
+        <ClusterCard token={token} />
+
         <Card title="Agents">
           {agentRows.length === 0 && (
             <EmptyState message="No agent frames received yet — waiting on the live socket." />
           )}
           {agentRows.length > 0 && (
-            <div className="overflow-x-auto">
-              <table className="w-full text-left text-sm">
-                <thead>
-                  <tr className="border-b border-white/10 text-xs text-white/50">
-                    <th className="pb-2 pr-4 font-medium">Name</th>
-                    <th className="pb-2 pr-4 font-medium">Status</th>
-                    <th className="pb-2 pr-4 font-medium">CPU</th>
-                    <th className="pb-2 pr-4 font-medium">Mem</th>
-                    <th className="pb-2 pr-4 font-medium">Latency</th>
-                    <th className="pb-2 font-medium">Tasks</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {agentRows.map((a) => (
-                    <tr key={a.id} className="border-b border-white/5">
-                      <td className="py-2 pr-4 font-medium">{a.name}</td>
-                      <td className="py-2 pr-4">
-                        <Badge tone={statusTone(a.status)}>
-                          {a.status ?? "—"}
-                        </Badge>
-                      </td>
-                      <td className="py-2 pr-4 text-white/70">{a.cpu ?? "—"}</td>
-                      <td className="py-2 pr-4 text-white/70">{a.mem ?? "—"}</td>
-                      <td className="py-2 pr-4 text-white/70">
-                        {a.latency ?? "—"}
-                      </td>
-                      <td className="py-2 text-[#00f0ff]">{a.tasks ?? "—"}</td>
+            <>
+              {/* desktop: full table */}
+              <div className="hidden overflow-x-auto md:block">
+                <table className="w-full text-left text-sm">
+                  <thead>
+                    <tr className="border-b border-white/10 text-xs text-white/50">
+                      <th className="pb-2 pr-4 font-medium">Name</th>
+                      <th className="pb-2 pr-4 font-medium">Status</th>
+                      <th className="pb-2 pr-4 font-medium">CPU</th>
+                      <th className="pb-2 pr-4 font-medium">Mem</th>
+                      <th className="pb-2 pr-4 font-medium">Latency</th>
+                      <th className="pb-2 font-medium">Tasks</th>
                     </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
+                  </thead>
+                  <tbody>
+                    {agentRows.map((a) => (
+                      <tr key={a.id} className="border-b border-white/5">
+                        <td className="py-2 pr-4 font-medium">{a.name}</td>
+                        <td className="py-2 pr-4">
+                          <Badge tone={statusTone(a.status)}>
+                            {a.status ?? "—"}
+                          </Badge>
+                        </td>
+                        <td className="py-2 pr-4 text-white/70">{a.cpu ?? "—"}</td>
+                        <td className="py-2 pr-4 text-white/70">{a.mem ?? "—"}</td>
+                        <td className="py-2 pr-4 text-white/70">
+                          {a.latency ?? "—"}
+                        </td>
+                        <td className="py-2 text-[#00f0ff]">{a.tasks ?? "—"}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              {/* phones: stacked cards, one per agent */}
+              <div className="grid gap-3 md:hidden">
+                {agentRows.map((a) => (
+                  <div
+                    key={a.id}
+                    className="rounded-lg border border-white/10 bg-black/30 px-4 py-3"
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="truncate font-medium text-white/90">
+                        {a.name}
+                      </span>
+                      <Badge tone={statusTone(a.status)}>
+                        {a.status ?? "—"}
+                      </Badge>
+                    </div>
+                    <dl className="mt-2.5 grid grid-cols-2 gap-x-3 gap-y-1.5 text-xs">
+                      <div className="flex items-baseline justify-between gap-2">
+                        <dt className="text-white/40">CPU</dt>
+                        <dd className="text-white/75">{a.cpu ?? "—"}</dd>
+                      </div>
+                      <div className="flex items-baseline justify-between gap-2">
+                        <dt className="text-white/40">Mem</dt>
+                        <dd className="text-white/75">{a.mem ?? "—"}</dd>
+                      </div>
+                      <div className="flex items-baseline justify-between gap-2">
+                        <dt className="text-white/40">Latency</dt>
+                        <dd className="text-white/75">{a.latency ?? "—"}</dd>
+                      </div>
+                      <div className="flex items-baseline justify-between gap-2">
+                        <dt className="text-white/40">Tasks</dt>
+                        <dd className="text-[#00f0ff]">{a.tasks ?? "—"}</dd>
+                      </div>
+                    </dl>
+                  </div>
+                ))}
+              </div>
+            </>
           )}
         </Card>
 
@@ -203,7 +368,7 @@ function ControlRoomInner() {
               <EmptyState message="No health frames received yet — waiting on the live socket." />
             )}
             {healthEntries.length > 0 && (
-              <div className="grid grid-cols-2 gap-3">
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                 {healthEntries.map(([k, v]) => (
                   <div key={k} className="rounded-lg bg-white/5 p-3">
                     <div className="text-xs text-white/50">{prettyKey(k)}</div>
@@ -265,41 +430,68 @@ function ControlRoomInner() {
             <EmptyState message="No agent logs received yet — waiting on the live socket." />
           )}
           {logRows.length > 0 && (
-            <div className="overflow-x-auto">
-              <table className="w-full text-left text-sm">
-                <thead>
-                  <tr className="border-b border-white/10 text-xs text-white/50">
-                    <th className="pb-2 pr-4 font-medium">Time</th>
-                    <th className="pb-2 pr-4 font-medium">Route</th>
-                    <th className="pb-2 pr-4 font-medium">Message</th>
-                    <th className="pb-2 font-medium">Level</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {logRows.map((l, i) => (
-                    <tr
-                      key={l.id ?? i}
-                      className="border-b border-white/5 align-top"
-                    >
-                      <td className="whitespace-nowrap py-2 pr-4 text-xs text-white/40">
-                        {formatTime(l.timestamp)}
-                      </td>
-                      <td className="whitespace-nowrap py-2 pr-4 text-white/70">
-                        {l.from ?? "—"} → {l.to ?? "—"}
-                      </td>
-                      <td className="py-2 pr-4 text-white/85">
-                        {l.message ?? "—"}
-                      </td>
-                      <td className="py-2">
-                        <Badge tone={levelTone(l.level)}>
-                          {l.level ?? "—"}
-                        </Badge>
-                      </td>
+            <>
+              {/* desktop: full table */}
+              <div className="hidden overflow-x-auto md:block">
+                <table className="w-full text-left text-sm">
+                  <thead>
+                    <tr className="border-b border-white/10 text-xs text-white/50">
+                      <th className="pb-2 pr-4 font-medium">Time</th>
+                      <th className="pb-2 pr-4 font-medium">Route</th>
+                      <th className="pb-2 pr-4 font-medium">Message</th>
+                      <th className="pb-2 font-medium">Level</th>
                     </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
+                  </thead>
+                  <tbody>
+                    {logRows.map((l, i) => (
+                      <tr
+                        key={l.id ?? i}
+                        className="border-b border-white/5 align-top"
+                      >
+                        <td className="whitespace-nowrap py-2 pr-4 text-xs text-white/40">
+                          {formatTime(l.timestamp)}
+                        </td>
+                        <td className="whitespace-nowrap py-2 pr-4 text-white/70">
+                          {l.from ?? "—"} → {l.to ?? "—"}
+                        </td>
+                        <td className="py-2 pr-4 text-white/85">
+                          {l.message ?? "—"}
+                        </td>
+                        <td className="py-2">
+                          <Badge tone={levelTone(l.level)}>
+                            {l.level ?? "—"}
+                          </Badge>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              {/* phones: stacked cards, one per log line */}
+              <div className="space-y-2 md:hidden">
+                {logRows.map((l, i) => (
+                  <div
+                    key={l.id ?? i}
+                    className="rounded-lg border border-white/10 bg-black/30 px-3 py-2.5"
+                  >
+                    <div className="flex flex-wrap items-center gap-2 text-xs">
+                      <Badge tone={levelTone(l.level)}>
+                        {l.level ?? "—"}
+                      </Badge>
+                      <span className="text-white/40">
+                        {formatTime(l.timestamp)}
+                      </span>
+                      <span className="min-w-0 flex-1 truncate text-white/60">
+                        {l.from ?? "—"} → {l.to ?? "—"}
+                      </span>
+                    </div>
+                    <p className="mt-1 break-words text-sm text-white/85">
+                      {l.message ?? "—"}
+                    </p>
+                  </div>
+                ))}
+              </div>
+            </>
           )}
         </Card>
       </div>

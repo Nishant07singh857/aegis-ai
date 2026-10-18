@@ -85,7 +85,7 @@ export function TopBar() {
 
   return (
     <header className="sticky top-0 z-40 border-b border-white/10 bg-[#0a0a0f]/95 backdrop-blur">
-      <div className="mx-auto flex h-14 max-w-7xl items-center gap-4 px-4 sm:px-6">
+      <div className="mx-auto flex h-14 max-w-7xl items-center gap-2 px-4 sm:px-6 md:gap-4">
         <Link
           href={isAuthed ? ROLE_HOME[role] : "/login"}
           className="flex items-baseline gap-2 shrink-0"
@@ -98,7 +98,7 @@ export function TopBar() {
           </span>
         </Link>
 
-        <nav className="flex items-center gap-1 overflow-x-auto" aria-label="Primary">
+        <nav className="flex min-w-0 items-center gap-1 overflow-x-auto" aria-label="Primary">
           {navItems.map((item) => (
             <Link
               key={item.href}
@@ -118,7 +118,7 @@ export function TopBar() {
         <div className="ml-auto flex items-center gap-3 shrink-0">
           {isAuthed ? (
             <>
-              <span className="font-mono text-xs text-zinc-400">
+              <span className="hidden font-mono text-xs text-zinc-400 md:inline">
                 Signed in as{" "}
                 <span className="text-[#00f0ff]">
                   {operatorName ?? "operator"}
@@ -133,7 +133,7 @@ export function TopBar() {
               <button
                 type="button"
                 onClick={handleLogout}
-                className="rounded-lg border border-white/15 bg-white/5 px-3 py-1.5 font-mono text-xs uppercase tracking-wider text-zinc-300 hover:border-[#ff3366]/60 hover:text-[#ff3366] transition-colors"
+                className="rounded-lg border border-white/15 bg-white/5 px-3 py-1.5 font-mono text-xs uppercase tracking-wider text-zinc-300 hover:border-[#ff3366]/60 hover:text-[#ff3366] transition-colors max-md:min-h-[44px] max-md:px-4"
               >
                 Logout
               </button>
@@ -141,7 +141,7 @@ export function TopBar() {
           ) : (
             <Link
               href="/login"
-              className="rounded-lg border border-[#00f0ff]/40 bg-[#00f0ff]/10 px-3 py-1.5 font-mono text-xs uppercase tracking-wider text-[#00f0ff] hover:bg-[#00f0ff]/20 transition-colors"
+              className="rounded-lg border border-[#00f0ff]/40 bg-[#00f0ff]/10 px-3 py-1.5 font-mono text-xs uppercase tracking-wider text-[#00f0ff] hover:bg-[#00f0ff]/20 transition-colors max-md:inline-flex max-md:min-h-[44px] max-md:items-center max-md:px-4"
             >
               Login
             </Link>

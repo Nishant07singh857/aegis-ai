@@ -68,31 +68,31 @@ function WatchInner() {
   };
 
   return (
-    <div className="relative h-screen w-screen overflow-hidden bg-black text-white">
+    <div className="relative h-dvh w-screen overflow-hidden bg-black text-white">
       {/* minimal overlay header — badge + sign out only, no stream controls */}
-      <div className="pointer-events-none absolute inset-x-0 top-0 z-20 flex items-center justify-between px-5 py-3">
-        <span className="font-mono text-sm font-bold tracking-[0.3em] text-white/80">
+      <div className="pointer-events-none absolute inset-x-0 top-0 z-20 flex flex-wrap items-center justify-between gap-2 px-3 py-2.5 sm:gap-3 sm:px-5 sm:py-3">
+        <span className="font-mono text-xs font-bold tracking-[0.2em] text-white/80 sm:text-sm sm:tracking-[0.3em]">
           AEGIS <span className="text-[#00f0ff]">AI</span>
         </span>
-        <div className="pointer-events-auto flex items-center gap-3">
+        <div className="pointer-events-auto flex items-center gap-2 sm:gap-3">
           {running === true ? (
-            <span className="flex items-center gap-2 rounded-full border border-red-500/60 bg-red-500/15 px-4 py-1.5 font-mono text-xs font-bold tracking-[0.25em] text-red-400">
+            <span className="flex items-center gap-2 rounded-full border border-red-500/60 bg-red-500/15 px-3 py-1.5 font-mono text-xs font-bold tracking-[0.25em] text-red-400 sm:px-4">
               <span className="inline-block h-2 w-2 animate-pulse rounded-full bg-red-500" />
               LIVE
             </span>
           ) : running === false ? (
-            <span className="rounded-full border border-amber-300/40 bg-amber-300/10 px-4 py-1.5 font-mono text-xs font-bold tracking-[0.25em] text-amber-300">
+            <span className="rounded-full border border-amber-300/40 bg-amber-300/10 px-3 py-1.5 font-mono text-xs font-bold tracking-[0.25em] text-amber-300 sm:px-4">
               STREAM OFFLINE
             </span>
           ) : (
-            <span className="rounded-full border border-white/15 bg-white/5 px-4 py-1.5 font-mono text-xs tracking-[0.25em] text-white/40">
+            <span className="rounded-full border border-white/15 bg-white/5 px-3 py-1.5 font-mono text-xs tracking-[0.25em] text-white/40 sm:px-4">
               CHECKING…
             </span>
           )}
           <button
             type="button"
             onClick={handleLogout}
-            className="pointer-events-auto rounded-lg border border-white/15 bg-black/50 px-3 py-1.5 font-mono text-xs uppercase tracking-wider text-zinc-300 backdrop-blur transition-colors hover:border-[#ff3366]/60 hover:text-[#ff3366]"
+            className="pointer-events-auto rounded-lg border border-white/15 bg-black/50 px-3 py-1.5 font-mono text-xs uppercase tracking-wider text-zinc-300 backdrop-blur transition-colors hover:border-[#ff3366]/60 hover:text-[#ff3366] max-md:min-h-[44px] max-md:px-4"
           >
             Logout
           </button>

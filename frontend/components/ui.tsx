@@ -90,7 +90,7 @@ export function ErrorState({
         <button
           type="button"
           onClick={onRetry}
-          className="mt-3 rounded-lg border border-white/15 bg-white/5 px-4 py-2 font-mono text-xs uppercase tracking-wider text-zinc-200 hover:border-[#00f0ff]/50 hover:text-[#00f0ff] transition-colors"
+          className="mt-3 rounded-lg border border-white/15 bg-white/5 px-4 py-2 font-mono text-xs uppercase tracking-wider text-zinc-200 hover:border-[#00f0ff]/50 hover:text-[#00f0ff] transition-colors max-md:min-h-[44px]"
         >
           Retry
         </button>

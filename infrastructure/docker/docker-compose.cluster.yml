@@ -1,0 +1,97 @@
+# =============================================================================
+# AEGIS AI — distributed cluster overlay
+#
+# Adds extra backend NODES to an existing stack WITHOUT changing any base
+# compose file. Use it on top of dev (or staging/prod):
+#
+#   docker compose -f infrastructure/docker/docker-compose.dev.yml \
+#                  -f infrastructure/docker/docker-compose.cluster.yml \
+#                  --profile cluster up -d --build
+#
+# NODE TOPOLOGY AFTER START
+#   backend            (base dev stack)  NODE_ROLES=api,ai-worker   :8000
+#   backend-api-2      (this file)       NODE_ROLES=api            :8001
+#   backend-streamer   (this file)       NODE_ROLES=streamer       :8002
+#
+# All three nodes share the SAME redis + postgres from the base stack, so
+# they all register into the same cluster (keys `aegis:nodes:*`). Check the
+# live membership any time with:
+#
+#   curl -H "Authorization: Bearer <JWT>" http://localhost:8000/api/v1/cluster/nodes
+#
+# or watch the "Cluster — sare nodes connected rahe" card on the Control
+# Room page (http://localhost:3000/control).
+#
+# NODE_ID is set explicitly per service so a container restart keeps the
+# same identity (otherwise each process start mints a fresh uuid4 id, which
+# is the correct default for throwaway uvicorn workers). On bare metal
+# (no compose) leave NODE_ID unset and give each machine its own
+# NODE_ROLES — see docs/CLUSTER.md.
+#
+# Graceful degradation: if redis goes down, every node keeps serving and
+# its /cluster/nodes view honestly reports only itself (standalone=true).
+# =============================================================================
+
+name: aegis-cluster
+
+services:
+  backend-api-2:
+    build:
+      context: ../..
+      dockerfile: backend/Dockerfile.dev
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+    profiles:
+      - cluster
+    volumes:
+      - ../../backend/app:/app/app
+      - ../../backend/alembic:/app/alembic
+      - ../../backend/alembic.ini:/app/alembic.ini
+    ports:
+      - "8001:8000"
+    env_file:
+      - ../../backend/.env.development
+    environment:
+      # Same data plane as every other node — this is what makes it ONE cluster.
+      # The credentials below mirror the base dev stack's dev-only convenience
+      # default (see docker-compose.dev.yml): never reuse them in staging/prod.
+      DATABASE_URL: postgresql+asyncpg://aegis:aegis123@postgres:5432/aegis
+      REDIS_URL: redis://redis:6379/0
+      NODE_ID: backend-api-2
+      NODE_ROLES: api
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  backend-streamer:
+    build:
+      context: ../..
+      dockerfile: backend/Dockerfile.dev
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+    profiles:
+      - cluster
+    volumes:
+      - ../../backend/app:/app/app
+      - ../../backend/alembic:/app/alembic
+      - ../../backend/alembic.ini:/app/alembic.ini
+    ports:
+      - "8002:8000"
+    env_file:
+      - ../../backend/.env.development
+    environment:
+      # Same data plane as every other node — this is what makes it ONE cluster.
+      # The credentials below mirror the base dev stack's dev-only convenience
+      # default (see docker-compose.dev.yml): never reuse them in staging/prod.
+      DATABASE_URL: postgresql+asyncpg://aegis:aegis123@postgres:5432/aegis
+      REDIS_URL: redis://redis:6379/0
+      NODE_ID: backend-streamer
+      # Streamer node: runs the streaming control API + its cluster heartbeat.
+      # Pair with the automated streamer container (docker-compose.streaming.yml)
+      # on a host with encoding CPU — see docs/STREAMING.md.
+      NODE_ROLES: streamer
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy

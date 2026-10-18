@@ -5,23 +5,56 @@ AEGIS AI — Director service.
 The single source of truth for what is on the broadcast output page.
 Holds the director state in memory (process-local, like MATCH_STATE):
 
-    mode        "auto" | "manual"            (default "auto")
+    mode        "full_auto" | "semi_auto" | "manual"  (default "full_auto")
     scene       "main" | "standings" | "killfeed_focus" | "commentary"
-                                             (default "main")
+                                                     (default "main")
     overlays    {"scorebug": bool, "killfeed": bool}  (default both true)
     lower_third {"visible": bool, "title": str, "subtitle": str}
-                                             (default hidden/empty)
+                                                     (default hidden/empty)
     updated_by  str | None
     updated_at  ISO-8601 timestamp
 
 Rules
 -----
-* AUTO mode: only the system (match simulator / AI logic in ``app/main.py``)
-  may write, via :meth:`system_publish`. Operator API writes are rejected
-  with :class:`DirectorModeError` (the API layer turns that into HTTP 409).
-* MANUAL mode: operator API writes are authoritative; :meth:`system_publish`
-  is a no-op so the simulator/AI can never override the operator.
-* Mode flips auto<->manual are explicit, via the director API.
+* FULL_AUTO mode: only the system (match simulator / AI logic in
+  ``app/main.py``) may write, via :meth:`system_publish`. Operator API
+  writes are rejected with :class:`DirectorModeError` (the API layer turns
+  that into HTTP 409). The AI acts directly — it never creates
+  suggestions in this mode.
+* SEMI_AUTO mode: the AI never writes and never acts. It may *propose*
+  via :meth:`propose_suggestion`; each proposal lands in a pending queue
+  that an operator approves or rejects through the API. No suggestion
+  ever auto-applies. Operator direct writes (scene/overlay/lower-third)
+  are still rejected here — the approval queue is the operator's control
+  surface in this mode.
+* MANUAL mode: operator API writes are authoritative;
+  :meth:`system_publish` and :meth:`propose_suggestion` are both no-ops,
+  so the simulator/AI is fully silent.
+* Mode flips are explicit, via the director API. The legacy value
+  ``"auto"`` is accepted by the mode API and normalised to
+  ``"full_auto"`` — the string ``"auto"`` is never stored.
+
+Suggestions
+-----------
+A suggestion is a dict::
+
+    id          uuid4 hex
+    type        "scene" | "overlay" | "lower_third"
+    payload     {"scene": ...} |
+                {"overlay": "scorebug"|"killfeed", "visible": bool} |
+                {"visible": bool, "title": str, "subtitle": str}
+    reason      human-readable, e.g. "Fight detected — ...; killfeed focus
+                shows the action."
+    confidence  0.0-1.0
+    created_at  ISO-8601
+    expires_at  ISO-8601 (default created_at + 60s)
+    status      "pending" | "applied" | "rejected" | "expired"
+
+Honesty rules: suggestions are only created while the mode is
+``semi_auto``; duplicates of a pending suggestion and suggestions that
+would be a no-op against the current state are skipped, so an idle AI
+leaves the queue genuinely empty — nothing is fabricated. Expired
+suggestions are pruned lazily (on list and on propose).
 
 Broadcasting
 ------------
@@ -30,38 +63,66 @@ keeps a list of async listener callbacks; every state change publishes::
 
     {"type": "director.state", "data": {<full director state>}}
 
+and every suggestion event (created / approved / rejected) publishes::
+
+    {"type": "director.suggestion", "data": {<suggestion>}}
+
 ``app/main.py`` registers ``ConnectionManager.broadcast`` as a listener at
-startup, which fans the message out over ``/ws/live``.
+startup, which fans the messages out over ``/ws/live``.
 """
 
 from __future__ import annotations
 
 import asyncio
 import copy
-from datetime import datetime, timezone
+import uuid
+from datetime import datetime, timedelta, timezone
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
-DIRECTOR_MODES = ("auto", "manual")
+DIRECTOR_MODES = ("full_auto", "semi_auto", "manual")
 DIRECTOR_SCENES = ("main", "standings", "killfeed_focus", "commentary")
 
-#: WebSocket message type for every director state change.
+#: Legacy mode value accepted by the mode API and normalised to "full_auto".
+#: Never stored in state.
+LEGACY_AUTO_MODE = "auto"
+
+#: Suggestion types the AI may propose.
+SUGGESTION_TYPES = ("scene", "overlay", "lower_third")
+
+#: Default suggestion lifetime, in seconds.
+SUGGESTION_TTL_SECONDS = 60.0
+
+#: Upper bound on retained suggestion history (pending + decided).
+MAX_SUGGESTION_HISTORY = 200
+
+#: WebSocket message types.
 WS_MESSAGE_TYPE = "director.state"
+WS_SUGGESTION_TYPE = "director.suggestion"
 
 #: Signature of a broadcast listener: async callable taking the message dict.
 BroadcastListener = Callable[[Dict[str, Any]], Awaitable[None]]
 
 
 class DirectorModeError(RuntimeError):
-    """Operator write attempted while the director is in AUTO mode."""
+    """Operator write attempted while the director is not in MANUAL mode."""
+
+
+class SuggestionNotFoundError(KeyError):
+    """No pending director suggestion with the given id (unknown, decided
+    or expired)."""
+
+
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)
 
 
 def _utcnow_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return _utcnow().isoformat()
 
 
 def _default_state() -> Dict[str, Any]:
     return {
-        "mode": "auto",
+        "mode": "full_auto",
         "scene": "main",
         "overlays": {"scorebug": True, "killfeed": True},
         "lower_third": {"visible": False, "title": "", "subtitle": ""},
@@ -72,10 +133,15 @@ def _default_state() -> Dict[str, Any]:
 
 def _validate_mode(mode: str) -> str:
     mode = (mode or "").strip().lower()
+    # Backward compatibility: the Phase 6 "auto" value is the old name of
+    # full_auto. Normalise it here so "auto" is never stored.
+    if mode == LEGACY_AUTO_MODE:
+        mode = "full_auto"
     if mode not in DIRECTOR_MODES:
         raise ValueError(
             f"Invalid director mode {mode!r}: must be one of "
-            f"{', '.join(DIRECTOR_MODES)}."
+            f"{', '.join(DIRECTOR_MODES)} (legacy 'auto' is accepted as "
+            "'full_auto')."
         )
     return mode
 
@@ -90,6 +156,40 @@ def _validate_scene(scene: str) -> str:
     return scene
 
 
+def _validate_suggestion_type(suggestion_type: str) -> str:
+    suggestion_type = (suggestion_type or "").strip().lower()
+    if suggestion_type not in SUGGESTION_TYPES:
+        raise ValueError(
+            f"Invalid suggestion type {suggestion_type!r}: must be one of "
+            f"{', '.join(SUGGESTION_TYPES)}."
+        )
+    return suggestion_type
+
+
+def _validate_suggestion_payload(
+    suggestion_type: str, payload: Any
+) -> Dict[str, Any]:
+    """Validate + normalise an AI suggestion payload for its type."""
+    if not isinstance(payload, dict):
+        raise ValueError("Suggestion payload must be an object.")
+    if suggestion_type == "scene":
+        return {"scene": _validate_scene(payload.get("scene", ""))}
+    if suggestion_type == "overlay":
+        overlay = (payload.get("overlay") or "").strip().lower()
+        if overlay not in ("scorebug", "killfeed"):
+            raise ValueError(
+                f"Invalid overlay {overlay!r}: must be 'scorebug' or "
+                "'killfeed'."
+            )
+        return {"overlay": overlay, "visible": bool(payload.get("visible"))}
+    # lower_third
+    return {
+        "visible": bool(payload.get("visible")),
+        "title": str(payload.get("title") or ""),
+        "subtitle": str(payload.get("subtitle") or ""),
+    }
+
+
 class DirectorService:
     """In-memory director state with mode-gated writes and WS fan-out."""
 
@@ -97,11 +197,14 @@ class DirectorService:
         self._lock = asyncio.Lock()
         self._listeners: List[BroadcastListener] = []
         self._state: Dict[str, Any] = _default_state()
+        #: All suggestions ever proposed, keyed by id (pending + decided
+        #: history, capped at MAX_SUGGESTION_HISTORY).
+        self._suggestions: Dict[str, Dict[str, Any]] = {}
 
     # ── listeners ──────────────────────────────────────────────
 
     def add_listener(self, listener: BroadcastListener) -> None:
-        """Register an async callback invoked with every state-change message."""
+        """Register an async callback invoked with every broadcast message."""
         if listener not in self._listeners:
             self._listeners.append(listener)
 
@@ -118,11 +221,15 @@ class DirectorService:
 
     # ── operator writes (MANUAL mode only, except set_mode) ─────
 
-    async def set_mode(self, mode: str, updated_by: Optional[str] = None) -> Dict[str, Any]:
-        """Explicit auto<->manual transition. Allowed in either mode.
+    async def set_mode(
+        self, mode: str, updated_by: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """Explicit mode transition. Allowed in any mode.
 
-        No-op when the mode is already active: returns the current state
-        without touching updated_at/updated_by or fanning out a WS frame.
+        The legacy value ``"auto"`` is normalised to ``"full_auto"``.
+        No-op when the effective mode is already active: returns the
+        current state without touching updated_at/updated_by or fanning
+        out a WS frame.
         """
         mode = _validate_mode(mode)
         if mode == self._state["mode"]:
@@ -132,19 +239,22 @@ class DirectorService:
             self._state["updated_by"] = updated_by
             self._state["updated_at"] = _utcnow_iso()
             state = copy.deepcopy(self._state)
-        await self._broadcast(state)
+        await self._broadcast({"type": WS_MESSAGE_TYPE, "data": state})
         return state
 
     def _require_manual(self) -> None:
         if self._state["mode"] != "manual":
             raise DirectorModeError(
-                "Director is in AUTO mode: operator scene/overlay/lower-third "
-                "writes are rejected. Switch to MANUAL first via "
-                "POST /api/v1/director/mode {\"mode\": \"manual\"}."
+                "Director is not in MANUAL mode: operator scene/overlay/"
+                "lower-third writes are rejected. In SEMI-AUTO, approve AI "
+                "suggestions instead; switch to MANUAL for direct control "
+                "via POST /api/v1/director/mode {\"mode\": \"manual\"}."
             )
 
-    async def set_scene(self, scene: str, updated_by: Optional[str] = None) -> Dict[str, Any]:
-        """Operator scene select. Rejected in AUTO mode."""
+    async def set_scene(
+        self, scene: str, updated_by: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """Operator scene select. Rejected unless MANUAL mode."""
         scene = _validate_scene(scene)
         async with self._lock:
             self._require_manual()
@@ -152,7 +262,7 @@ class DirectorService:
             self._state["updated_by"] = updated_by
             self._state["updated_at"] = _utcnow_iso()
             state = copy.deepcopy(self._state)
-        await self._broadcast(state)
+        await self._broadcast({"type": WS_MESSAGE_TYPE, "data": state})
         return state
 
     async def set_overlays(
@@ -161,7 +271,7 @@ class DirectorService:
         killfeed: Optional[bool] = None,
         updated_by: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """Operator overlay toggles (partial update). Rejected in AUTO mode."""
+        """Operator overlay toggles (partial update). Rejected unless MANUAL."""
         if scorebug is None and killfeed is None:
             raise ValueError(
                 "Nothing to update: provide at least one of "
@@ -176,7 +286,7 @@ class DirectorService:
             self._state["updated_by"] = updated_by
             self._state["updated_at"] = _utcnow_iso()
             state = copy.deepcopy(self._state)
-        await self._broadcast(state)
+        await self._broadcast({"type": WS_MESSAGE_TYPE, "data": state})
         return state
 
     async def set_lower_third(
@@ -186,7 +296,7 @@ class DirectorService:
         subtitle: str = "",
         updated_by: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """Operator lower-third control. Rejected in AUTO mode.
+        """Operator lower-third control. Rejected unless MANUAL.
 
         Hiding (visible=False) preserves the current title/subtitle so the
         composer's text survives a show/hide cycle; they are only replaced
@@ -194,19 +304,13 @@ class DirectorService:
         """
         async with self._lock:
             self._require_manual()
-            previous = dict(self._state["lower_third"])
-            if visible:
-                previous["title"] = title or ""
-                previous["subtitle"] = subtitle or ""
-            previous["visible"] = bool(visible)
-            self._state["lower_third"] = previous
-            self._state["updated_by"] = updated_by
-            self._state["updated_at"] = _utcnow_iso()
+            self._apply_lower_third(visible=visible, title=title,
+                                    subtitle=subtitle, updated_by=updated_by)
             state = copy.deepcopy(self._state)
-        await self._broadcast(state)
+        await self._broadcast({"type": WS_MESSAGE_TYPE, "data": state})
         return state
 
-    # ── system writes (AUTO mode only) ──────────────────────────
+    # ── system writes (FULL_AUTO mode only) ─────────────────────
 
     async def system_publish(
         self,
@@ -216,9 +320,11 @@ class DirectorService:
     ) -> Dict[str, Any]:
         """Publish a system/AI director decision.
 
-        Applies ONLY in AUTO mode — in MANUAL mode this is a no-op so the
-        simulator/AI can never override the operator. Broadcasts only when
-        the visible state actually changed (no WS spam for no-op ticks).
+        Applies ONLY in FULL_AUTO mode — in SEMI_AUTO and MANUAL mode this
+        is a no-op so the simulator/AI can never override the operator
+        (in SEMI_AUTO the AI proposes suggestions instead of writing).
+        Broadcasts only when the visible state actually changed (no WS
+        spam for no-op ticks).
 
         Returns ``{"changed": bool, "state": <snapshot>}``.
         """
@@ -231,7 +337,7 @@ class DirectorService:
                         f"Unknown overlay {key!r}: must be 'scorebug'/'killfeed'."
                     )
         async with self._lock:
-            if self._state["mode"] != "auto":
+            if self._state["mode"] != "full_auto":
                 return {"changed": False, "state": copy.deepcopy(self._state)}
             changed = False
             if scene is not None and scene != self._state["scene"]:
@@ -247,13 +353,254 @@ class DirectorService:
             self._state["updated_by"] = updated_by
             self._state["updated_at"] = _utcnow_iso()
             state = copy.deepcopy(self._state)
-        await self._broadcast(state)
+        await self._broadcast({"type": WS_MESSAGE_TYPE, "data": state})
         return {"changed": True, "state": state}
+
+    # ── AI suggestions (SEMI_AUTO mode only) ────────────────────
+
+    def list_suggestions(self) -> List[Dict[str, Any]]:
+        """Return the pending (non-expired) suggestions, oldest first.
+
+        Expired suggestions are pruned first (marked "expired", dropped
+        from the queue) — the lazy janitor.
+        """
+        self._prune_expired()
+        pending = [
+            s for s in self._suggestions.values() if s["status"] == "pending"
+        ]
+        pending.sort(key=lambda s: s["created_at"])
+        return copy.deepcopy(pending)
+
+    async def propose_suggestion(
+        self,
+        suggestion_type: str,
+        payload: Dict[str, Any],
+        reason: str,
+        confidence: float,
+        ttl_seconds: float = SUGGESTION_TTL_SECONDS,
+        created_by: str = "director_ai",
+    ) -> Optional[Dict[str, Any]]:
+        """Propose an AI suggestion. SEMI_AUTO mode only.
+
+        Outside SEMI_AUTO this is a silent no-op (FULL_AUTO: the AI acts
+        directly via :meth:`system_publish`; MANUAL: the AI is silent).
+
+        The suggestion is skipped — returning ``None`` — when it is a
+        duplicate of a still-pending suggestion or a no-op against the
+        current state, so the queue stays honestly empty when the AI has
+        nothing genuine to propose.
+
+        Returns the created (or deduplicated) suggestion, or ``None``.
+        """
+        suggestion_type = _validate_suggestion_type(suggestion_type)
+        payload = _validate_suggestion_payload(suggestion_type, payload)
+        reason = (reason or "").strip()
+        if not reason:
+            raise ValueError("Suggestion reason must be a non-empty string.")
+        confidence = max(0.0, min(1.0, float(confidence)))
+        ttl_seconds = max(1.0, float(ttl_seconds))
+
+        async with self._lock:
+            self._prune_expired()
+            if self._state["mode"] != "semi_auto":
+                return None
+            # Dedupe: an identical pending suggestion already covers this.
+            for existing in self._suggestions.values():
+                if (
+                    existing["status"] == "pending"
+                    and existing["type"] == suggestion_type
+                    and existing["payload"] == payload
+                ):
+                    return copy.deepcopy(existing)
+            # No-op guard: never suggest what is already on air.
+            if self._payload_is_noop(suggestion_type, payload):
+                return None
+            now = _utcnow()
+            suggestion = {
+                "id": uuid.uuid4().hex,
+                "type": suggestion_type,
+                "payload": payload,
+                "reason": reason,
+                "confidence": confidence,
+                "created_at": now.isoformat(),
+                "expires_at": (now + timedelta(seconds=ttl_seconds)).isoformat(),
+                "status": "pending",
+                "created_by": created_by,
+            }
+            self._suggestions[suggestion["id"]] = suggestion
+            self._cap_history()
+            outgoing = copy.deepcopy(suggestion)
+        await self._broadcast(
+            {"type": WS_SUGGESTION_TYPE, "data": outgoing}
+        )
+        return outgoing
+
+    async def approve_suggestion(
+        self, suggestion_id: str, updated_by: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """Apply a pending suggestion exactly as a manual operator write.
+
+        The payload goes through the same mutation path as the operator
+        scene/overlay/lower-third commands (without the MANUAL-mode gate),
+        then the suggestion is marked "applied" and removed from the queue.
+        Rejected in FULL_AUTO mode (the AI is driving there — switch to
+        SEMI-AUTO or MANUAL first).
+        """
+        async with self._lock:
+            suggestion = self._pending_or_raise(suggestion_id)
+            if self._state["mode"] == "full_auto":
+                raise DirectorModeError(
+                    "Director is in FULL_AUTO mode: the AI is driving, so "
+                    "suggestion approvals are rejected. Switch to SEMI-AUTO "
+                    "or MANUAL first via POST /api/v1/director/mode."
+                )
+            self._apply_suggestion_payload(
+                suggestion["type"], suggestion["payload"], updated_by
+            )
+            suggestion["status"] = "applied"
+            suggestion["decided_at"] = _utcnow_iso()
+            suggestion["decided_by"] = updated_by
+            outgoing = copy.deepcopy(suggestion)
+            state = copy.deepcopy(self._state)
+        await self._broadcast({"type": WS_MESSAGE_TYPE, "data": state})
+        await self._broadcast({"type": WS_SUGGESTION_TYPE, "data": outgoing})
+        return outgoing
+
+    async def reject_suggestion(
+        self, suggestion_id: str, updated_by: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """Drop a pending suggestion: marked "rejected", logged, removed."""
+        async with self._lock:
+            suggestion = self._pending_or_raise(suggestion_id)
+            suggestion["status"] = "rejected"
+            suggestion["decided_at"] = _utcnow_iso()
+            suggestion["decided_by"] = updated_by
+            outgoing = copy.deepcopy(suggestion)
+        await self._broadcast({"type": WS_SUGGESTION_TYPE, "data": outgoing})
+        return outgoing
 
     # ── internals ───────────────────────────────────────────────
 
-    async def _broadcast(self, state: Dict[str, Any]) -> None:
-        message = {"type": WS_MESSAGE_TYPE, "data": state}
+    def _pending_or_raise(self, suggestion_id: str) -> Dict[str, Any]:
+        suggestion = self._suggestions.get(suggestion_id or "")
+        if suggestion is None or suggestion["status"] != "pending":
+            raise SuggestionNotFoundError(
+                f"No pending suggestion with id {suggestion_id!r}."
+            )
+        try:
+            expires_at = datetime.fromisoformat(suggestion["expires_at"])
+        except (ValueError, TypeError):
+            expires_at = _utcnow()
+        if expires_at <= _utcnow():
+            suggestion["status"] = "expired"
+            raise SuggestionNotFoundError(
+                f"Suggestion {suggestion_id!r} has expired."
+            )
+        return suggestion
+
+    def _prune_expired(self) -> None:
+        """Mark expired pending suggestions "expired" (dropped from queue).
+
+        Callers must hold the lock. Expired records stay in the capped
+        history for audit; only "pending" ones are listed.
+        """
+        now = _utcnow()
+        for suggestion in self._suggestions.values():
+            if suggestion["status"] != "pending":
+                continue
+            try:
+                expires_at = datetime.fromisoformat(suggestion["expires_at"])
+            except (ValueError, TypeError):
+                expires_at = now
+            if expires_at <= now:
+                suggestion["status"] = "expired"
+
+    def _cap_history(self) -> None:
+        """Keep the suggestion history bounded. Callers must hold the lock."""
+        while len(self._suggestions) > MAX_SUGGESTION_HISTORY:
+            oldest_id = None
+            oldest_at = None
+            for sid, suggestion in self._suggestions.items():
+                if suggestion["status"] == "pending":
+                    continue
+                if oldest_at is None or suggestion["created_at"] < oldest_at:
+                    oldest_at = suggestion["created_at"]
+                    oldest_id = sid
+            if oldest_id is None:
+                break  # only pending left; keep them all
+            del self._suggestions[oldest_id]
+
+    def _payload_is_noop(
+        self, suggestion_type: str, payload: Dict[str, Any]
+    ) -> bool:
+        """True when the suggestion would change nothing visible."""
+        if suggestion_type == "scene":
+            return payload["scene"] == self._state["scene"]
+        if suggestion_type == "overlay":
+            return (
+                self._state["overlays"].get(payload["overlay"])
+                == payload["visible"]
+            )
+        # lower_third
+        current = self._state["lower_third"]
+        if not payload["visible"] and not current["visible"]:
+            return True
+        return (
+            bool(payload["visible"]) == bool(current["visible"])
+            and payload["title"] == current["title"]
+            and payload["subtitle"] == current["subtitle"]
+        )
+
+    def _apply_suggestion_payload(
+        self,
+        suggestion_type: str,
+        payload: Dict[str, Any],
+        updated_by: Optional[str],
+    ) -> None:
+        """Apply a suggestion payload via the manual-command mutation path.
+
+        Same state mutations as the operator commands, without the
+        MANUAL-mode gate. Callers must hold the lock.
+        """
+        if suggestion_type == "scene":
+            self._state["scene"] = payload["scene"]
+        elif suggestion_type == "overlay":
+            self._state["overlays"][payload["overlay"]] = bool(
+                payload["visible"]
+            )
+        else:  # lower_third
+            self._apply_lower_third(
+                visible=payload["visible"],
+                title=payload["title"],
+                subtitle=payload["subtitle"],
+                updated_by=updated_by,
+            )
+            return
+        self._state["updated_by"] = updated_by
+        self._state["updated_at"] = _utcnow_iso()
+
+    def _apply_lower_third(
+        self,
+        visible: bool,
+        title: str,
+        subtitle: str,
+        updated_by: Optional[str],
+    ) -> None:
+        """Lower-third mutation shared by operator writes and approvals.
+
+        Hiding preserves the current title/subtitle; they are replaced
+        only when explicitly shown with new text. Callers hold the lock.
+        """
+        previous = dict(self._state["lower_third"])
+        if visible:
+            previous["title"] = title or ""
+            previous["subtitle"] = subtitle or ""
+        previous["visible"] = bool(visible)
+        self._state["lower_third"] = previous
+        self._state["updated_by"] = updated_by
+        self._state["updated_at"] = _utcnow_iso()
+
+    async def _broadcast(self, message: Dict[str, Any]) -> None:
         for listener in list(self._listeners):
             await listener(message)
 

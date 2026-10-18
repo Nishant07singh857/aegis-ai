@@ -35,24 +35,24 @@ export default function LoginPage() {
 
   if (isAuthed) {
     return (
-      <div className="mx-auto max-w-md pt-12">
+      <div className="mx-auto max-w-md pt-8 md:pt-12">
         <Card title="Session">
           <p className="text-sm text-zinc-300 mb-4">
             Signed in as{" "}
             <span className="text-[#00f0ff]">{role}</span>.
           </p>
-          <div className="flex items-center gap-3">
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
             <button
               type="button"
               onClick={() => router.replace(ROLE_HOME[role])}
-              className="rounded-lg bg-[#00f0ff] px-4 py-2 font-mono text-xs font-bold uppercase tracking-wider text-black hover:opacity-90 transition-opacity"
+              className="rounded-lg bg-[#00f0ff] px-4 py-2 font-mono text-xs font-bold uppercase tracking-wider text-black hover:opacity-90 transition-opacity max-md:min-h-[48px] max-md:text-sm"
             >
               Continue
             </button>
             <button
               type="button"
               onClick={logout}
-              className="rounded-lg border border-white/15 bg-white/5 px-4 py-2 font-mono text-xs uppercase tracking-wider text-zinc-200 hover:border-[#ff3366]/60 hover:text-[#ff3366] transition-colors"
+              className="rounded-lg border border-white/15 bg-white/5 px-4 py-2 font-mono text-xs uppercase tracking-wider text-zinc-200 hover:border-[#ff3366]/60 hover:text-[#ff3366] transition-colors max-md:min-h-[48px] max-md:text-sm"
             >
               Logout
             </button>
@@ -77,7 +77,7 @@ export default function LoginPage() {
   };
 
   return (
-    <div className="mx-auto max-w-md pt-12">
+    <div className="mx-auto max-w-md pt-8 md:pt-12">
       <Card title="Operator Login">
         <form onSubmit={handleSubmit} className="flex flex-col gap-4">
           <label className="flex flex-col gap-1.5">
@@ -90,7 +90,7 @@ export default function LoginPage() {
               onChange={(e) => setUsername(e.target.value)}
               autoComplete="username"
               required
-              className="rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm text-zinc-100 placeholder-zinc-600 outline-none focus:border-[#00f0ff]/60"
+              className="rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm text-zinc-100 placeholder-zinc-600 outline-none focus:border-[#00f0ff]/60 max-md:min-h-[52px] max-md:px-4 max-md:text-base"
               placeholder="operator username"
             />
           </label>
@@ -104,7 +104,7 @@ export default function LoginPage() {
               onChange={(e) => setPassword(e.target.value)}
               autoComplete="current-password"
               required
-              className="rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm text-zinc-100 placeholder-zinc-600 outline-none focus:border-[#00f0ff]/60"
+              className="rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm text-zinc-100 placeholder-zinc-600 outline-none focus:border-[#00f0ff]/60 max-md:min-h-[52px] max-md:px-4 max-md:text-base"
               placeholder="operator password"
             />
           </label>
@@ -121,7 +121,7 @@ export default function LoginPage() {
           <button
             type="submit"
             disabled={submitting}
-            className="rounded-lg bg-[#00f0ff] px-4 py-2 font-mono text-sm font-bold uppercase tracking-wider text-black transition-opacity hover:opacity-90 disabled:opacity-40"
+            className="rounded-lg bg-[#00f0ff] px-4 py-2 font-mono text-sm font-bold uppercase tracking-wider text-black transition-opacity hover:opacity-90 disabled:opacity-40 max-md:min-h-[56px] max-md:text-base"
           >
             {submitting ? "Signing in…" : "Sign in"}
           </button>

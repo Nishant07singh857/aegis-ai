@@ -19,8 +19,8 @@ export default function ConnectionBanner({ status, retryCount, onReconnect }: Pr
   const tone = TONE[status];
   return (
     <div className="sticky top-0 z-40 border-b border-white/10 bg-[#0a0a0f]/95 backdrop-blur">
-      <div className="mx-auto flex max-w-7xl items-center justify-between px-4 py-2.5">
-        <div className="flex items-center gap-2.5">
+      <div className="mx-auto flex max-w-7xl flex-wrap items-center justify-between gap-x-4 gap-y-2 px-4 py-2.5">
+        <div className="flex min-w-0 items-center gap-2.5">
           <span className={`h-2.5 w-2.5 rounded-full ${tone.dot}`} aria-hidden="true" />
           <span className={`text-sm font-semibold tracking-widest ${tone.text}`}>{tone.label}</span>
           {status === 'reconnecting' && (
@@ -34,7 +34,7 @@ export default function ConnectionBanner({ status, retryCount, onReconnect }: Pr
           <button
             type="button"
             onClick={onReconnect}
-            className="rounded-md border border-white/15 bg-white/5 px-3 py-1.5 text-xs font-medium text-white transition hover:border-[#00f0ff]/60 hover:text-[#00f0ff]"
+            className="rounded-md border border-white/15 bg-white/5 px-3 py-1.5 text-xs font-medium text-white transition hover:border-[#00f0ff]/60 hover:text-[#00f0ff] max-md:min-h-[44px] max-md:px-4"
           >
             Reconnect
           </button>

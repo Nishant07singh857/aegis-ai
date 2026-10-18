@@ -1,28 +1,36 @@
 /**
- * AEGIS AI — broadcast director state client (Phase 6).
+ * AEGIS AI — broadcast director state client (Phase 7).
  *
- * W1 backend contract (GET/POST /api/v1/director/*, WS "director.state"):
+ * W1 backend contract (GET/POST /api/v1/director/*, WS "director.state" /
+ * "director.suggestion"):
  *   GET  /api/v1/director/state
- *     -> {"mode": "auto"|"manual",
+ *     -> {"mode": "full_auto"|"semi_auto"|"manual",
  *         "scene": "main"|"standings"|"killfeed_focus"|"commentary",
  *         "overlays": {"scorebug": bool, "killfeed": bool},
  *         "lower_third": {"visible": bool, "title": str, "subtitle": str},
  *         "updated_by": str|null, "updated_at": str}
- *   POST /api/v1/director/mode        {"mode": "auto"|"manual"}
+ *   GET  /api/v1/director/suggestions
+ *     -> [{"id": str, "type": "scene"|"overlay"|"lower_third",
+ *          "payload": {...}, "reason": str, "confidence": 0..1,
+ *          "created_at": str, "expires_at": str, "status": "pending"}]
+ *   POST /api/v1/director/mode        {"mode": "full_auto"|"semi_auto"|"manual"}
  *   POST /api/v1/director/scene       {"scene": ...}
  *   POST /api/v1/director/overlays    {"scorebug"?: bool, "killfeed"?: bool}
  *   POST /api/v1/director/lower-third {"visible": bool, "title"?: str, "subtitle"?: str}
+ *   POST /api/v1/director/suggestions/{id}/approve
+ *   POST /api/v1/director/suggestions/{id}/reject
  *
- * Scene/overlay/lower-third writes are rejected in AUTO mode (409) unless
- * the backend overrides — the UI surfaces the backend's message honestly.
- * No mock data: every value comes from the real backend or a real WS frame;
+ * Scene/overlay/lower-third writes are rejected unless the director is in
+ * MANUAL mode (409); the UI surfaces the backend's message honestly. No
+ * mock data: every value comes from the real backend or a real WS frame;
  * a malformed state is rejected, never guessed.
  */
 
 import { apiFetch } from "./api";
 
-export type DirectorMode = "auto" | "manual";
+export type DirectorMode = "full_auto" | "semi_auto" | "manual";
 export type DirectorScene = "main" | "standings" | "killfeed_focus" | "commentary";
+export type SuggestionType = "scene" | "overlay" | "lower_third";
 
 export interface DirectorOverlays {
   scorebug: boolean;
@@ -44,6 +52,28 @@ export interface DirectorState {
   updated_at: string;
 }
 
+export const DIRECTOR_MODE_OPTIONS: readonly {
+  value: DirectorMode;
+  label: string;
+  description: string;
+}[] = [
+  {
+    value: "full_auto",
+    label: "Full Auto",
+    description: "AI runs the broadcast",
+  },
+  {
+    value: "semi_auto",
+    label: "Semi-Auto",
+    description: "AI suggests, you approve",
+  },
+  {
+    value: "manual",
+    label: "Manual",
+    description: "You control everything",
+  },
+];
+
 export const DIRECTOR_SCENES: readonly DirectorScene[] = [
   "main",
   "standings",
@@ -62,7 +92,12 @@ export const SCENE_LABELS: Record<DirectorScene, string> = {
 export function isDirectorState(value: unknown): value is DirectorState {
   if (value === null || typeof value !== "object") return false;
   const s = value as Record<string, unknown>;
-  if (s.mode !== "auto" && s.mode !== "manual") return false;
+  if (
+    s.mode !== "full_auto" &&
+    s.mode !== "semi_auto" &&
+    s.mode !== "manual"
+  )
+    return false;
   if (typeof s.scene !== "string" || !DIRECTOR_SCENES.includes(s.scene as DirectorScene)) {
     return false;
   }
@@ -214,4 +249,112 @@ export function formatDirectorUpdatedAt(updatedAt: string): string {
   const d = new Date(updatedAt);
   if (Number.isNaN(d.getTime())) return updatedAt;
   return d.toLocaleString();
+}
+
+/* ── AI suggestions (SEMI_AUTO mode) ─────────────────────────────── */
+
+export interface DirectorSuggestionPayload {
+  scene?: string;
+  overlay?: string;
+  visible?: boolean;
+  title?: string;
+  subtitle?: string;
+  [key: string]: unknown;
+}
+
+export interface DirectorSuggestion {
+  id: string;
+  type: SuggestionType;
+  payload: DirectorSuggestionPayload;
+  reason: string;
+  confidence: number;
+  created_at: string;
+  expires_at: string;
+  status: string;
+}
+
+const SUGGESTION_TYPES: readonly string[] = ["scene", "overlay", "lower_third"];
+
+/** Strict shape check for a director.suggestion WS frame / REST entry. */
+export function isDirectorSuggestion(value: unknown): value is DirectorSuggestion {
+  if (value === null || typeof value !== "object") return false;
+  const s = value as Record<string, unknown>;
+  if (typeof s.id !== "string" || !s.id) return false;
+  if (typeof s.type !== "string" || !SUGGESTION_TYPES.includes(s.type)) return false;
+  if (s.payload === null || typeof s.payload !== "object") return false;
+  if (typeof s.reason !== "string" || !s.reason) return false;
+  if (typeof s.confidence !== "number" || s.confidence < 0 || s.confidence > 1)
+    return false;
+  if (typeof s.created_at !== "string" || typeof s.expires_at !== "string")
+    return false;
+  if (typeof s.status !== "string" || !s.status) return false;
+  return true;
+}
+
+/** Seconds until the suggestion expires (<= 0 when already expired). */
+export function suggestionExpiresIn(s: DirectorSuggestion, nowMs: number): number {
+  const end = new Date(s.expires_at).getTime();
+  if (Number.isNaN(end)) return 0;
+  return Math.max(0, Math.round((end - nowMs) / 1000));
+}
+
+/** Plain-words description of what the suggestion would do. */
+export function describeSuggestion(s: DirectorSuggestion): string {
+  const p = s.payload ?? {};
+  if (s.type === "scene") {
+    const scene = typeof p.scene === "string" ? p.scene : "";
+    const label = SCENE_LABELS[scene as DirectorScene] ?? scene;
+    return `Switch scene to ${label || "—"}`;
+  }
+  if (s.type === "overlay") {
+    const overlay = typeof p.overlay === "string" ? p.overlay : "";
+    return `${p.visible ? "Show" : "Hide"} ${overlay || "overlay"} overlay`;
+  }
+  if (typeof p.visible === "boolean" && !p.visible) return "Hide lower-third";
+  const title = typeof p.title === "string" && p.title ? `"${p.title}"` : "lower-third";
+  const subtitle =
+    typeof p.subtitle === "string" && p.subtitle ? ` — ${p.subtitle}` : "";
+  return `Show ${title}${subtitle}`;
+}
+
+function requireSuggestions(res: unknown): DirectorSuggestion[] {
+  const raw = Array.isArray(res) ? res : unwrapState(res);
+  if (!Array.isArray(raw)) {
+    throw new Error(
+      "The director service returned an unexpected suggestions shape — not applying it."
+    );
+  }
+  return raw.filter(isDirectorSuggestion);
+}
+
+/** GET /api/v1/director/suggestions — pending AI proposals (operator+). */
+export async function getDirectorSuggestions(
+  token?: string | null
+): Promise<DirectorSuggestion[]> {
+  const res = await apiFetch<unknown>("/api/v1/director/suggestions", {
+    token: token ?? undefined,
+  });
+  return requireSuggestions(res);
+}
+
+/** POST /api/v1/director/suggestions/{id}/approve */
+export async function approveDirectorSuggestion(
+  token: string | null,
+  id: string
+): Promise<void> {
+  await apiFetch<unknown>(`/api/v1/director/suggestions/${encodeURIComponent(id)}/approve`, {
+    method: "POST",
+    token: token ?? undefined,
+  });
+}
+
+/** POST /api/v1/director/suggestions/{id}/reject */
+export async function rejectDirectorSuggestion(
+  token: string | null,
+  id: string
+): Promise<void> {
+  await apiFetch<unknown>(`/api/v1/director/suggestions/${encodeURIComponent(id)}/reject`, {
+    method: "POST",
+    token: token ?? undefined,
+  });
 }

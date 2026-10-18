@@ -3,8 +3,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { API_BASE } from './api';
 import { useAuth } from './auth';
-import { isDirectorState, normalizeDirectorState } from './director';
-import type { DirectorState } from './director';
+import { isDirectorState, isDirectorSuggestion, normalizeDirectorState } from './director';
+import type { DirectorState, DirectorSuggestion } from './director';
 
 export type ConnStatus = 'connecting' | 'live' | 'reconnecting' | 'offline';
 
@@ -65,6 +65,10 @@ export function useLiveSocket(apiBase?: string): {
   director: any;
   /** Phase 6 director service state ("director.state" frames); null until received. */
   directorState: DirectorState | null;
+  /** Phase 7 latest AI suggestion frame ("director.suggestion"); null until received. */
+  directorSuggestion: DirectorSuggestion | null;
+  /** Monotonic counter of received suggestion frames (drives queue reconciliation). */
+  suggestionSeq: number;
   health: any;
   agents: any[];
   modes: Record<string, boolean>;
@@ -80,6 +84,8 @@ export function useLiveSocket(apiBase?: string): {
   const [killFeed, setKillFeed] = useState<KillEvent[]>([]);
   const [director, setDirector] = useState<any>(null);
   const [directorState, setDirectorState] = useState<DirectorState | null>(null);
+  const [directorSuggestion, setDirectorSuggestion] = useState<DirectorSuggestion | null>(null);
+  const [suggestionSeq, setSuggestionSeq] = useState(0);
   const [health, setHealth] = useState<any>(null);
   const [agents, setAgents] = useState<any[]>([]);
   const [modes, setModes] = useState<Record<string, boolean>>({});
@@ -169,6 +175,15 @@ export function useLiveSocket(apiBase?: string): {
         // good state and the page re-fetches on reconnect.
         if (isDirectorState(data)) {
           setDirectorState(normalizeDirectorState(data));
+        }
+        break;
+      case 'director.suggestion':
+        // Phase 7 AI suggestion event (created / approved / rejected).
+        // Malformed frames are ignored; the console reconciles the queue
+        // against GET /director/suggestions on reconnect.
+        if (isDirectorSuggestion(data)) {
+          setDirectorSuggestion(data);
+          setSuggestionSeq((n) => n + 1);
         }
         break;
       case 'system_health':
@@ -305,6 +320,8 @@ export function useLiveSocket(apiBase?: string): {
     killFeed,
     director,
     directorState,
+    directorSuggestion,
+    suggestionSeq,
     health,
     agents,
     modes,

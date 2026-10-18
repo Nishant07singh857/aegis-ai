@@ -20,6 +20,11 @@
  *     rendered exactly as directed; anything not directed is not rendered
  *     (no standby placeholders are invented for manual mode).
  *   - Empty data -> honest standby states, never invented content.
+ *
+ * Responsive (W2): overlay graphics are laid out for 1920x1080 capture, so
+ * every fixed width / large type size below carries a `max-sm:` counterpart
+ * that shrinks it for phone viewports (<640px). At sm:+ the classes are
+ * untouched, so /broadcast/output (1920x1080 capture) renders identically.
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -138,7 +143,7 @@ function DirectorScorebug({
   const teamBlock = (team: Team | undefined, align: 'left' | 'right') => {
     if (!team)
       return (
-        <div className="flex w-44 items-center justify-center px-4 py-2">
+        <div className="flex w-44 items-center justify-center px-4 py-2 max-sm:w-28 max-sm:px-2">
           <span className="font-mono text-[11px] tracking-[0.25em] text-white/35">
             NO DATA
           </span>
@@ -146,7 +151,7 @@ function DirectorScorebug({
       );
     return (
       <div
-        className={`flex w-44 items-center gap-3 px-4 py-2 ${
+        className={`flex w-44 items-center gap-3 px-4 py-2 max-sm:w-28 max-sm:gap-2 max-sm:px-2.5 ${
           align === 'right' ? 'flex-row-reverse text-right' : ''
         }`}
       >
@@ -155,7 +160,7 @@ function DirectorScorebug({
           style={{ backgroundColor: team.color ?? 'var(--ov-accent)' }}
         />
         <div className="min-w-0">
-          <div className="truncate text-xl font-extrabold tracking-wide">
+          <div className="truncate text-xl font-extrabold tracking-wide max-sm:text-sm">
             {team.tag ?? team.name}
           </div>
           <div className="font-mono text-[11px] tracking-[0.2em] text-white/60">
@@ -163,7 +168,7 @@ function DirectorScorebug({
           </div>
         </div>
         <div
-          className={`text-4xl font-black tabular-nums ${
+          className={`text-4xl font-black tabular-nums max-sm:text-xl ${
             align === 'right' ? 'mr-auto' : 'ml-auto'
           }`}
         >
@@ -174,7 +179,7 @@ function DirectorScorebug({
   };
 
   return (
-    <div className="absolute left-1/2 top-4 -translate-x-1/2">
+    <div className="absolute left-1/2 top-4 -translate-x-1/2 max-sm:top-2">
       <div className="overflow-hidden rounded-xl bg-black/70 backdrop-blur-sm">
         <div
           className="h-1 w-full"
@@ -182,7 +187,7 @@ function DirectorScorebug({
         />
         <div className="flex items-stretch divide-x divide-white/10">
           {teamBlock(first, 'left')}
-          <div className="flex min-w-40 flex-col items-center justify-center gap-0.5 px-5 py-2">
+          <div className="flex min-w-40 flex-col items-center justify-center gap-0.5 px-5 py-2 max-sm:min-w-0 max-sm:px-3">
             <div className="flex items-center gap-2 font-mono text-[11px] tracking-[0.25em] text-white/70">
               <span
                 className={`inline-block h-2 w-2 rounded-full ${
@@ -191,7 +196,7 @@ function DirectorScorebug({
               />
               {matchLabel}
             </div>
-            <div className="font-mono text-sm font-bold tracking-[0.2em]">
+            <div className="font-mono text-sm font-bold tracking-[0.2em] max-sm:text-xs">
               {summary?.zone_phase != null
                 ? `ZONE ${summary.zone_phase}`
                 : 'ZONE —'}
@@ -221,12 +226,14 @@ function KillRow({ kill, large }: { kill: KillEvent; large?: boolean }) {
   return (
     <div
       className={`ov-anim-slide-in flex items-center gap-2.5 rounded-lg bg-black/70 backdrop-blur-sm ${
-        large ? 'px-6 py-3.5' : 'px-4 py-2'
+        large
+          ? 'px-6 py-3.5 max-sm:px-4 max-sm:py-2.5'
+          : 'px-4 py-2 max-sm:px-3 max-sm:py-1.5'
       }`}
     >
       <div
         className={`min-w-0 flex-1 truncate text-right font-bold ${
-          large ? 'text-2xl' : 'text-lg'
+          large ? 'text-2xl max-sm:text-lg' : 'text-lg max-sm:text-sm'
         }`}
       >
         <span className="text-white">{kill.killer}</span>
@@ -246,7 +253,7 @@ function KillRow({ kill, large }: { kill: KillEvent; large?: boolean }) {
       )}
       <div
         className={`min-w-0 flex-1 truncate font-bold ${
-          large ? 'text-2xl' : 'text-lg'
+          large ? 'text-2xl max-sm:text-lg' : 'text-lg max-sm:text-sm'
         }`}
       >
         <span className="text-white/90">{kill.victim}</span>
@@ -290,7 +297,7 @@ function DirectorKillfeed({
 
   if (focus) {
     return (
-      <div className="absolute left-1/2 top-1/2 w-[760px] -translate-x-1/2 -translate-y-1/2">
+      <div className="absolute left-1/2 top-1/2 w-[760px] -translate-x-1/2 -translate-y-1/2 max-sm:w-[calc(100vw-2rem)]">
         <div className="mb-3 text-center font-mono text-sm font-bold tracking-[0.4em] text-white/70">
           KILL FEED
         </div>
@@ -308,7 +315,7 @@ function DirectorKillfeed({
   }
 
   return (
-    <div className="absolute right-5 top-5 flex w-[380px] flex-col gap-2">
+    <div className="absolute right-5 top-5 flex w-[380px] flex-col gap-2 max-sm:left-2.5 max-sm:right-2.5 max-sm:top-24 max-sm:w-auto">
       {visible.map((kill) => (
         <KillRow key={kill.id} kill={kill} />
       ))}
@@ -350,7 +357,7 @@ function AutoLowerThird({
     return (
       <div
         key={`${line.timestamp}-${line.text}`}
-        className="ov-anim-rise-in absolute bottom-12 left-8 max-w-[46rem]"
+        className="ov-anim-rise-in absolute bottom-12 left-8 max-w-[46rem] max-sm:bottom-5 max-sm:left-4 max-sm:right-4"
       >
         <div className="overflow-hidden rounded-r-xl rounded-l-sm bg-black/75 backdrop-blur-sm">
           <div className="flex items-stretch">
@@ -358,14 +365,14 @@ function AutoLowerThird({
               className="w-2 shrink-0"
               style={{ backgroundColor: 'var(--ov-accent)' }}
             />
-            <div className="px-6 py-4">
+            <div className="px-6 py-4 max-sm:px-4 max-sm:py-3">
               <div
                 className="mb-1 font-mono text-xs font-bold tracking-[0.35em]"
                 style={{ color: 'var(--ov-accent)' }}
               >
                 {label}
               </div>
-              <div className="text-3xl font-extrabold leading-snug">
+              <div className="text-3xl font-extrabold leading-snug max-sm:text-xl">
                 {line.text}
               </div>
             </div>
@@ -376,7 +383,7 @@ function AutoLowerThird({
   }
 
   return (
-    <div className="absolute bottom-12 left-8">
+    <div className="absolute bottom-12 left-8 max-sm:bottom-5 max-sm:left-4">
       <div className="rounded bg-black/50 px-4 py-2 font-mono text-[11px] tracking-[0.3em] text-white/50">
         {live ? 'STANDBY — AWAITING COMMENTARY' : 'WAITING FOR COMMENTARY FEED'}
       </div>
@@ -393,21 +400,21 @@ function OperatorLowerThird({
   subtitle: string;
 }) {
   return (
-    <div className="absolute bottom-12 left-8 max-w-[46rem]">
+    <div className="absolute bottom-12 left-8 max-w-[46rem] max-sm:bottom-5 max-sm:left-4 max-sm:right-4">
       <div className="overflow-hidden rounded-r-xl rounded-l-sm bg-black/75 backdrop-blur-sm">
         <div className="flex items-stretch">
           <div
             className="w-2 shrink-0"
             style={{ backgroundColor: 'var(--ov-accent)' }}
           />
-          <div className="px-6 py-4">
+          <div className="px-6 py-4 max-sm:px-4 max-sm:py-3">
             <div
               className="mb-1 font-mono text-xs font-bold tracking-[0.35em]"
               style={{ color: 'var(--ov-accent)' }}
             >
               {title || 'LOWER THIRD'}
             </div>
-            <div className="text-3xl font-extrabold leading-snug">
+            <div className="text-3xl font-extrabold leading-snug max-sm:text-xl">
               {subtitle || '—'}
             </div>
           </div>
@@ -430,15 +437,15 @@ function StandingsFocus({ standings }: { standings: Team[] }) {
   );
 
   return (
-    <div className="absolute left-1/2 top-1/2 w-[640px] -translate-x-1/2 -translate-y-1/2">
+    <div className="absolute left-1/2 top-1/2 w-[640px] -translate-x-1/2 -translate-y-1/2 max-sm:w-[calc(100vw-2rem)]">
       <div className="overflow-hidden rounded-xl bg-black/75 backdrop-blur-sm">
         <div
           className="h-1.5 w-full"
           style={{ backgroundColor: 'var(--ov-accent)' }}
         />
-        <div className="px-8 py-6">
+        <div className="px-8 py-6 max-sm:px-4 max-sm:py-4">
           <div className="mb-4 flex items-center justify-between">
-            <span className="font-mono text-base font-bold tracking-[0.4em] text-white/85">
+            <span className="font-mono text-base font-bold tracking-[0.4em] text-white/85 max-sm:text-sm max-sm:tracking-[0.25em]">
               STANDINGS
             </span>
             <span className="font-mono text-xs tracking-[0.3em] text-white/40">
@@ -454,21 +461,21 @@ function StandingsFocus({ standings }: { standings: Team[] }) {
               {rows.map((t, i) => (
                 <div
                   key={t.id ?? i}
-                  className={`grid grid-cols-[3rem_1fr_4.5rem_4.5rem_4.5rem] items-center gap-2 rounded-lg px-4 py-2.5 ${
+                  className={`grid grid-cols-[3rem_1fr_4.5rem_4.5rem_4.5rem] items-center gap-2 rounded-lg px-4 py-2.5 max-sm:grid-cols-[1.75rem_1fr_2.75rem_2.75rem_2.75rem] max-sm:gap-1.5 max-sm:px-2.5 max-sm:py-2 ${
                     t.alive === false ? 'bg-white/[0.03] opacity-50' : 'bg-white/[0.06]'
                   }`}
                 >
-                  <span className="font-mono text-xl font-black text-white/70">
+                  <span className="font-mono text-xl font-black text-white/70 max-sm:text-base">
                     {String(i + 1).padStart(2, '0')}
                   </span>
-                  <span className="flex items-center gap-3 truncate">
+                  <span className="flex items-center gap-3 truncate max-sm:gap-2">
                     <span
                       className="inline-block h-8 w-1.5 shrink-0 rounded-full"
                       style={{
                         backgroundColor: t.color ?? 'var(--ov-accent)',
                       }}
                     />
-                    <span className="truncate text-2xl font-extrabold">
+                    <span className="truncate text-2xl font-extrabold max-sm:text-lg">
                       {t.tag ?? t.name}
                     </span>
                     {t.alive === false && (
@@ -477,13 +484,13 @@ function StandingsFocus({ standings }: { standings: Team[] }) {
                       </span>
                     )}
                   </span>
-                  <span className="text-right font-mono text-lg text-white/70">
+                  <span className="text-right font-mono text-lg text-white/70 max-sm:text-sm">
                     {t.kills ?? 0}K
                   </span>
-                  <span className="text-right font-mono text-lg text-white/70">
+                  <span className="text-right font-mono text-lg text-white/70 max-sm:text-sm">
                     {t.placement_pts ?? 0}P
                   </span>
-                  <span className="text-right font-mono text-2xl font-black">
+                  <span className="text-right font-mono text-2xl font-black max-sm:text-lg">
                     {t.total_pts ?? 0}
                   </span>
                 </div>
@@ -502,13 +509,13 @@ function CommentaryFocus({ api }: { api: string }) {
   const label = (line?.type ?? 'AEGIS AI').toUpperCase();
 
   return (
-    <div className="absolute left-1/2 top-1/2 w-[900px] -translate-x-1/2 -translate-y-1/2 text-center">
+    <div className="absolute left-1/2 top-1/2 w-[900px] -translate-x-1/2 -translate-y-1/2 text-center max-sm:w-[calc(100vw-2rem)]">
       <div className="overflow-hidden rounded-xl bg-black/75 backdrop-blur-sm">
         <div
           className="h-1.5 w-full"
           style={{ backgroundColor: 'var(--ov-accent)' }}
         />
-        <div className="px-10 py-8">
+        <div className="px-10 py-8 max-sm:px-5 max-sm:py-5">
           <div
             className="mb-3 font-mono text-sm font-bold tracking-[0.4em]"
             style={{ color: 'var(--ov-accent)' }}
@@ -516,11 +523,11 @@ function CommentaryFocus({ api }: { api: string }) {
             {label}
           </div>
           {line ? (
-            <div className="text-4xl font-extrabold leading-snug">
+            <div className="text-4xl font-extrabold leading-snug max-sm:text-2xl">
               {line.text}
             </div>
           ) : (
-            <div className="font-mono text-lg tracking-[0.3em] text-white/45">
+            <div className="font-mono text-lg tracking-[0.3em] text-white/45 max-sm:text-sm">
               STANDBY — AWAITING COMMENTARY
             </div>
           )}

@@ -28,6 +28,8 @@ from app.api.v1.teams.demo_data import DEMO_TEAMS
 from app.api.v1.teams.router import router as teams_router
 from app.api.v1.stream.router import router as stream_router
 from app.api.v1.director.router import router as director_router
+from app.api.v1.cluster.router import router as cluster_router
+from app.cluster.registry import node_registry
 from app.services.director_service import director_service
 from app.intelligence.director_ai import DirectorAIEngine, BroadcastEvent, EventPriority as DirPriority
 from app.intelligence.commentary_engine import get_commentary_engine
@@ -177,6 +179,17 @@ director_engine = DirectorAIEngine()
 commentary_engine = get_commentary_engine()
 simulation_task = None
 chatter_task = None
+
+
+def _active_agent_count() -> int:
+    """Agents THIS process reports as running (same source as the Control
+    Room 'Agents' card). Pushed into the Redis node hash on every cluster
+    heartbeat so the cluster view shows per-node load."""
+    try:
+        return sum(1 for a in MATCH_STATE.get("agents_state", []) if a.get("status") == "active")
+    except Exception:
+        return 0
+
 
 # ==========================================
 # ACTION HANDLERS
@@ -415,15 +428,40 @@ async def match_simulator():
             await manager.broadcast({"type": "director_state", "data": decision})
             await manager.broadcast({"type": "scene_switch", "data": decision})
             # Phase 6: publish the AI director's decision into the director
-            # service. system_publish applies ONLY in AUTO mode — in MANUAL
-            # it is a no-op, so the simulator can never override the
-            # operator. A POV switch keeps the program feed on the "main"
-            # scene; the legacy director_state/scene_switch messages above
-            # still carry the POV detail for existing clients.
+            # service. system_publish applies ONLY in FULL_AUTO mode — in
+            # SEMI_AUTO and MANUAL it is a no-op, so the simulator can
+            # never override the operator. A POV switch keeps the program
+            # feed on the "main" scene; the legacy director_state/
+            # scene_switch messages above still carry the POV detail for
+            # existing clients.
             if decision.get("action") == "SWITCH_POV":
                 await director_service.system_publish(
                     scene="main",
                     updated_by=f"director_ai:{decision.get('target_team')}",
+                )
+                # Phase 7 (W1): in SEMI_AUTO mode the AI never writes — it
+                # proposes. A real fight event is a genuine suggestion
+                # source: the killfeed-focus scene shows the action
+                # context. propose_suggestion is a silent no-op outside
+                # SEMI_AUTO, dedupes against identical pending
+                # suggestions, and skips no-op suggestions, so the queue
+                # stays honestly empty when there is nothing to propose.
+                confidence = (
+                    0.9
+                    if priority == DirPriority.CRITICAL
+                    else 0.75
+                    if priority == DirPriority.HIGH
+                    else 0.6
+                )
+                await director_service.propose_suggestion(
+                    suggestion_type="scene",
+                    payload={"scene": "killfeed_focus"},
+                    reason=(
+                        f"Fight detected — {killer} {event_type}s {victim}; "
+                        "killfeed focus shows the action."
+                    ),
+                    confidence=confidence,
+                    created_by=f"director_ai:{decision.get('target_team')}",
                 )
         
         ctx = {
@@ -664,6 +702,10 @@ async def lifespan(app: FastAPI):
         await event_bus.connect()
     except Exception as e:
         logger.warning(f"EventBus connection failed, continuing with in-memory broadcasting: {e}")
+
+    # Phase 7 / W3: register this process in the distributed cluster registry
+    # (Redis-backed, standalone fallback when Redis is unreachable).
+    await node_registry.start(agent_count_provider=_active_agent_count)
         
     global simulation_task, chatter_task
     simulation_task = asyncio.create_task(match_simulator())
@@ -680,6 +722,12 @@ async def lifespan(app: FastAPI):
         chatter_task.cancel()
     try:
         await event_bus.disconnect()
+    except Exception:
+        pass
+    # Phase 7 / W3: clean cluster deregistration (Redis key deleted; TTL is
+    # the backstop if the process dies ungracefully).
+    try:
+        await node_registry.stop()
     except Exception:
         pass
 
@@ -710,6 +758,9 @@ app.include_router(stream_router, prefix="/api/v1", tags=["Stream"])
 
 # Phase 6: director control API (role-gated; see app/api/v1/director).
 app.include_router(director_router, prefix="/api/v1", tags=["Director"])
+
+# Phase 7 / W3: cluster introspection API (read-only; any authenticated user).
+app.include_router(cluster_router, prefix="/api/v1", tags=["Cluster"])
 
 @app.get("/")
 async def root():

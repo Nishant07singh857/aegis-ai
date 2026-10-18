@@ -47,3 +47,46 @@ body {
 *::-webkit-scrollbar-track {
   background: transparent;
 }
+
+/* ---------------------------------------------------------------------------
+ * W2 mobile pass (phones < 768px). Every rule below lives inside this media
+ * query, so md:+ (desktop) rendering is byte-identical to before.
+ *
+ * 1. 44px minimum touch targets for buttons / switch-role elements /
+ *     text-like form controls on phones (fat-finger taps). Elements already
+ *     taller than 44px are unaffected.
+ * 2. 16px form font-size on phones: prevents iOS Safari auto-zoom on focus,
+ *     which would otherwise break the fixed console layout.
+ * 3. Director-console toggle switches (app/broadcast/director, owned by W1 —
+ *     not edited here): taller track with the knob vertically re-centered.
+ * 4. Belt-and-braces: never allow page-level horizontal scrolling. Inner
+ *     scroll containers (overflow-x-auto tables, nav) keep working;
+ *     `overflow: clip` (unlike `hidden`) does not create a scroll container,
+ *     so sticky headers keep sticking.
+ * ------------------------------------------------------------------------- */
+@media (max-width: 767.98px) {
+  button,
+  [role="button"] {
+    min-height: 44px;
+  }
+
+  input:not([type="checkbox"]):not([type="radio"]):not([type="range"]),
+  select,
+  textarea {
+    min-height: 44px;
+    font-size: 16px;
+  }
+
+  button[role="switch"] {
+    height: 44px;
+  }
+  button[role="switch"] > span {
+    top: 50%;
+    transform: translateY(-50%);
+  }
+
+  html,
+  body {
+    overflow-x: clip;
+  }
+}

@@ -369,7 +369,7 @@ export function StreamControl({
               onChange={(e) =>
                 setResolution(e.target.value as (typeof RESOLUTIONS)[number])
               }
-              className="rounded-lg border border-white/10 bg-black/40 px-3 py-2 font-mono text-sm text-white/90 focus:border-[#00f0ff]/60 focus:outline-none disabled:cursor-not-allowed disabled:opacity-50"
+              className="rounded-lg border border-white/10 bg-black/40 px-3 py-2 font-mono text-sm text-white/90 focus:border-[#00f0ff]/60 focus:outline-none disabled:cursor-not-allowed disabled:opacity-50 max-md:min-h-[48px]"
             >
               {RESOLUTIONS.map((r) => (
                 <option key={r} value={r}>
@@ -377,12 +377,12 @@ export function StreamControl({
                 </option>
               ))}
             </select>
-            <div className="flex items-center gap-3">
+            <div className="flex w-full items-center gap-3 sm:w-auto">
               <button
                 type="button"
                 disabled={busy !== null || isLive || selected.size === 0}
                 onClick={() => void runAction('start')}
-                className="rounded-lg bg-[#00f0ff] px-6 py-2.5 font-mono text-xs font-bold uppercase tracking-[0.15em] text-black transition-opacity disabled:cursor-not-allowed disabled:opacity-30"
+                className="rounded-lg bg-[#00f0ff] px-6 py-2.5 font-mono text-xs font-bold uppercase tracking-[0.15em] text-black transition-opacity disabled:cursor-not-allowed disabled:opacity-30 max-sm:flex-1 max-md:min-h-[48px]"
               >
                 {busy === 'start' ? 'Starting…' : 'Start stream'}
               </button>
@@ -390,7 +390,7 @@ export function StreamControl({
                 type="button"
                 disabled={busy !== null || !isLive}
                 onClick={() => void runAction('stop')}
-                className="rounded-lg border border-[#ff3366]/50 bg-[#ff3366]/10 px-6 py-2.5 font-mono text-xs font-bold uppercase tracking-[0.15em] text-[#ff3366] transition-opacity disabled:cursor-not-allowed disabled:opacity-30 hover:bg-[#ff3366]/20"
+                className="rounded-lg border border-[#ff3366]/50 bg-[#ff3366]/10 px-6 py-2.5 font-mono text-xs font-bold uppercase tracking-[0.15em] text-[#ff3366] transition-opacity disabled:cursor-not-allowed disabled:opacity-30 hover:bg-[#ff3366]/20 max-sm:flex-1 max-md:min-h-[48px]"
               >
                 {busy === 'stop' ? 'Stopping…' : 'Stop'}
               </button>
