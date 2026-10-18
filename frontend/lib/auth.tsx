@@ -24,13 +24,18 @@ import {
 } from "react";
 import type { ReactNode } from "react";
 import { API_BASE } from "./api";
+import { resolveRole } from "./useRole";
+import type { Role } from "./useRole";
 
 const TOKEN_KEY = "aegis_token";
+const ROLE_KEY = "aegis_role";
 
 interface AuthContextValue {
   token: string | null;
+  /** Effective role, resolved at login; "viewer" until a role is known. */
+  role: Role;
   isAuthed: boolean;
-  login: (username: string, password: string) => Promise<void>;
+  login: (username: string, password: string) => Promise<Role>;
   logout: () => void;
 }
 
@@ -38,21 +43,33 @@ const AuthContext = createContext<AuthContextValue | null>(null);
 
 interface TokenResponse {
   access_token?: string;
+  role?: unknown;
 }
 
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [token, setToken] = useState<string | null>(null);
+  const [role, setRole] = useState<Role>("viewer");
 
   useEffect(() => {
     try {
-      setToken(window.localStorage.getItem(TOKEN_KEY));
+      const storedToken = window.localStorage.getItem(TOKEN_KEY);
+      const storedRole = window.localStorage.getItem(ROLE_KEY);
+      setToken(storedToken);
+      // Re-resolve from the JWT so a stale/missing stored role can never
+      // grant more than the token actually carries.
+      setRole(
+        storedToken
+          ? resolveRole(storedRole, storedToken)
+          : "viewer"
+      );
     } catch {
       setToken(null);
+      setRole("viewer");
     }
   }, []);
 
   const login = useCallback(
-    async (username: string, password: string): Promise<void> => {
+    async (username: string, password: string): Promise<Role> => {
       const body = new URLSearchParams({ username, password }).toString();
       const response = await fetch(`${API_BASE}/api/v1/auth/token`, {
         method: "POST",
@@ -95,12 +112,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       if (!data.access_token) {
         throw new Error("Login succeeded but the server returned no token.");
       }
+      const effectiveRole = resolveRole(data.role, data.access_token);
       try {
         window.localStorage.setItem(TOKEN_KEY, data.access_token);
+        window.localStorage.setItem(ROLE_KEY, effectiveRole);
       } catch {
-        // Storage unavailable (e.g. private mode) — keep the token in memory.
+        // Storage unavailable (e.g. private mode) — keep everything in memory.
       }
       setToken(data.access_token);
+      setRole(effectiveRole);
+      return effectiveRole;
     },
     []
   );
@@ -108,15 +129,17 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const logout = useCallback((): void => {
     try {
       window.localStorage.removeItem(TOKEN_KEY);
+      window.localStorage.removeItem(ROLE_KEY);
     } catch {
       // Storage unavailable — clearing in-memory state is enough.
     }
     setToken(null);
+    setRole("viewer");
   }, []);
 
   const value = useMemo<AuthContextValue>(
-    () => ({ token, isAuthed: token !== null, login, logout }),
-    [token, login, logout]
+    () => ({ token, role, isAuthed: token !== null, login, logout }),
+    [token, role, login, logout]
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

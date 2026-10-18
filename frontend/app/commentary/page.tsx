@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { apiFetch } from "../lib/api";
 import { useAuth } from "../lib/auth";
+import { RequireRole } from "../lib/guard";
 import { Badge, Card, EmptyState, ErrorState, Loading } from "../components/ui";
 
 interface CommentaryLine {
@@ -42,7 +43,7 @@ function formatTime(ts: string | null | undefined): string {
   return ts;
 }
 
-export default function CommentaryPage() {
+function CommentaryPageInner() {
   const { token } = useAuth();
   const [lines, setLines] = useState<CommentaryLine[] | null>(null);
   const [linesError, setLinesError] = useState<string | null>(null);
@@ -120,5 +121,14 @@ export default function CommentaryPage() {
         </Card>
       </div>
     </div>
+  );
+}
+
+/** Route guard: operator + admin. Viewers land on /watch. */
+export default function CommentaryPage() {
+  return (
+    <RequireRole roles={["operator", "admin"]}>
+      <CommentaryPageInner />
+    </RequireRole>
   );
 }

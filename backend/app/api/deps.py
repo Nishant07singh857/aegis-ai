@@ -58,16 +58,30 @@ PROTECTED (require_admin) — state-mutating, admin, broadcast control:
   POST /api/v1/scrims/start                starts a scrim (mutates state)
   POST /api/v1/content/generate-recap      queues a render job (mutates state)
 
+PROTECTED (require_operator — operator or admin) — broadcast control:
+  POST /api/v1/stream/start, /stream/stop  spend CPU, broadcast to the world
+  POST /api/v1/director/mode               auto<->manual director switching
+  POST /api/v1/director/scene              manual-mode scene select
+                                           (409 while director is in AUTO)
+  POST /api/v1/director/overlays           manual-mode overlay toggles
+  POST /api/v1/director/lower-third        manual-mode lower third
+
+AUTHENTICATED (get_current_user — viewer included) — read-only:
+  GET  /api/v1/director/state              director state snapshot
+  GET  /api/v1/stream/status               stream state (no key material)
+
 PROTECTED (WS control channel) — every mutating action dispatched through
-/ws/live's handle_action() requires an authenticated ?token= (JWT or API key):
+/ws/live's handle_action() requires an authenticated ?token= (JWT or API key)
+whose role is operator or admin (mirrors the REST require_operator gates —
+viewers' tokens only unlock the read-only feeds):
   assign_agent, lock_pov, start_scrim, generate_recap, restart_node,
   toggle_node, toggle_autopost, upload_sponsor, revoke_key, stop_training,
   post_now, create_tournament, clip_highlight, generate_all_highlights,
   toggle_broadcaster_seat, test_webhook, test_post.
-Unauthenticated action frames get an {"status": "unauthorized"} ack and are
-dropped. Notably `revoke_key` no longer leaks a fresh key to anonymous
-callers, and `restart_node` / `stop_training` can no longer be triggered by
-anyone who can reach the port.
+Unauthenticated or insufficient-role action frames get an
+{"status": "unauthorized"} ack and are dropped. Notably `revoke_key` no
+longer leaks a fresh key to anonymous callers, and `restart_node` /
+`stop_training` can no longer be triggered by anyone who can reach the port.
 """
 
 import secrets
@@ -87,6 +101,7 @@ ADMIN_PRINCIPAL = TokenPayload(
     username="operator",
     is_superuser=True,
     scopes=["admin"],
+    role="admin",
 )
 
 
@@ -156,23 +171,77 @@ async def get_current_user(
     return user
 
 
-async def require_admin(
-    user: TokenPayload = Depends(get_current_user),
-) -> TokenPayload:
-    """
-    Require operator privileges.
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# PHASE 6 — ROLE-BASED ACCESS CONTROL
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# Roles: admin | operator | viewer (see app.db.models.enums.UserRole).
+# Hierarchy: admin ⊇ operator ⊇ viewer — require_operator() admits admins
+# too, because admins can do everything operators can.
+#
+# require_admin is bound at the end of this section as require_role("admin")
+# (replacing the Phase 1 definition, which was equivalent to
+# get_current_user because every authenticated principal was the operator).
 
-    Phase 1: every authenticated principal IS the operator (single admin
-    credential / allowlist), so this is currently equivalent to
-    get_current_user. It exists so Phase 2 (real users/roles) can tighten
-    authorization in one place instead of editing every route.
+
+def principal_role(user: TokenPayload) -> str:
     """
-    if not user.is_superuser and "admin" not in (user.scopes or []):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Operator privileges required.",
+    Resolve the effective role of an authenticated principal.
+
+    The JWT carries an explicit ``role`` claim (Phase 6). Principals built
+    without one (the static X-API-Key principal, hand-built TokenPayloads)
+    fall back to the pre-roles rule: superuser/"admin" scope → admin.
+    Unknown values degrade to "viewer" (least privilege).
+    """
+    role = (user.role or "").strip().lower()
+    if role in ("admin", "operator", "viewer"):
+        return role
+    if user.is_superuser or "admin" in (user.scopes or []):
+        return "admin"
+    if "operator" in (user.scopes or []):
+        return "operator"
+    return "viewer"
+
+
+def require_role(*roles: str):
+    """
+    Dependency factory: require the principal's role to be one of ``roles``.
+
+    Usage: ``user: TokenPayload = Depends(require_role("admin", "operator"))``.
+    Raises 401 via get_current_user when unauthenticated, 403 when the role
+    is insufficient. Role names are case-insensitive.
+    """
+    allowed = {r.strip().lower() for r in roles}
+    unknown = allowed - {"admin", "operator", "viewer"}
+    if unknown:
+        raise ValueError(
+            f"Unknown role(s) {sorted(unknown)}: use admin/operator/viewer."
         )
-    return user
+
+    async def _require_role(
+        user: TokenPayload = Depends(get_current_user),
+    ) -> TokenPayload:
+        if principal_role(user) not in allowed:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=(
+                    f"Insufficient role: this endpoint requires "
+                    f"{' or '.join(sorted(allowed))}."
+                ),
+            )
+        return user
+
+    return _require_role
+
+
+#: Operator-or-above: admits "operator" AND "admin".
+require_operator = require_role("admin", "operator")
+
+#: Admin-only. Replaces the Phase 1 definition (which was equivalent to
+#: get_current_user because every authenticated principal was the operator).
+#: principal_role() keeps the configured operator credential and static
+#: API keys resolving to "admin", so existing admin-gated routes behave
+#: exactly as before for the operator.
+require_admin = require_role("admin")
 
 
 def authenticate_websocket(

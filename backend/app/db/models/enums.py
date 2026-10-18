@@ -109,3 +109,18 @@ class HighlightType(str, enum.Enum):
     FINAL_CIRCLE = "final_circle"
     FUNNY_MOMENT = "funny_moment"
     COMEBACK = "comeback"
+
+
+class UserRole(str, enum.Enum):
+    """Control-plane roles (Phase 6).
+
+    Hierarchy: admin ⊇ operator ⊇ viewer.
+      * admin    — full control (user management, stream start/stop, director).
+      * operator — day-to-day broadcast control (director console, stream
+        start/stop). Admins can do everything operators can.
+      * viewer   — read-only authenticated access (state, status, WS feed).
+    """
+
+    ADMIN = "admin"
+    OPERATOR = "operator"
+    VIEWER = "viewer"

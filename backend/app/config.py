@@ -69,7 +69,8 @@ class Settings(BaseSettings):
     # secret if you change it) and/or ADMIN_API_KEYS in the environment.
     # Treat these as real credentials: never commit them.
     ADMIN_USERNAME: str = Field(default="admin", description="Operator username for /api/v1/auth/token login")
-    ADMIN_PASSWORD: Optional[SecretStr] = Field(default=None, description="Operator password; login disabled when unset")
+    ADMIN_PASSWORD: Optional[SecretStr] = Field(default=None, description="Operator password; login disabled when unset. ALSO seeds the first DB admin together with ADMIN_EMAIL (Phase 6).")
+    ADMIN_EMAIL: Optional[str] = Field(default=None, description="Email of the first admin user. When ADMIN_EMAIL and ADMIN_PASSWORD are both set and no admin user exists in the DB, one is seeded at startup (bcrypt-hashed, never plaintext).")
     ADMIN_API_KEYS: List[str] = Field(default=[], description="Static allowlist of operator API keys (dev/demo grade)")
     
     # Database

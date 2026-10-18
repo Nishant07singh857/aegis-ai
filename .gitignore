@@ -31,3 +31,5 @@ backend/tests/fixtures/sample_videos/
 *.mov
 *.wmv
 
+# Runtime log files (written on every backend run — never commit)
+backend/data/logs/

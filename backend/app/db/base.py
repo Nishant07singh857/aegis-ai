@@ -130,6 +130,21 @@ def create_engine() -> AsyncEngine:
     """
     
     # Base engine configuration
+    #
+    # connect_args is dialect-aware: asyncpg-only kwargs (command_timeout,
+    # server_settings) crash every sqlite connect with "invalid keyword
+    # argument", so they are only included for postgresql DATABASE_URLs.
+    connect_args: Dict[str, Any] = {}
+    if settings.DATABASE_URL.startswith("postgresql"):
+        connect_args = {
+            "command_timeout": 30,
+            "server_settings": {
+                "application_name": "aegis_ai",
+                "timezone": "UTC",
+                "statement_timeout": "30000",  # 30 second query timeout
+            },
+        }
+
     engine_kwargs = {
         "echo": settings.DATABASE_ECHO,
         "echo_pool": settings.DEBUG,
@@ -138,14 +153,7 @@ def create_engine() -> AsyncEngine:
         "pool_recycle": settings.DATABASE_POOL_RECYCLE,
         "pool_timeout": settings.DATABASE_POOL_TIMEOUT,
         "pool_pre_ping": True,  # Verify connections before use
-        "connect_args": {
-            "command_timeout": 30,
-            "server_settings": {
-                "application_name": "aegis_ai",
-                "timezone": "UTC",
-                "statement_timeout": "30000",  # 30 second query timeout
-            },
-        },
+        "connect_args": connect_args,
     }
     
     # Environment-specific configurations
@@ -325,13 +333,22 @@ async def init_db() -> None:
     """
     logger.info("Initializing database...")
     
+    # PostgreSQL extensions -- in their own guarded block, run BEFORE table
+    # creation: sqlite has no CREATE EXTENSION, and a failed statement would
+    # otherwise abort the transaction so create_all never runs. Extensions
+    # are best-effort; a failure here never blocks table creation.
+    if engine.dialect.name == "postgresql":
+        try:
+            async with engine.begin() as conn:
+                # Enable PostgreSQL extensions
+                await conn.execute(text("CREATE EXTENSION IF NOT EXISTS \"uuid-ossp\""))
+                await conn.execute(text("CREATE EXTENSION IF NOT EXISTS \"pgcrypto\""))
+                await conn.execute(text("CREATE EXTENSION IF NOT EXISTS \"pg_trgm\""))
+        except Exception as e:
+            logger.info(f"Skipping PostgreSQL extensions (non-fatal): {e}")
+
     try:
         async with engine.begin() as conn:
-            # Enable PostgreSQL extensions
-            await conn.execute(text("CREATE EXTENSION IF NOT EXISTS \"uuid-ossp\""))
-            await conn.execute(text("CREATE EXTENSION IF NOT EXISTS \"pgcrypto\""))
-            await conn.execute(text("CREATE EXTENSION IF NOT EXISTS \"pg_trgm\""))
-            
             # Create all tables
             await conn.run_sync(Base.metadata.create_all)
             

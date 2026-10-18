@@ -28,6 +28,32 @@ class TokenPayload:
     is_superuser: bool = False
     scopes: list = None
     exp: Optional[datetime] = None
+    # Phase 6 RBAC: "admin" | "operator" | "viewer". Legacy tokens issued
+    # before roles existed carry no claim — decode_token() derives it from
+    # is_superuser/scopes so old tokens keep working.
+    role: str = "viewer"
+
+
+#: Roles recognised by the control plane (mirrors app.db.models.enums.UserRole).
+VALID_ROLES = ("admin", "operator", "viewer")
+
+
+def _role_from_legacy_payload(payload: dict) -> str:
+    """Resolve the role for a decoded JWT payload.
+
+    Tokens minted after Phase 6 carry an explicit ``role`` claim. Older
+    tokens don't — they fall back to the pre-roles rule where the single
+    configured operator (is_superuser / "admin" scope) was the admin and
+    anything else is a viewer.
+    """
+    role = payload.get("role")
+    if role in VALID_ROLES:
+        return role
+    if payload.get("is_superuser") or "admin" in (payload.get("scopes") or []):
+        return "admin"
+    if "operator" in (payload.get("scopes") or []):
+        return "operator"
+    return "viewer"
 
 class SecurityManager:
     """Security and authentication manager"""
@@ -97,8 +123,13 @@ class SecurityManager:
         is_superuser: bool = False,
         scopes: Optional[list] = None,
         expires_delta: Optional[timedelta] = None,
+        role: str = "viewer",
     ) -> str:
         """Create a JWT access token"""
+        if role not in VALID_ROLES:
+            raise ValueError(
+                f"Unknown role {role!r}: must be one of {', '.join(VALID_ROLES)}."
+            )
         if expires_delta:
             expire = datetime.utcnow() + expires_delta
         else:
@@ -111,6 +142,7 @@ class SecurityManager:
             "username": username,
             "is_superuser": is_superuser,
             "scopes": scopes or [],
+            "role": role,
             "exp": expire,
             "iat": datetime.utcnow(),
             "type": "access",
@@ -153,19 +185,29 @@ class SecurityManager:
         return token
     
     def decode_token(self, token: str) -> Optional[TokenPayload]:
-        """Decode and validate a JWT token"""
+        """Decode and validate a JWT token.
+
+        Only ``type == "access"`` tokens are accepted here — refresh tokens
+        (``create_refresh_token``) are rejected so they can never be used as
+        bearer credentials.
+        """
         try:
             payload = jwt.decode(
                 token,
                 settings.SECRET_KEY.get_secret_value(),
                 algorithms=[settings.JWT_ALGORITHM],
             )
-            
+
+            if payload.get("type") != "access":
+                logger.warning("Token rejected: not an access token")
+                return None
+
             return TokenPayload(
                 user_id=payload.get("sub"),
                 username=payload.get("username", ""),
                 is_superuser=payload.get("is_superuser", False),
                 scopes=payload.get("scopes", []),
+                role=_role_from_legacy_payload(payload),
                 exp=datetime.fromtimestamp(payload.get("exp")),
             )
         except jwt.ExpiredSignatureError:

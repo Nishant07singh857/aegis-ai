@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState, type FormEvent } from "react";
 import Link from "next/link";
 import { apiFetch } from "../lib/api";
 import { useAuth } from "../lib/auth";
+import { RequireRole } from "../lib/guard";
 import { Badge, Card, EmptyState, ErrorState, Loading } from "../components/ui";
 
 interface Team {
@@ -58,7 +59,7 @@ function SourceBadge({ source }: { source: "db" | "demo" }) {
   );
 }
 
-export default function TeamsPage() {
+function TeamsPageInner() {
   const { token, isAuthed } = useAuth();
   const [teams, setTeams] = useState<Team[] | null>(null);
   const [listError, setListError] = useState<string | null>(null);
@@ -307,5 +308,14 @@ export default function TeamsPage() {
         </div>
       </div>
     </div>
+  );
+}
+
+/** Route guard: operator + admin. Viewers land on /watch. */
+export default function TeamsPage() {
+  return (
+    <RequireRole roles={["operator", "admin"]}>
+      <TeamsPageInner />
+    </RequireRole>
   );
 }

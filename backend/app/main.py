@@ -4,6 +4,7 @@ import random
 import time
 import uuid
 import structlog
+from datetime import datetime, timezone
 from typing import Dict, List, Optional
 from fastapi import Depends, FastAPI, WebSocket, WebSocketDisconnect, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -11,6 +12,7 @@ from app.core.rate_limit_middleware import RateLimitMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.security import OAuth2PasswordRequestForm
 from contextlib import asynccontextmanager
+from sqlalchemy import func, or_, select
 
 from app.config import settings
 from app.core.event_bus import EventBus, EventPriority
@@ -18,15 +20,21 @@ from app.core.security import security_manager
 from app.api.deps import (
     TokenPayload,
     authenticate_websocket,
+    principal_role,
     require_admin,
     verify_admin_login,
 )
 from app.api.v1.teams.demo_data import DEMO_TEAMS
 from app.api.v1.teams.router import router as teams_router
 from app.api.v1.stream.router import router as stream_router
+from app.api.v1.director.router import router as director_router
+from app.services.director_service import director_service
 from app.intelligence.director_ai import DirectorAIEngine, BroadcastEvent, EventPriority as DirPriority
 from app.intelligence.commentary_engine import get_commentary_engine
 from app.db.session import init_db
+from app.db.base import get_db_context
+from app.db.models.enums import UserRole
+from app.db.models.user import User
 
 logger = structlog.get_logger("aegis.main")
 
@@ -130,6 +138,8 @@ class ConnectionManager:
         await websocket.send_json({"type": "standings", "data": MATCH_STATE["teams"]})
         await websocket.send_json({"type": "kill_feed_init", "data": MATCH_STATE["kill_feed"]})
         await websocket.send_json({"type": "director_state", "data": MATCH_STATE["director_state"]})
+        # Phase 6: current director output state on connect.
+        await websocket.send_json({"type": "director.state", "data": director_service.snapshot()})
         await websocket.send_json({"type": "system_health", "data": MATCH_STATE["system_health"]})
         await websocket.send_json({"type": "agents_state", "data": MATCH_STATE["agents_state"]})
         await websocket.send_json({"type": "modes_state", "data": MATCH_STATE["modes_state"]})
@@ -172,11 +182,12 @@ chatter_task = None
 # ACTION HANDLERS
 # ==========================================
 # Every action below mutates server state or triggers a side effect, so the
-# whole control channel requires an authenticated principal (JWT or API key
-# passed as ?token= on the WebSocket connect). Unauthenticated frames are
-# dropped with an "unauthorized" ack — this closes revoke_key / restart_node /
-# stop_training / etc. to anonymous callers. Passive subscriptions (state
-# pushes, ping/pong) intentionally stay open.
+# whole control channel requires an authenticated operator-or-admin principal
+# (JWT or API key passed as ?token= on the WebSocket connect). Viewers'
+# tokens unlock only the read-only feeds. Unauthenticated or insufficient-role
+# frames are dropped with an "unauthorized" ack — this closes revoke_key /
+# restart_node / stop_training / etc. to anonymous callers AND to viewers.
+# Passive subscriptions (state pushes, ping/pong) intentionally stay open.
 async def handle_action(data: dict, user: Optional[TokenPayload] = None):
     action = data.get("action")
 
@@ -190,6 +201,22 @@ async def handle_action(data: dict, user: Optional[TokenPayload] = None):
             },
         })
         logger.warning(f"Rejected unauthenticated WS action: {action}")
+        return
+
+    # Every action below mutates server state (mirrors the REST require_admin /
+    # require_operator gates). Viewers may hold a valid JWT for the read-only
+    # WS feeds, but only operator/admin principals may dispatch control
+    # actions.
+    if principal_role(user) not in ("admin", "operator"):
+        await manager.broadcast({
+            "type": "action_ack",
+            "data": {
+                "action": action,
+                "status": "unauthorized",
+                "message": "Insufficient role: this control action requires operator or admin.",
+            },
+        })
+        logger.warning(f"Rejected WS action from insufficient role: {action} user={user.username}")
         return
 
     if action == "assign_agent":
@@ -387,6 +414,17 @@ async def match_simulator():
             MATCH_STATE["director_state"] = decision
             await manager.broadcast({"type": "director_state", "data": decision})
             await manager.broadcast({"type": "scene_switch", "data": decision})
+            # Phase 6: publish the AI director's decision into the director
+            # service. system_publish applies ONLY in AUTO mode — in MANUAL
+            # it is a no-op, so the simulator can never override the
+            # operator. A POV switch keeps the program feed on the "main"
+            # scene; the legacy director_state/scene_switch messages above
+            # still carry the POV detail for existing clients.
+            if decision.get("action") == "SWITCH_POV":
+                await director_service.system_publish(
+                    scene="main",
+                    updated_by=f"director_ai:{decision.get('target_team')}",
+                )
         
         ctx = {
             "killer_name": killer,
@@ -507,6 +545,104 @@ async def agent_chatter_simulator():
         await manager.broadcast({"type": "agent_log", "data": log_entry})
 
 # ==========================================
+# PHASE 6 — FIRST ADMIN SEEDING + DB AUTH
+# ==========================================
+async def _seed_first_admin() -> None:
+    """Seed the first admin user from ADMIN_EMAIL/ADMIN_PASSWORD.
+
+    Runs once at startup. Creates the user only when BOTH env vars are set
+    and no admin (role='admin' or is_superuser) exists yet. The password is
+    bcrypt-hashed via SecurityManager.hash_password — never stored
+    plaintext. Only the fact that seeding happened is logged, never the
+    credentials. Never crashes startup: an unreachable DB or a schema that
+    hasn't run 005_add_user_role yet just skips seeding with a warning.
+    """
+    email = (settings.ADMIN_EMAIL or "").strip().lower()
+    password = settings.ADMIN_PASSWORD.get_secret_value() if settings.ADMIN_PASSWORD else ""
+    if not email or not password:
+        return
+    try:
+        async with get_db_context() as db:
+            existing = (
+                await db.execute(
+                    select(User.id)
+                    .where(or_(User.role == UserRole.ADMIN.value, User.is_superuser.is_(True)))
+                    .limit(1)
+                )
+            ).first()
+            if existing is not None:
+                return
+            base = "".join(
+                c for c in email.split("@")[0] if c.isalnum() or c in "-_"
+            )[:100] or "admin"
+            username = base
+            suffix = 2
+            while (
+                await db.execute(
+                    select(User.id).where(User.username == username).limit(1)
+                )
+            ).first() is not None:
+                username = f"{base}-{suffix}"
+                suffix += 1
+            db.add(
+                User(
+                    email=email,
+                    username=username,
+                    hashed_password=security_manager.hash_password(password),
+                    full_name="Administrator",
+                    role=UserRole.ADMIN.value,
+                    is_superuser=True,
+                    is_active=True,
+                    is_verified=True,
+                )
+            )
+        logger.info("Seeded the first admin user from ADMIN_EMAIL/ADMIN_PASSWORD.")
+    except Exception as e:
+        logger.warning(f"First-admin seeding skipped: {e}")
+
+
+async def _authenticate_db_user(username: str, password: str) -> Optional[User]:
+    """Validate credentials against DB users (Phase 6 roles).
+
+    Matches on email or username (case-insensitive), requires an active,
+    unlocked account and a bcrypt password match. Returns the User on
+    success, None otherwise. Never raises: an unreachable DB or a schema
+    missing the 005_add_user_role migration simply means "no DB user
+    matched". Successful logins refresh last_login_at and reset the failed
+    attempt counter (failed attempts increment it).
+    """
+    ident = (username or "").strip().lower()
+    if not ident or not password:
+        return None
+    try:
+        async with get_db_context() as db:
+            stmt = (
+                select(User)
+                .where(or_(func.lower(User.email) == ident, func.lower(User.username) == ident))
+                .limit(1)
+            )
+            user = (await db.execute(stmt)).scalars().first()
+            if user is None or not user.is_active:
+                return None
+            locked_until = user.locked_until
+            if locked_until is not None:
+                if locked_until.tzinfo is None:
+                    locked_until = locked_until.replace(tzinfo=timezone.utc)
+                if locked_until > datetime.now(timezone.utc):
+                    logger.warning("DB login rejected: account locked", username=user.username)
+                    return None
+            if not security_manager.verify_password(password, user.hashed_password):
+                user.failed_login_attempts = (user.failed_login_attempts or 0) + 1
+                return None
+            user.last_login_at = datetime.now(timezone.utc)
+            user.failed_login_attempts = 0
+            return user
+    except Exception as e:
+        logger.warning(f"DB credential check unavailable, skipping: {e}")
+        return None
+
+
+# ==========================================
 # FASTAPI APP & LIFESPAN
 # ==========================================
 @asynccontextmanager
@@ -518,6 +654,11 @@ async def lifespan(app: FastAPI):
         await init_db()
     except Exception as e:
         logger.warning(f"Database initialization failed, continuing with in-memory state: {e}")
+
+    # Phase 6: fan director.state changes out over /ws/live, and seed the
+    # first admin user when ADMIN_EMAIL/ADMIN_PASSWORD are configured.
+    director_service.add_listener(manager.broadcast)
+    await _seed_first_admin()
         
     try:
         await event_bus.connect()
@@ -564,8 +705,11 @@ app.add_middleware(RateLimitMiddleware)
 # domain extracted from main.py so far.
 app.include_router(teams_router, prefix="/api/v1", tags=["Teams"])
 
-# Phase 5: automated live streaming (admin-gated start/stop, authenticated status).
+# Phase 5: automated live streaming (operator-gated start/stop, authenticated status).
 app.include_router(stream_router, prefix="/api/v1", tags=["Stream"])
+
+# Phase 6: director control API (role-gated; see app/api/v1/director).
+app.include_router(director_router, prefix="/api/v1", tags=["Director"])
 
 @app.get("/")
 async def root():
@@ -581,26 +725,49 @@ async def root():
 @app.post("/api/v1/auth/token")
 async def login(form_data: OAuth2PasswordRequestForm = Depends()):
     """
-    Operator login. Validates ADMIN_USERNAME/ADMIN_PASSWORD from settings and
-    returns a JWT (HS256, ACCESS_TOKEN_EXPIRE_MINUTES expiry) usable as
+    Operator login. Two credential sources, checked in order:
+
+    1. Phase 1 configured operator credential (ADMIN_USERNAME/ADMIN_PASSWORD
+       from settings) → JWT with role "admin".
+    2. Phase 6 DB-backed users (email or username + bcrypt password) →
+       JWT carrying the user's DB role. This is how the seeded first admin
+       (ADMIN_EMAIL/ADMIN_PASSWORD) logs in.
+
+    Returns a JWT (HS256, ACCESS_TOKEN_EXPIRE_MINUTES expiry) usable as
     `Authorization: Bearer <token>` on protected routes, or as `?token=` on
     the /ws/live control channel. Headless clients can alternatively use a
     static X-API-Key from ADMIN_API_KEYS.
     """
-    if not verify_admin_login(form_data.username, form_data.password):
-        if not settings.ADMIN_PASSWORD:
-            return JSONResponse(
-                {"error": "Password login is not configured (set ADMIN_PASSWORD)."},
-                status_code=503,
-            )
-        return JSONResponse({"error": "Invalid credentials."}, status_code=401)
-    token = security_manager.create_access_token(
-        user_id="operator",
-        username=settings.ADMIN_USERNAME,
-        is_superuser=True,
-        scopes=["admin"],
-    )
-    return JSONResponse({"access_token": token, "token_type": "bearer"})
+    # 1) Configured operator credential — unchanged Phase 1 behavior.
+    if verify_admin_login(form_data.username, form_data.password):
+        token = security_manager.create_access_token(
+            user_id="operator",
+            username=settings.ADMIN_USERNAME,
+            is_superuser=True,
+            scopes=["admin"],
+            role="admin",
+        )
+        return JSONResponse({"access_token": token, "token_type": "bearer"})
+    # 2) DB-backed users with roles.
+    db_user = await _authenticate_db_user(form_data.username, form_data.password)
+    if db_user is not None:
+        role = (db_user.role or "viewer").strip().lower()
+        if role not in ("admin", "operator", "viewer"):
+            role = "viewer"
+        token = security_manager.create_access_token(
+            user_id=str(db_user.id),
+            username=db_user.username,
+            is_superuser=bool(db_user.is_superuser) or role == "admin",
+            scopes=[role],
+            role=role,
+        )
+        return JSONResponse({"access_token": token, "token_type": "bearer"})
+    if not settings.ADMIN_PASSWORD:
+        return JSONResponse(
+            {"error": "Password login is not configured (set ADMIN_PASSWORD)."},
+            status_code=503,
+        )
+    return JSONResponse({"error": "Invalid credentials."}, status_code=401)
 
 # ==========================================
 # WEBSOCKET ENDPOINTS

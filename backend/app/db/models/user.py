@@ -8,6 +8,7 @@ from sqlalchemy import Boolean, DateTime, Index, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from ..base import Base
+from .enums import UserRole
 
 
 class User(Base):
@@ -29,6 +30,14 @@ class User(Base):
     is_superuser: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     is_verified: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     email_verified_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+
+    # Phase 6 role-based access control. Plain String(20) (not a native PG
+    # enum) so the column stays portable across postgres/sqlite; the allowed
+    # values are enforced by UserRole on the Python side and by the
+    # 005_add_user_role migration's server default for raw SQL inserts.
+    role: Mapped[str] = mapped_column(
+        String(20), nullable=False, default=UserRole.VIEWER.value
+    )
 
     # Security
     last_login_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))

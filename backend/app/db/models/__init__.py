@@ -14,6 +14,7 @@ from .enums import (  # noqa: F401
     PlayerRole,
     TournamentFormat,
     TournamentStatus,
+    UserRole,
 )
 from .tournament import Tournament  # noqa: F401
 from .match import Match  # noqa: F401

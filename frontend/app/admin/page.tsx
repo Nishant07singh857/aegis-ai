@@ -5,6 +5,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { apiFetch } from "../lib/api";
 import { useAuth } from "../lib/auth";
+import { RequireRole } from "../lib/guard";
 import { Badge, Card, EmptyState, ErrorState, Loading } from "../components/ui";
 import { StreamControl } from "../components/stream-control";
 
@@ -114,7 +115,7 @@ function useAdminFetch<T>(path: string, token: string | null, sessionExpired: ()
   return { data, error, load };
 }
 
-export default function AdminPage() {
+function AdminPageInner() {
   const router = useRouter();
   const { token, isAuthed, logout } = useAuth();
   const [expiredNote, setExpiredNote] = useState(false);
@@ -326,5 +327,14 @@ export default function AdminPage() {
         </Card>
       </div>
     </div>
+  );
+}
+
+/** Route guard: admin only. Operators/viewers land on their role home. */
+export default function AdminPage() {
+  return (
+    <RequireRole roles={["admin"]}>
+      <AdminPageInner />
+    </RequireRole>
   );
 }

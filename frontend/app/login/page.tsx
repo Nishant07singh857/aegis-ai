@@ -1,38 +1,62 @@
 "use client";
 
 /**
- * AEGIS AI — operator login. Uses useAuth().login; surfaces the thrown
- * error honestly; on success routes to the live dashboard (/).
+ * AEGIS AI — role-aware login (Phase 6). Uses useAuth().login, which stores
+ * the JWT and resolves the role from the login response; surfaces the
+ * thrown error honestly. On success — and whenever an already-signed-in
+ * user lands here — redirects by role:
+ *   viewer   -> /watch
+ *   operator -> /broadcast/director
+ *   admin    -> /admin
  */
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import type { FormEvent } from "react";
 import { useRouter } from "next/navigation";
 import { useAuth } from "@/lib/auth";
+import { ROLE_HOME } from "@/lib/useRole";
 import { Card } from "@/components/ui";
 
 export default function LoginPage() {
   const router = useRouter();
-  const { isAuthed, login, logout } = useAuth();
+  const { isAuthed, role, login, logout } = useAuth();
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
+
+  // Signed-in users don't stay on the login page; they land on their
+  // role's home.
+  useEffect(() => {
+    if (isAuthed) {
+      router.replace(ROLE_HOME[role]);
+    }
+  }, [isAuthed, role, router]);
 
   if (isAuthed) {
     return (
       <div className="mx-auto max-w-md pt-12">
         <Card title="Session">
           <p className="text-sm text-zinc-300 mb-4">
-            Signed in as <span className="text-[#00f0ff]">operator</span>.
+            Signed in as{" "}
+            <span className="text-[#00f0ff]">{role}</span>.
           </p>
-          <button
-            type="button"
-            onClick={logout}
-            className="rounded-lg border border-white/15 bg-white/5 px-4 py-2 font-mono text-xs uppercase tracking-wider text-zinc-200 hover:border-[#ff3366]/60 hover:text-[#ff3366] transition-colors"
-          >
-            Logout
-          </button>
+          <div className="flex items-center gap-3">
+            <button
+              type="button"
+              onClick={() => router.replace(ROLE_HOME[role])}
+              className="rounded-lg bg-[#00f0ff] px-4 py-2 font-mono text-xs font-bold uppercase tracking-wider text-black hover:opacity-90 transition-opacity"
+            >
+              Continue
+            </button>
+            <button
+              type="button"
+              onClick={logout}
+              className="rounded-lg border border-white/15 bg-white/5 px-4 py-2 font-mono text-xs uppercase tracking-wider text-zinc-200 hover:border-[#ff3366]/60 hover:text-[#ff3366] transition-colors"
+            >
+              Logout
+            </button>
+          </div>
         </Card>
       </div>
     );
@@ -43,8 +67,8 @@ export default function LoginPage() {
     setError(null);
     setSubmitting(true);
     try {
-      await login(username.trim(), password);
-      router.push("/");
+      const signedInRole = await login(username.trim(), password);
+      router.replace(ROLE_HOME[signedInRole]);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Login failed.");
     } finally {

@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { apiFetch } from '../lib/api';
 import { useAuth } from '../lib/auth';
 import { useLiveSocket } from '../lib/useLiveSocket';
+import { RequireRole } from '../lib/guard';
 import { Loading, ErrorState } from '../components/ui';
 import ConnectionBanner from '../components/live/ConnectionBanner';
 import MatchHeader, { type LiveMatch } from '../components/live/MatchHeader';
@@ -13,7 +14,7 @@ import DirectorPanel from '../components/live/DirectorPanel';
 import SystemHealth from '../components/live/SystemHealth';
 import AgentChatter from '../components/live/AgentChatter';
 
-export default function LiveDashboard() {
+function LiveDashboardInner() {
   const { token, isAuthed } = useAuth();
   const socket = useLiveSocket();
   const [match, setMatch] = useState<LiveMatch | null>(null);
@@ -92,5 +93,14 @@ export default function LiveDashboard() {
         </div>
       </div>
     </main>
+  );
+}
+
+/** Route guard: operator + admin. Viewers land on /watch, signed-out users on /login. */
+export default function LiveDashboardPage() {
+  return (
+    <RequireRole roles={["operator", "admin"]}>
+      <LiveDashboardInner />
+    </RequireRole>
   );
 }

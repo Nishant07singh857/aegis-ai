@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { apiFetch } from "../lib/api";
 import { useAuth } from "../lib/auth";
+import { RequireRole } from "../lib/guard";
 import { Badge, Card, EmptyState, ErrorState, Loading } from "../components/ui";
 
 interface Team {
@@ -57,7 +58,7 @@ function prettyReason(reason: unknown): string {
   }
 }
 
-export default function BroadcastPage() {
+function BroadcastPageInner() {
   const { token, isAuthed } = useAuth();
   const [director, setDirector] = useState<DirectorState | null>(null);
   const [directorError, setDirectorError] = useState<string | null>(null);
@@ -181,9 +182,17 @@ export default function BroadcastPage() {
             <h1 className="text-2xl font-bold text-[#00f0ff]">Broadcast Control</h1>
             <p className="text-sm text-white/50">Director POV, replays and production modes</p>
           </div>
-          <Link href="/" className="text-sm text-white/60 hover:text-[#00f0ff]">
-            ← Dashboard
-          </Link>
+          <div className="flex items-center gap-4">
+            <Link
+              href="/broadcast/director"
+              className="rounded-lg border border-[#00f0ff]/40 bg-[#00f0ff]/10 px-3 py-1.5 font-mono text-xs uppercase tracking-wider text-[#00f0ff] hover:bg-[#00f0ff]/20 transition-colors"
+            >
+              Director console
+            </Link>
+            <Link href="/" className="text-sm text-white/60 hover:text-[#00f0ff]">
+              ← Dashboard
+            </Link>
+          </div>
         </div>
 
         {!isAuthed && (
@@ -331,5 +340,14 @@ export default function BroadcastPage() {
         )}
       </div>
     </div>
+  );
+}
+
+/** Route guard: operator + admin. Viewers land on /watch. */
+export default function BroadcastPage() {
+  return (
+    <RequireRole roles={["operator", "admin"]}>
+      <BroadcastPageInner />
+    </RequireRole>
   );
 }

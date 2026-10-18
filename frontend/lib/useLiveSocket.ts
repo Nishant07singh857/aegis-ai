@@ -3,6 +3,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { API_BASE } from './api';
 import { useAuth } from './auth';
+import { isDirectorState, normalizeDirectorState } from './director';
+import type { DirectorState } from './director';
 
 export type ConnStatus = 'connecting' | 'live' | 'reconnecting' | 'offline';
 
@@ -61,6 +63,8 @@ export function useLiveSocket(apiBase?: string): {
   standings: Team[];
   killFeed: KillEvent[];
   director: any;
+  /** Phase 6 director service state ("director.state" frames); null until received. */
+  directorState: DirectorState | null;
   health: any;
   agents: any[];
   modes: Record<string, boolean>;
@@ -75,6 +79,7 @@ export function useLiveSocket(apiBase?: string): {
   const [standings, setStandings] = useState<Team[]>([]);
   const [killFeed, setKillFeed] = useState<KillEvent[]>([]);
   const [director, setDirector] = useState<any>(null);
+  const [directorState, setDirectorState] = useState<DirectorState | null>(null);
   const [health, setHealth] = useState<any>(null);
   const [agents, setAgents] = useState<any[]>([]);
   const [modes, setModes] = useState<Record<string, boolean>>({});
@@ -157,6 +162,14 @@ export function useLiveSocket(apiBase?: string): {
       case 'director_state':
       case 'scene_switch':
         setDirector(data ?? null);
+        break;
+      case 'director.state':
+        // Phase 6 director service broadcast (every director change).
+        // Malformed frames are ignored — the hook keeps the last known
+        // good state and the page re-fetches on reconnect.
+        if (isDirectorState(data)) {
+          setDirectorState(normalizeDirectorState(data));
+        }
         break;
       case 'system_health':
         setHealth(data ?? null);
@@ -291,6 +304,7 @@ export function useLiveSocket(apiBase?: string): {
     standings,
     killFeed,
     director,
+    directorState,
     health,
     agents,
     modes,

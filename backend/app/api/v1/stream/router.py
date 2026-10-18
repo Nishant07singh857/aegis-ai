@@ -1,8 +1,8 @@
 """Stream API router — mounted at /api/v1 by app/main.py.
 
-POST /stream/start and POST /stream/stop require admin auth (they spend CPU
-and broadcast to the world). GET /stream/status is an authenticated read —
-any logged-in operator (JWT or X-API-Key) may watch stream state.
+POST /stream/start and POST /stream/stop require operator+ auth (they spend
+CPU and broadcast to the world). GET /stream/status is an authenticated
+read — any logged-in user (JWT or X-API-Key) may watch stream state.
 
 Stream keys NEVER appear here: they are read from env vars inside
 app/streaming, and status reports only ``*_configured`` booleans.
@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException, status
 
-from app.api.deps import get_current_user, require_admin
+from app.api.deps import get_current_user, require_operator
 from app.streaming import get_stream_service
 from app.streaming.destinations import DestinationError
 
@@ -44,7 +44,7 @@ def _stream_error_to_http(exc: Exception) -> HTTPException:
 @router.post(
     "/stream/start",
     response_model=StreamActionResponse,
-    dependencies=[Depends(require_admin)],
+    dependencies=[Depends(require_operator)],
 )
 async def start_stream(payload: StreamStartRequest):
     service = get_stream_service()
@@ -67,7 +67,7 @@ async def start_stream(payload: StreamStartRequest):
 @router.post(
     "/stream/stop",
     response_model=StreamActionResponse,
-    dependencies=[Depends(require_admin)],
+    dependencies=[Depends(require_operator)],
 )
 async def stop_stream():
     service = get_stream_service()

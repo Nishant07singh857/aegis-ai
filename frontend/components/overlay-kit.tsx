@@ -75,18 +75,32 @@ const CONN_LABEL: Record<Exclude<ConnStatus, 'live'>, string> = {
 /**
  * Subtle connection badge, bottom-right. Invisible while live so the
  * broadcast stays clean; shows only while the socket is down/retrying.
+ *
+ * When `onRetry` is provided and the socket is offline, the badge becomes a
+ * clickable retry affordance (24/7 capture pages otherwise sit offline
+ * forever after backoff exhaustion).
  */
 export function ConnBadge({
   status,
   retryCount,
+  onRetry,
 }: {
   status: ConnStatus;
   retryCount: number;
+  onRetry?: () => void;
 }) {
   if (status === 'live') return null;
   const label = CONN_LABEL[status];
+  const clickable = status === 'offline' && onRetry;
   return (
-    <div className="absolute bottom-3 right-4 z-50 flex items-center gap-2 rounded bg-black/60 px-3 py-1.5 font-mono text-[11px] tracking-[0.18em]">
+    <div
+      className={`absolute bottom-3 right-4 z-50 flex items-center gap-2 rounded bg-black/60 px-3 py-1.5 font-mono text-[11px] tracking-[0.18em] ${
+        clickable ? 'cursor-pointer' : ''
+      }`}
+      onClick={clickable ? onRetry : undefined}
+      role={clickable ? 'button' : undefined}
+      title={clickable ? 'Retry connection now' : undefined}
+    >
       <span
         className={`inline-block h-2 w-2 rounded-full ${
           status === 'offline' ? 'bg-red-500' : 'bg-amber-400 ov-anim-pulse'
@@ -95,6 +109,7 @@ export function ConnBadge({
       <span className="text-white/80">
         {label}
         {status === 'reconnecting' && retryCount > 0 ? ` · TRY ${retryCount}` : ''}
+        {clickable ? ' · RETRY' : ''}
       </span>
     </div>
   );
