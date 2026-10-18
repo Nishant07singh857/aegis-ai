@@ -13,6 +13,8 @@ Redis Streams + Pub/Sub implementation with:
 """
 
 import asyncio
+import heapq
+import itertools
 import time
 import uuid
 import zlib
@@ -128,7 +130,7 @@ class EventBus:
     - Health monitoring
     """
     
-    def __init__(self):
+    def __init__(self, max_processing_queue: int = 10000):
         # Redis connections
         self._redis: Optional[Redis] = None
         self._pubsub_redis: Optional[Redis] = None
@@ -140,7 +142,15 @@ class EventBus:
         
         # Event processing
         self._event_history: Dict[str, List[EventRecord]] = {}  # match_id -> recent events
-        self._processing_queue: asyncio.PriorityQueue = asyncio.PriorityQueue()
+        # Bounded queue: producers never block forever. When full, the
+        # lowest-priority item is evicted (see _enqueue_for_processing).
+        # The monotonic tiebreaker keeps tuple comparison total even when
+        # two events share a priority (EventRecord itself is not orderable).
+        self.max_processing_queue = max_processing_queue
+        self._processing_queue: asyncio.PriorityQueue = asyncio.PriorityQueue(
+            maxsize=max_processing_queue
+        )
+        self._queue_tiebreaker = itertools.count()
         self._dead_letter_queue: List[EventRecord] = []
         
         # Circuit breaker
@@ -170,6 +180,11 @@ class EventBus:
         self.circuit_breaker_threshold = 5
         self.circuit_breaker_reset_seconds = 60
         self.compression_threshold_bytes = 1024  # Compress events > 1KB
+
+        # DB session factory for event persistence. Defaults to the app's
+        # shared AsyncSessionLocal (resolved lazily); tests may inject a
+        # factory bound to their own engine.
+        self._session_factory: Optional[Callable[[], Any]] = None
         
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     # CONNECTION MANAGEMENT
@@ -384,8 +399,9 @@ class EventBus:
                 self._add_to_history(match_id, record)
             
             # Add to processing queue for high priority events
+            # (bounded: never blocks the producer; drops are counted)
             if priority <= EventPriority.HIGH:
-                await self._processing_queue.put((priority.value, record))
+                self._enqueue_for_processing(priority.value, record)
             
             # Update stats
             self._stats["events_published"] += 1
@@ -589,11 +605,59 @@ class EventBus:
     # EVENT PROCESSING QUEUE
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     
+    def _enqueue_for_processing(self, priority_value: int, record: EventRecord) -> bool:
+        """Enqueue a record for background processing without ever blocking.
+
+        Policy when the queue is full: evict the single lowest-priority
+        (largest priority value) queued item if the newcomer is more
+        important; otherwise drop the newcomer. Every drop increments
+        ``events_dropped``. Returns True when the record was enqueued.
+        """
+        item = (priority_value, next(self._queue_tiebreaker), record)
+        try:
+            self._processing_queue.put_nowait(item)
+            return True
+        except asyncio.QueueFull:
+            pass
+
+        heap = self._processing_queue._queue  # heap of (priority, seq, record)
+        worst = max(heap, key=lambda it: (it[0], it[1])) if heap else None
+
+        if worst is not None and priority_value < worst[0]:
+            try:
+                heap.remove(worst)
+                heapq.heapify(heap)
+            except ValueError:
+                pass
+            else:
+                try:
+                    self._processing_queue.put_nowait(item)
+                except asyncio.QueueFull:
+                    pass
+                else:
+                    self._stats["events_dropped"] += 1
+                    logger.warning(
+                        "Processing queue full; evicted lowest-priority event "
+                        "for higher-priority event",
+                        evicted_type=worst[2].event.event_type,
+                        new_type=record.event.event_type,
+                    )
+                    return True
+
+        self._stats["events_dropped"] += 1
+        logger.warning(
+            "Processing queue full; dropping event",
+            event_type=record.event.event_type,
+            event_id=record.event.event_id,
+            priority=priority_value,
+        )
+        return False
+
     async def _process_event_queue(self) -> None:
         """Background task: process high-priority events"""
         while self._running:
             try:
-                priority, record = await asyncio.wait_for(
+                priority, _seq, record = await asyncio.wait_for(
                     self._processing_queue.get(),
                     timeout=1.0
                 )
@@ -635,14 +699,51 @@ class EventBus:
                 # Re-queue with exponential backoff
                 delay = 2 ** record.retry_count
                 await asyncio.sleep(delay)
-                await self._processing_queue.put((record.event.priority.value, record))
+                self._enqueue_for_processing(record.event.priority.value, record)
             else:
                 self._add_to_dead_letter(record, str(e))
     
     async def _persist_event(self, event: BaseEvent) -> None:
-        """Persist event to database for long-term storage"""
-        # This will be implemented when database is available
-        pass
+        """Persist event to the ``event_store`` table for long-term storage.
+
+        Failure-safe: any DB error (unavailable DB, constraint conflict,
+        serialization issue) is logged and swallowed — the event flow
+        must never break because persistence failed.
+        """
+        try:
+            session_factory = self._session_factory
+            if session_factory is None:
+                # Lazy import: keeps event_bus importable without a DB.
+                from app.db.session import AsyncSessionLocal
+
+                session_factory = AsyncSessionLocal
+            from app.db.models.event_store import EventStore
+
+            row = EventStore(
+                event_id=event.event_id,
+                event_type=event.event_type,
+                event_version=getattr(event.event_version, "value", str(event.event_version)),
+                priority=getattr(event.priority, "value", int(event.priority)),
+                source=event.source or "system",
+                match_id=event.match_id,
+                tournament_id=event.tournament_id,
+                correlation_id=event.correlation_id,
+                timestamp_ms=event.timestamp_ms,
+                data=dict(event.data) if event.data else {},
+                meta=dict(event.metadata) if event.metadata else {},
+            )
+
+            async with session_factory() as session:
+                async with session.begin():
+                    session.add(row)
+        except Exception as e:
+            # Never break the event flow on a persistence failure.
+            logger.warning(
+                "Event persistence failed; continuing without DB write",
+                error=str(e),
+                event_id=getattr(event, "event_id", None),
+                event_type=getattr(event, "event_type", None),
+            )
     
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     # DEAD LETTER QUEUE

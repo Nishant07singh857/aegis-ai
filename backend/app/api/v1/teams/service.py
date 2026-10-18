@@ -13,18 +13,89 @@ message instead of silently mutating in-memory state.
 from __future__ import annotations
 
 import logging
-from typing import List, Optional
+import time
+from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import HTTPException, status
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.cache import cache_manager
 from app.db.models.team import Team
 from app.db.repositories.team_repository import TeamRepository
 from .demo_data import DEMO_TEAMS
 from .schemas import TeamCreate, TeamPatch, TeamResponse, TeamUpdate
 
 logger = logging.getLogger("aegis.teams")
+
+# ── read cache (60s TTL) ──────────────────────────────────────────────
+# Two tiers: Redis via cache_manager when available, plus a process-local
+# TTL dict so reads stay fast (and tests stay DB/Redis-free) when Redis
+# is down. A generation counter in every key makes invalidation
+# O(1): writes bump the generation and old Redis entries simply expire.
+_TEAMS_CACHE_TTL = 60
+_cache_generation = 0
+_local_cache: Dict[str, Tuple[float, Any]] = {}  # key -> (expires_at, value)
+
+
+def _cache_key(kind: str, *parts: str) -> str:
+    return f"teams:v{_cache_generation}:{kind}:" + ":".join(parts)
+
+
+def _serialize_teams(value: Any) -> Any:
+    if isinstance(value, list):
+        return {"kind": "list", "items": [t.model_dump(mode="json") for t in value]}
+    if value is None:
+        return {"kind": "none"}
+    return {"kind": "one", "item": value.model_dump(mode="json")}
+
+
+def _deserialize_teams(payload: Any) -> Any:
+    kind = payload.get("kind")
+    if kind == "list":
+        return [TeamResponse(**item) for item in payload["items"]]
+    if kind == "one":
+        return TeamResponse(**payload["item"])
+    return None
+
+
+async def _cache_get_teams(key: str) -> Tuple[bool, Any]:
+    """Return (hit, value). Never raises — a cache failure is a miss."""
+    try:
+        payload = await cache_manager.get(key)
+        if payload is not None:
+            return True, _deserialize_teams(payload)
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.debug(f"Teams Redis cache read failed: {exc}")
+    entry = _local_cache.get(key)
+    if entry is not None:
+        expires_at, value = entry
+        if expires_at > time.time():
+            return True, value
+        del _local_cache[key]
+    return False, None
+
+
+async def _cache_set_teams(key: str, value: Any) -> None:
+    """Populate both tiers. Never raises."""
+    _local_cache[key] = (time.time() + _TEAMS_CACHE_TTL, value)
+    try:
+        await cache_manager.set(key, _serialize_teams(value), ttl=_TEAMS_CACHE_TTL)
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.debug(f"Teams Redis cache write failed: {exc}")
+
+
+def _invalidate_teams_cache() -> None:
+    """Bump the cache generation and drop the local tier.
+
+    Redis entries under the old generation are left to expire via TTL —
+    no key scanning needed, and stale reads are impossible because the
+    generation is part of every key.
+    """
+    global _cache_generation
+    _cache_generation += 1
+    _local_cache.clear()
+    logger.debug(f"Teams cache invalidated (generation {_cache_generation})")
 
 
 def _demo_response(d: dict) -> TeamResponse:
@@ -91,9 +162,18 @@ class TeamService:
             raise _db_unavailable(RuntimeError("no database session"))
         return self.repo
 
-    # ---------- reads (DB-first, demo fallback) ----------
+    # ---------- reads (DB-first, demo fallback, cached 60s) ----------
 
     async def list_teams(self, skip: int = 0, limit: int = 100) -> List[TeamResponse]:
+        key = _cache_key("list", str(skip), str(limit))
+        hit, cached = await _cache_get_teams(key)
+        if hit:
+            return cached
+        result = await self._fetch_list_teams(skip=skip, limit=limit)
+        await _cache_set_teams(key, result)
+        return result
+
+    async def _fetch_list_teams(self, skip: int = 0, limit: int = 100) -> List[TeamResponse]:
         if self.repo is not None:
             try:
                 rows = await self.repo.get_all(skip=skip, limit=limit, order_by="name")
@@ -107,6 +187,15 @@ class TeamService:
         return [_demo_response(d) for d in DEMO_TEAMS][skip : skip + limit]
 
     async def get_team(self, team_id: str) -> Optional[TeamResponse]:
+        key = _cache_key("get", team_id)
+        hit, cached = await _cache_get_teams(key)
+        if hit:
+            return cached
+        result = await self._fetch_team(team_id)
+        await _cache_set_teams(key, result)
+        return result
+
+    async def _fetch_team(self, team_id: str) -> Optional[TeamResponse]:
         if self.repo is not None:
             try:
                 row = await self.repo.get(team_id)
@@ -142,6 +231,7 @@ class TeamService:
             )
         except (SQLAlchemyError, Exception) as exc:
             raise _db_unavailable(exc)
+        _invalidate_teams_cache()
         return _db_response(team)
 
     async def update_team(self, team_id: str, payload: TeamUpdate) -> Optional[TeamResponse]:
@@ -171,7 +261,10 @@ class TeamService:
             )
         except Exception as exc:
             raise _db_unavailable(exc)
-        return _db_response(updated) if updated else None
+        if updated is None:
+            return None
+        _invalidate_teams_cache()
+        return _db_response(updated)
 
     async def patch_team(self, team_id: str, payload: TeamPatch) -> Optional[TeamResponse]:
         repo = self._require_db()
@@ -202,11 +295,17 @@ class TeamService:
             )
         except Exception as exc:
             raise _db_unavailable(exc)
-        return _db_response(updated) if updated else None
+        if updated is None:
+            return None
+        _invalidate_teams_cache()
+        return _db_response(updated)
 
     async def delete_team(self, team_id: str) -> bool:
         repo = self._require_db()
         try:
-            return await repo.delete(team_id, soft=True)
+            deleted = await repo.delete(team_id, soft=True)
         except Exception as exc:
             raise _db_unavailable(exc)
+        if deleted:
+            _invalidate_teams_cache()
+        return deleted

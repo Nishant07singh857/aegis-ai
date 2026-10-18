@@ -4,6 +4,7 @@ import random
 import time
 import uuid
 import structlog
+from collections import deque
 from datetime import datetime, timezone
 from typing import Dict, List, Optional
 from fastapi import Depends, FastAPI, WebSocket, WebSocketDisconnect, Request
@@ -38,6 +39,8 @@ from app.api.v1.match_point import router as match_point_router
 from app.api.v1.zone import router as zone_router
 from app.api.v1.rundown import router as rundown_router
 from app.api.v1.pip import router as pip_router
+# Phase 12: observer-team slot mapping (operator-gated writes; authenticated reads).
+from app.api.v1.observers import router as observers_router
 # Phase 11: team analysis product (rotations/drops/zones + dossiers/PDF reports).
 from app.analysis.router import router as analysis_router
 from app.dossiers.router import router as dossiers_router
@@ -92,7 +95,11 @@ MATCH_STATE = {
     "teams": TEAMS,
     "players": [p for team in TEAMS for p in team["players"]],
     "matches": [{"id": "m1", "title": "BGIS Semifinals - Match 4", "map": "Erangel", "status": "LIVE"}],
-    "kill_feed": [],
+    # Bounded ring buffers (Phase 12 reliability): these used to be plain lists
+    # appended forever (OOM risk on a long-running server). deque(maxlen=N)
+    # keeps only the most recent N entries; every reader below serializes via
+    # list(...) so JSON encoding is unchanged.
+    "kill_feed": deque(maxlen=500),
     "director_state": {"current_pov": "t1", "reason": "Initial", "action": "HOLD"},
     "agents_state": [
         {"id": "fight", "name": "Fight Detection Agent", "status": "active", "cpu": "12%", "mem": "145MB", "latency": "8ms", "tasks": 1204},
@@ -116,7 +123,7 @@ MATCH_STATE = {
         "active_agents": 42,
         "events_per_sec": 124,
     },
-    "commentary_log": [],
+    "commentary_log": deque(maxlen=500),
     # --- NEW STATE ---
     "devices": DEVICES,
     "agent_assignments": {
@@ -126,7 +133,7 @@ MATCH_STATE = {
         "fight": {"device_id": "gpu1", "device_name": "Node-GPU-1", "team_id": None, "team_name": None},
         "economy": {"device_id": "cpu1", "device_name": "Node-CPU-1", "team_id": None, "team_name": None},
     },
-    "agent_logs": [],
+    "agent_logs": deque(maxlen=500),
     "scrim_state": {"active": False, "lobby_id": None, "teams": [], "map": "Erangel", "status": "idle"},
     "social_config": {
         "YouTube Shorts": {"connected": True, "auto_post": True},
@@ -139,11 +146,11 @@ MATCH_STATE = {
         {"name": "Fight Detection (YOLOv8 + Tracker)", "loss": "0.004", "status": "Deployed", "active": True},
         {"name": "LLM Commentary Generator (Hindi Base)", "loss": "1.24", "status": "Fine-tuning", "active": True},
     ],
-    "render_jobs": [
+    "render_jobs": deque([
         {"id": "j1", "title": "Soul Wipe - YouTube Shorts Format", "status": "RENDERING", "progress": 72, "format": "YouTube Shorts"},
         {"id": "j2", "title": "Mortal Clutch - TikTok Format", "status": "PENDING", "progress": 0, "format": "TikTok"},
         {"id": "j3", "title": "Match 4 - Cinematic Recap", "status": "COMPLETED", "progress": 100, "format": "Full Broadcast"},
-    ],
+    ], maxlen=200),
 }
 
 # ==========================================
@@ -159,7 +166,7 @@ class ConnectionManager:
         # Send initial state
         await websocket.send_json({"type": "connected", "data": {"status": "ok"}})
         await websocket.send_json({"type": "standings", "data": MATCH_STATE["teams"]})
-        await websocket.send_json({"type": "kill_feed_init", "data": MATCH_STATE["kill_feed"]})
+        await websocket.send_json({"type": "kill_feed_init", "data": list(MATCH_STATE["kill_feed"])[-100:]})
         await websocket.send_json({"type": "director_state", "data": MATCH_STATE["director_state"]})
         # Phase 6: current director output state on connect.
         await websocket.send_json({"type": "director.state", "data": director_service.snapshot()})
@@ -176,9 +183,9 @@ class ConnectionManager:
         # New state
         await websocket.send_json({"type": "devices_state", "data": MATCH_STATE["devices"]})
         await websocket.send_json({"type": "agent_assignments", "data": MATCH_STATE["agent_assignments"]})
-        await websocket.send_json({"type": "agent_logs", "data": MATCH_STATE["agent_logs"]})
+        await websocket.send_json({"type": "agent_logs", "data": list(MATCH_STATE["agent_logs"])[-100:]})
         await websocket.send_json({"type": "scrim_state", "data": MATCH_STATE["scrim_state"]})
-        await websocket.send_json({"type": "render_jobs", "data": MATCH_STATE["render_jobs"]})
+        await websocket.send_json({"type": "render_jobs", "data": list(MATCH_STATE["render_jobs"])[-100:]})
         await websocket.send_json({"type": "social_config", "data": MATCH_STATE["social_config"]})
         await websocket.send_json({"type": "training_models", "data": MATCH_STATE["training_models"]})
 
@@ -186,16 +193,30 @@ class ConnectionManager:
         if websocket in self.active_connections:
             self.active_connections.remove(websocket)
 
+    async def _send_one(self, websocket: WebSocket, message: dict):
+        """Send to one client with a timeout; drop it on any failure.
+
+        A slow or dead client must never stall the fan-out to everyone else,
+        so every send is time-bounded. Any failure (timeout, disconnect,
+        socket error) disconnects the client — the same dead-client policy
+        the sequential loop had before.
+        """
+        try:
+            await asyncio.wait_for(websocket.send_json(message), timeout=2.0)
+        except Exception:
+            self.disconnect(websocket)
+
     async def broadcast(self, message: dict):
-        dead_connections = []
-        for connection in self.active_connections:
-            try:
-                await connection.send_json(message)
-            except Exception:
-                dead_connections.append(connection)
-        
-        for dead in dead_connections:
-            self.disconnect(dead)
+        # Concurrent fan-out (Phase 12 reliability): the old sequential loop
+        # let one slow client head-of-line block every other client. Sends now
+        # run concurrently with a 2s per-client timeout; dead clients are
+        # dropped while the rest always receive the message on time.
+        # Signature unchanged — all existing call sites keep working.
+        conns = list(self.active_connections)
+        await asyncio.gather(
+            *(self._send_one(ws, message) for ws in conns),
+            return_exceptions=True,
+        )
 
 manager = ConnectionManager()
 
@@ -320,7 +341,7 @@ async def handle_action(data: dict, user: Optional[TokenPayload] = None):
         job_id = str(uuid.uuid4())[:6]
         new_job = {"id": job_id, "title": f"Match 4 Recap — {fmt}", "status": "RENDERING", "progress": 0, "format": fmt}
         MATCH_STATE["render_jobs"].append(new_job)
-        await manager.broadcast({"type": "render_jobs", "data": MATCH_STATE["render_jobs"]})
+        await manager.broadcast({"type": "render_jobs", "data": list(MATCH_STATE["render_jobs"])})
         await manager.broadcast({"type": "action_ack", "data": {"action": "generate_recap", "status": "success", "job_id": job_id}})
         # Simulate progress
         asyncio.create_task(simulate_render_progress(job_id))
@@ -401,7 +422,7 @@ async def simulate_render_progress(job_id: str):
                 job["progress"] = progress
                 if progress >= 100:
                     job["status"] = "COMPLETED"
-        await manager.broadcast({"type": "render_jobs", "data": MATCH_STATE["render_jobs"]})
+        await manager.broadcast({"type": "render_jobs", "data": list(MATCH_STATE["render_jobs"])})
 
 async def simulate_node_restart(node_identifier: str):
     """Simulate a node restarting and coming back online."""
@@ -502,8 +523,6 @@ async def match_simulator():
         if commentary:
             comm_obj = {"timestamp": time.time(), "text": commentary, "type": event_type}
             MATCH_STATE["commentary_log"].append(comm_obj)
-            if len(MATCH_STATE["commentary_log"]) > 10:
-                MATCH_STATE["commentary_log"].pop(0)
             await manager.broadcast({"type": "commentary", "data": comm_obj})
 
         kill_event = {
@@ -525,8 +544,6 @@ async def match_simulator():
                     t["total_pts"] += 1
         
         MATCH_STATE["kill_feed"].append(kill_event)
-        if len(MATCH_STATE["kill_feed"]) > 10:
-            MATCH_STATE["kill_feed"].pop(0)
             
         MATCH_STATE["system_health"]["events_per_sec"] = random.randint(100, 150)
         MATCH_STATE["system_health"]["cpu_usage"] = random.randint(40, 60)
@@ -605,8 +622,6 @@ async def agent_chatter_simulator():
         }
         
         MATCH_STATE["agent_logs"].append(log_entry)
-        if len(MATCH_STATE["agent_logs"]) > 50:
-            MATCH_STATE["agent_logs"].pop(0)
         
         await manager.broadcast({"type": "agent_log", "data": log_entry})
 
@@ -812,6 +827,8 @@ app.include_router(match_point_router, prefix="/api/v1", tags=["Match Point"])
 app.include_router(zone_router, prefix="/api/v1", tags=["Zone"])
 app.include_router(rundown_router, prefix="/api/v1", tags=["Rundown"])
 app.include_router(pip_router, prefix="/api/v1", tags=["PiP"])
+# Phase 12: observer-team slot mapping.
+app.include_router(observers_router, prefix="/api/v1", tags=["Observers"])
 # Phase 11: analysis product.
 app.include_router(analysis_router, prefix="/api/v1", tags=["Analysis"])
 app.include_router(dossiers_router, prefix="/api/v1", tags=["Dossiers"])
@@ -1050,7 +1067,7 @@ async def get_standings():
 @app.get("/api/v1/analytics/kill_feed")
 @app.get("/api/v1/analytics/kill-feed")
 async def get_kill_feed():
-    return JSONResponse({"data": MATCH_STATE["kill_feed"]})
+    return JSONResponse({"data": list(MATCH_STATE["kill_feed"])})
 
 @app.get("/api/v1/analytics/summary")
 async def get_analytics_summary():
@@ -1104,7 +1121,7 @@ async def set_production_mode(request: Request, _user: TokenPayload = Depends(re
 
 @app.get("/api/v1/commentary/latest")
 async def get_latest_commentary():
-    return JSONResponse({"data": MATCH_STATE["commentary_log"]})
+    return JSONResponse({"data": list(MATCH_STATE["commentary_log"])})
 
 @app.get("/api/v1/highlights")
 async def get_highlights():
@@ -1135,7 +1152,7 @@ async def get_agent_assignments(_user: TokenPayload = Depends(require_admin)):
 
 @app.get("/api/v1/agent-logs")
 async def get_agent_logs(_user: TokenPayload = Depends(require_admin)):
-    return JSONResponse({"data": MATCH_STATE["agent_logs"]})
+    return JSONResponse({"data": list(MATCH_STATE["agent_logs"])})
 
 @app.post("/api/v1/scrims/start")
 async def start_scrim(request: Request, _user: TokenPayload = Depends(require_admin)):
@@ -1147,4 +1164,4 @@ async def start_scrim(request: Request, _user: TokenPayload = Depends(require_ad
 async def generate_recap(request: Request, _user: TokenPayload = Depends(require_admin)):
     data = await request.json()
     await handle_action({"action": "generate_recap", **data}, user=_user)
-    return JSONResponse({"status": "success", "jobs": MATCH_STATE["render_jobs"]})
+    return JSONResponse({"status": "success", "jobs": list(MATCH_STATE["render_jobs"])})

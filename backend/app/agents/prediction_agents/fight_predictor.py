@@ -592,6 +592,9 @@ class FightPredictor(BaseAgent):
     async def setup(self) -> None:
         """Subscribe to match events relevant to this agent."""
         self.subscribe_to_event("fight_detected")
+        # fight_ended closes the accuracy loop: each ended fight is matched
+        # against its active prediction in handle_event -> record_outcome.
+        self.subscribe_to_event("fight_ended")
 
     async def tick(self) -> None:
         """Periodic maintenance tick."""
@@ -603,14 +606,67 @@ class FightPredictor(BaseAgent):
 
         The heuristic engine is driven synchronously via direct method
         calls; this hook keeps match context current for future
-        event-driven use.
+        event-driven use, and closes the prediction-accuracy loop on
+        ``fight_ended`` events by recording the real outcome against the
+        active prediction for that fight.
         """
         try:
-            data = record.event.data if hasattr(record, "event") else {}
-            if isinstance(data, dict) and data.get("match_id"):
+            event = record.event if hasattr(record, "event") else None
+            event_type = getattr(event, "event_type", "") or ""
+            data = event.data if event is not None else {}
+            if not isinstance(data, dict):
+                data = {}
+
+            if data.get("match_id"):
                 self.config.match_id = data["match_id"]
+
+            if event_type == "fight_ended":
+                self._on_fight_ended_event(data)
         except Exception:
             pass
+
+    def _on_fight_ended_event(self, data: Dict[str, Any]) -> None:
+        """Record a real fight outcome for accuracy tracking.
+
+        Expected event data keys (tolerant of variants):
+          fight_id, winner_team_id (or winner_id/winner),
+          winner_team_name, outcome (a FightOutcome value, optional).
+        If no ``outcome`` is given it is derived from the winner vs the
+        active prediction's teams.
+        """
+        fight_id = data.get("fight_id") or data.get("id")
+        if not fight_id:
+            return
+
+        actual_winner = (
+            data.get("winner_team_id")
+            or data.get("winner_id")
+            or data.get("winner")
+            or ""
+        )
+
+        outcome = FightOutcome.TRADE  # fallback when nothing better is known
+        raw_outcome = data.get("outcome")
+        if raw_outcome:
+            try:
+                outcome = FightOutcome(str(raw_outcome))
+            except ValueError:
+                pass
+        else:
+            prediction = self.active_predictions.get(fight_id)
+            if prediction is not None and actual_winner:
+                if actual_winner == prediction.team_a_id:
+                    outcome = FightOutcome.TEAM_A_WIN
+                elif actual_winner == prediction.team_b_id:
+                    outcome = FightOutcome.TEAM_B_WIN
+                else:
+                    outcome = FightOutcome.THIRD_PARTY
+
+        self.record_outcome(
+            fight_id=str(fight_id),
+            actual_winner=str(actual_winner),
+            actual_outcome=outcome,
+        )
 
     async def cleanup(self) -> None:
         """Release agent resources."""
