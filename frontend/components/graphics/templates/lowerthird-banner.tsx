@@ -17,6 +17,7 @@ export default function LowerThirdBanner({
   subtitle,
   status,
   animKey,
+  positionClass,
 }: LowerThirdProps) {
   const { phase, content } = useExitingContent(visible && subtitle !== '', {
     title,
@@ -30,7 +31,7 @@ export default function LowerThirdBanner({
   return (
     <div
       key={animKey}
-      className={`absolute left-0 right-0 top-0 ${
+      className={`absolute ${positionClass ?? 'left-0 right-0 top-0'} ${
         phase === 'exit' ? 'gfx-anim-slide-out-up' : 'gfx-anim-drop-in'
       }`}
     >

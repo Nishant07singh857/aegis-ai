@@ -16,6 +16,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import Link from "next/link";
 import { useAuth } from "@/lib/auth";
 import { apiFetch } from "@/lib/api";
 import { useLiveSocket } from "@/lib/useLiveSocket";
@@ -278,6 +279,26 @@ function ControlRoomInner() {
           </div>
           <Badge tone="amber">INTERNAL — NOT ON STREAM</Badge>
         </div>
+        <nav className="flex flex-wrap gap-2 text-sm" aria-label="Control pages">
+          <Link
+            href="/control/match-strip"
+            className="rounded border border-cyan-800 bg-cyan-950/40 px-3 py-1.5 text-cyan-200 hover:border-cyan-500"
+          >
+            Match strip →
+          </Link>
+          <Link
+            href="/control/rundown"
+            className="rounded border border-zinc-700 px-3 py-1.5 text-zinc-300 hover:border-cyan-500"
+          >
+            Rundown →
+          </Link>
+          <Link
+            href="/control/observers"
+            className="rounded border border-zinc-700 px-3 py-1.5 text-zinc-300 hover:border-cyan-500"
+          >
+            Observers →
+          </Link>
+        </nav>
 
         <StreamControl token={token} onSessionExpired={handleExpired} />
 

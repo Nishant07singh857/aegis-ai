@@ -9,6 +9,7 @@ from .storyline_builder import StorylineBuilder, Storyline, StoryArc
 from .rivalry_tracker import RivalryTracker, Rivalry, RivalryLevel
 from .comeback_detector import ComebackDetector, ComebackStory
 from .documentary_generator import DocumentaryGenerator, DocumentaryScript
+from .storyteller import StorytellerAgent, StoryType, StoryDataProvider
 
 __all__ = [
     "StorylineBuilder",
@@ -21,4 +22,7 @@ __all__ = [
     "ComebackStory",
     "DocumentaryGenerator",
     "DocumentaryScript",
+    "StorytellerAgent",
+    "StoryType",
+    "StoryDataProvider",
 ]

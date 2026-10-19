@@ -89,7 +89,20 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 DIRECTOR_MODES = ("full_auto", "semi_auto", "manual")
-DIRECTOR_SCENES = ("main", "standings", "killfeed_focus", "commentary")
+# Phase 18 (W3): "map_cam" is the tactical-overview scene measured in the
+# Visual Broadcast Bible §2 (map cam + 2x2 facecams + persistent team panel).
+# It is a valid scene for operator selection (MANUAL), AI system_publish
+# (FULL_AUTO) and AI suggestions (SEMI_AUTO) — and it is the only scene
+# with a hard maximum hold (see MAP_CAM_MAX_HOLD_SECONDS).
+DIRECTOR_SCENES = ("main", "standings", "killfeed_focus", "commentary", "map_cam")
+
+#: Visual Broadcast Bible §2 (map cam rules): map cam is used for 15-30
+#: seconds at a time, then a hard cut back to action. The director
+#: enforces the 30s maximum in every mode — see enforce_scene_holds().
+#: The 15s figure is the observed typical hold, not a lock: if a fight
+#: starts, the director cuts back to gameplay immediately (Bible §3).
+MAP_CAM_SCENE = "map_cam"
+MAP_CAM_MAX_HOLD_SECONDS = 30.0
 
 #: Graphics template ids per graphics type (Phase 8). These ids are the
 #: contract with the frontend team — the graphics template gallery and the
@@ -176,9 +189,17 @@ def _default_state() -> Dict[str, Any]:
     return {
         "mode": "full_auto",
         "scene": "main",
+        # Phase 18 (W3): ISO timestamp of the last scene change. Drives the
+        # map-cam 30s maximum hold (enforce_scene_holds) and the frontend
+        # auto-return countdown. Stamped only when the scene actually
+        # changes, so re-publishing the same scene never extends the hold.
+        "scene_entered_at": _utcnow_iso(),
         "overlays": {"scorebug": True, "killfeed": True},
         "lower_third": {"visible": False, "title": "", "subtitle": ""},
         "graphics": dict(GRAPHICS_TEMPLATE_DEFAULTS),
+        # Phase 17 W2: active observer camera slot (1..16) driving the
+        # broadcast output video layer (GET /api/v1/video/feed/{slot}).
+        "active_camera": 1,
         "updated_by": None,
         "updated_at": _utcnow_iso(),
     }
@@ -207,6 +228,26 @@ def _validate_scene(scene: str) -> str:
             f"{', '.join(DIRECTOR_SCENES)}."
         )
     return scene
+
+
+#: Observer camera slots on the broadcast video layer.
+MAX_CAMERA_SLOT = 16
+
+
+def _validate_camera(slot: object) -> int:
+    """Validate an observer camera slot (Phase 17 W2)."""
+    try:
+        n = int(slot)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        raise ValueError(
+            f"Invalid camera slot {slot!r}: must be an integer "
+            f"1..{MAX_CAMERA_SLOT}."
+        )
+    if not 1 <= n <= MAX_CAMERA_SLOT:
+        raise ValueError(
+            f"Invalid camera slot {n}: must be 1..{MAX_CAMERA_SLOT}."
+        )
+    return n
 
 
 def _validate_graphics_template(template_type: str, template_id: str) -> str:
@@ -319,6 +360,24 @@ class DirectorService:
                 "via POST /api/v1/director/mode {\"mode\": \"manual\"}."
             )
 
+    async def set_camera(
+        self, slot: object, updated_by: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """Operator camera select (Phase 17 W2). Rejected unless MANUAL mode.
+
+        Switches the active observer camera shown on the broadcast output
+        video layer (GET /api/v1/video/feed/{slot}).
+        """
+        slot = _validate_camera(slot)
+        async with self._lock:
+            self._require_manual()
+            self._state["active_camera"] = slot
+            self._state["updated_by"] = updated_by
+            self._state["updated_at"] = _utcnow_iso()
+            state = copy.deepcopy(self._state)
+        await self._broadcast({"type": WS_MESSAGE_TYPE, "data": state})
+        return state
+
     async def set_scene(
         self, scene: str, updated_by: Optional[str] = None
     ) -> Dict[str, Any]:
@@ -326,9 +385,7 @@ class DirectorService:
         scene = _validate_scene(scene)
         async with self._lock:
             self._require_manual()
-            self._state["scene"] = scene
-            self._state["updated_by"] = updated_by
-            self._state["updated_at"] = _utcnow_iso()
+            self._apply_scene(scene, updated_by)
             state = copy.deepcopy(self._state)
         await self._broadcast({"type": WS_MESSAGE_TYPE, "data": state})
         return state
@@ -434,6 +491,7 @@ class DirectorService:
         self,
         scene: Optional[str] = None,
         overlays: Optional[Dict[str, bool]] = None,
+        active_camera: Optional[object] = None,
         updated_by: str = "system",
     ) -> Dict[str, Any]:
         """Publish a system/AI director decision.
@@ -443,6 +501,9 @@ class DirectorService:
         (in SEMI_AUTO the AI proposes suggestions instead of writing).
         Broadcasts only when the visible state actually changed (no WS
         spam for no-op ticks).
+
+        ``active_camera`` (Phase 17 W2) lets the AI switch observer
+        cameras in FULL_AUTO; validated as an integer slot 1..16.
 
         Returns ``{"changed": bool, "state": <snapshot>}``.
         """
@@ -454,18 +515,24 @@ class DirectorService:
                     raise ValueError(
                         f"Unknown overlay {key!r}: must be 'scorebug'/'killfeed'."
                     )
+        camera: Optional[int] = None
+        if active_camera is not None:
+            camera = _validate_camera(active_camera)
         async with self._lock:
             if self._state["mode"] != "full_auto":
                 return {"changed": False, "state": copy.deepcopy(self._state)}
             changed = False
             if scene is not None and scene != self._state["scene"]:
-                self._state["scene"] = scene
+                self._apply_scene(scene, updated_by)
                 changed = True
             if overlays:
                 for key, value in overlays.items():
                     if bool(value) != self._state["overlays"][key]:
                         self._state["overlays"][key] = bool(value)
                         changed = True
+            if camera is not None and camera != self._state.get("active_camera"):
+                self._state["active_camera"] = camera
+                changed = True
             if not changed:
                 return {"changed": False, "state": copy.deepcopy(self._state)}
             self._state["updated_by"] = updated_by
@@ -597,6 +664,40 @@ class DirectorService:
         await self._broadcast({"type": WS_SUGGESTION_TYPE, "data": outgoing})
         return outgoing
 
+    # ── scene hold enforcement (Phase 18, W3) ────────────────────
+
+    async def enforce_scene_holds(self) -> bool:
+        """Enforce the map-cam maximum hold (Visual Broadcast Bible §2).
+
+        When the current scene is ``map_cam`` and it has been on air for
+        >= :data:`MAP_CAM_MAX_HOLD_SECONDS`, the director hard-cuts back
+        to the ``main`` (gameplay) scene and broadcasts the change. Works
+        in every director mode — FULL_AUTO included — because the Bible
+        rule is unconditional: map cam is a 15-30s tactical beat, never a
+        resting state.
+
+        Safe to call on any cadence (background ticker, REST reads): it is
+        a no-op unless the hold has actually expired. Returns True when a
+        revert happened.
+        """
+        async with self._lock:
+            elapsed = self._map_cam_hold_elapsed()
+            if elapsed is None or elapsed < MAP_CAM_MAX_HOLD_SECONDS:
+                return False
+            self._apply_scene("main", updated_by="director:auto-mapcam-timeout")
+            state = copy.deepcopy(self._state)
+        await self._broadcast({"type": WS_MESSAGE_TYPE, "data": state})
+        return True
+
+    def map_cam_hold_remaining(self) -> Optional[float]:
+        """Seconds left before the map-cam hold expires, or None when the
+        current scene is not map_cam. Pure read (no lock needed beyond the
+        GIL for this in-memory state)."""
+        elapsed = self._map_cam_hold_elapsed()
+        if elapsed is None:
+            return None
+        return max(0.0, MAP_CAM_MAX_HOLD_SECONDS - elapsed)
+
     # ── internals ───────────────────────────────────────────────
 
     def _pending_or_raise(self, suggestion_id: str) -> Dict[str, Any]:
@@ -648,6 +749,33 @@ class DirectorService:
                 break  # only pending left; keep them all
             del self._suggestions[oldest_id]
 
+    def _apply_scene(self, scene: str, updated_by: Optional[str]) -> None:
+        """Scene mutation shared by operator writes, system publishes and
+        suggestion approvals. Callers must hold the lock.
+
+        ``scene_entered_at`` is stamped only when the scene actually
+        changes: re-publishing the current scene (e.g. a repeated AI tick)
+        never extends a hold — this is what makes the map-cam 30s maximum
+        airtight.
+        """
+        if scene != self._state.get("scene"):
+            self._state["scene"] = scene
+            self._state["scene_entered_at"] = _utcnow_iso()
+        self._state["updated_by"] = updated_by
+        self._state["updated_at"] = _utcnow_iso()
+
+    def _map_cam_hold_elapsed(self) -> Optional[float]:
+        """Seconds since the current scene was entered, or None when the
+        current scene is not map_cam. Malformed stamps fail closed (treated
+        as expired so the hold can never run unbounded)."""
+        if self._state.get("scene") != MAP_CAM_SCENE:
+            return None
+        try:
+            entered = datetime.fromisoformat(self._state["scene_entered_at"])
+        except (ValueError, TypeError, KeyError):
+            return MAP_CAM_MAX_HOLD_SECONDS
+        return (_utcnow() - entered).total_seconds()
+
     def _payload_is_noop(
         self, suggestion_type: str, payload: Dict[str, Any]
     ) -> bool:
@@ -681,7 +809,7 @@ class DirectorService:
         MANUAL-mode gate. Callers must hold the lock.
         """
         if suggestion_type == "scene":
-            self._state["scene"] = payload["scene"]
+            self._apply_scene(payload["scene"], updated_by)
         elif suggestion_type == "overlay":
             self._state["overlays"][payload["overlay"]] = bool(
                 payload["visible"]

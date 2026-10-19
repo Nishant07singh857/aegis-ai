@@ -33,6 +33,10 @@
  * every fixed width / large type size below carries a `max-sm:` counterpart
  * that shrinks it for phone viewports (<640px). At sm:+ the classes are
  * untouched, so /broadcast/output (1920x1080 capture) renders identically.
+ *
+ * Video layer (Phase 17 W2): the game video behind the graphics is
+ * components/broadcast/game-video (MJPEG from GET /api/v1/video/feed/{slot},
+ * slot from director.state active_camera). Overlays render above it.
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -53,6 +57,18 @@ import { resolveTemplate } from '@/lib/graphics';
 import type { TemplateDef } from '@/lib/graphics';
 import type { ScorebugSummary } from '@/components/graphics/registry';
 import { OverlayRoot, ConnBadge, WaitingFeed } from '@/components/overlay-kit';
+import { GameVideo, type VideoLayerMode } from '@/components/broadcast/game-video';
+import { MapCamView } from '@/components/broadcast/map-cam-view';
+import {
+  GameTopBar,
+  GameKillfeed,
+  GameStandingsPanel,
+  FacecamBox,
+  PlayerPanel,
+  useObservedTeam,
+} from '@/components/broadcast/game-overlays';
+import { TopCenterStats } from '@/components/broadcast/top-center-stats';
+import { WwcdCards } from '@/components/graphics/animated';
 
 const KILL_MAX_VISIBLE = 8;
 const SUMMARY_POLL_MS = 15_000;
@@ -72,6 +88,12 @@ export interface DirectorOutputViewProps {
   hold?: number;
   /** Opaque branded backdrop instead of transparent. */
   brand?: boolean;
+  /**
+   * Video layer mode (Phase 17 W2): "real" streams the active observer's
+   * game feed (GET /api/v1/video/feed/{slot}); "simulator" streams a
+   * watermarked test pattern (output page ?video=sim).
+   */
+  video?: VideoLayerMode;
 }
 
 /** TTL-filtered kill list, newest first; re-renders every second so
@@ -100,12 +122,14 @@ function AutoLowerThird({
   accent,
   status,
   templateDef,
+  positionClass,
 }: {
   api: string;
   hold: number;
   accent: string;
   status: ConnStatus;
   templateDef: TemplateDef;
+  positionClass?: string;
 }) {
   const line = useLatestCommentary(api);
   const [visible, setVisible] = useState(false);
@@ -133,6 +157,7 @@ function AutoLowerThird({
       accent={accent}
       status={status}
       animKey={line ? String(line.timestamp) : 'standby'}
+      positionClass={positionClass}
     />
   );
 }
@@ -180,9 +205,17 @@ export function DirectorOutputView({
   ttl = 12,
   hold = 6,
   brand = false,
+  video = 'real',
 }: DirectorOutputViewProps) {
-  const { status, retryCount, reconnect, standings, killFeed, directorState } =
-    useLiveSocket(api);
+  const {
+    status,
+    retryCount,
+    reconnect,
+    standings,
+    killFeed,
+    directorState,
+    zone,
+  } = useLiveSocket(api);
   const { token } = useAuth();
   // Per-player stats for the player-leaderboard standings templates; []
   // until a game-stats feed records them (those templates render honestly).
@@ -236,11 +269,14 @@ export function DirectorOutputView({
 
   // Active graphics templates, from the director state (normalised, so
   // graphics is always present — pre-Phase-8 payloads get the defaults).
-  const scorebugDef = resolveTemplate('scorebug', null, effective);
+  // NOTE (Phase 18 W2): the always-on gameplay chrome (top bar, killfeed,
+  // standings panel, facecam, player panel) is Bible-fixed and rendered by
+  // the dedicated game-overlays components below — not via the template
+  // picker. The picked templates still drive the manual fullscreen scenes
+  // (standings, killfeed_focus) and the lower third.
   const killfeedDef = resolveTemplate('killfeed', null, effective);
   const standingsDef = resolveTemplate('standings', null, effective);
   const lowerThirdDef = resolveTemplate('lower-third', null, effective);
-  const ScorebugT = scorebugDef.component;
   const KillfeedT = killfeedDef.component;
   const StandingsT = standingsDef.component;
   const LowerThirdT = lowerThirdDef.component;
@@ -280,6 +316,46 @@ export function DirectorOutputView({
   const showScorebug = !manual || (effective?.overlays.scorebug ?? false);
   const showKillfeed = !manual || (effective?.overlays.killfeed ?? false);
   const scene = manual ? effective!.scene : 'main';
+  // Phase 18 (W3): the map-cam scene is honoured in EVERY director mode
+  // (full_auto included) — the backend hard-cuts it back to "main" after
+  // 30s max (Bible §2). Other scenes stay manual-only, as before.
+  const showMapCam = effective?.scene === 'map_cam';
+
+  // Active observer camera slot — drives the game video layer AND the
+  // facecam/player panel (Bible §3: the facecam switches simultaneously
+  // with the camera; both are keyed on this slot for a hard cut).
+  const slot = effective?.active_camera ?? 1;
+  // Slot → observed team, for the facecam + player panel identity
+  // (falls back to "CAM n" when the mapping is unavailable — never a
+  // guessed team or player).
+  const observedTeam = useObservedTeam(api, slot, token ?? undefined);
+  const observedColor = useMemo(
+    () =>
+      observedTeam?.teamId
+        ? standings.find((t) => t.id === observedTeam.teamId)?.color
+        : undefined,
+    [standings, observedTeam]
+  );
+
+  // Phase 20 (W1, G1): team colors for the WWCD% cards, from live standings.
+  const colorByTeam = useMemo(() => {
+    const m: Record<string, string> = {};
+    for (const t of standings) if (t.color) m[t.id] = t.color;
+    return m;
+  }, [standings]);
+
+  // Lower-third broadcast zone (Bible §1): the free strip x 13-34%,
+  // y 86-100% — clear of the facecam (x 0-12%) and the player panel
+  // (x 35-65%). The rise template's animation rests at translate(-50%),
+  // so it anchors at the strip's centre (23.5%); the banner drops below
+  // the top bar instead of overlapping it.
+  const LT_BROADCAST_POS: Record<string, string> = {
+    'lowerthird-slide': 'bottom-[1%] left-[13%] w-[21%]',
+    'lowerthird-rise': 'bottom-[1%] left-[23.5%] w-[21%]',
+    'lowerthird-banner': 'left-0 right-0 top-[4%]',
+  };
+  const lowerThirdPos =
+    LT_BROADCAST_POS[lowerThirdDef.id] ?? 'bottom-[1%] left-[13%] w-[21%]';
 
   return (
     <OverlayRoot accent={accent}>
@@ -299,32 +375,102 @@ export function DirectorOutputView({
 
       {!live ? (
         <WaitingFeed what="DIRECTOR FEED" />
+      ) : showMapCam ? (
+        /* Phase 18 (W3): map-cam scene (Bible §2) — honoured in EVERY
+           director mode. The tactical map is the background, so the game
+           video layer and gameplay chrome stay off; the view renders the
+           full Bible §2 frame: same top bar, minimap inset, persistent
+           team panel, 2x2 facecam grid, zone timer. */
+        <MapCamView
+          match={match}
+          standings={standings}
+          visibleKills={visibleKills}
+          players={players}
+          zone={zone}
+          summary={summary}
+          sceneEnteredAt={effective?.scene_entered_at ?? ''}
+          onHoldExpired={() => {
+            // The 30s hold expired: re-poll director state. The backend
+            // enforces the hard cut on this read (and its 5s ticker
+            // broadcasts it), so the view lands back on gameplay promptly
+            // even if the WS frame was missed.
+            void loadState();
+          }}
+        />
       ) : (
         <>
+          {/* Phase 17 W2: game video layer at the back (z-0, first in DOM).
+              The camera slot follows director.state active_camera; all
+              graphics overlays below render above it. */}
+          <GameVideo api={api} slot={slot} mode={video} />
+
+          {/* Bible §1 top bar: y 0-4%, x 0-100% thin dark strip. */}
           {showScorebug && (
-            <ScorebugT
+            <GameTopBar
               standings={standings}
               summary={summary}
-              accent={accent}
-              status={status}
               matchLabel={match}
             />
           )}
 
-          {/* kill ticker: in the killfeed_focus scene it is replaced by the
-              focused feed (no duplication). The template is only mounted
-              while there are visible kills — an empty killfeed is normal,
-              not a feed failure, so it renders nothing instead of a
-              "waiting" state. */}
-          {showKillfeed &&
-            scene !== 'killfeed_focus' &&
-            visibleKills.length > 0 && (
-              <KillfeedT
-                events={visibleKills}
-                accent={accent}
-                status={status}
-              />
-            )}
+          {/* Phase 20 (W1): top-center column (Bible V2 §1c). The PMGO
+              slot India leaves empty — WWCD% prediction cards (G1) stacked
+              with the PMGC-style observed-team stat card (G2), keyed on
+              the camera slot so an observer switch hard-cuts the stat
+              card (Bible §3). Both are data-driven and honest: no feed
+              value renders as "—", never invented. */}
+          <div className="absolute left-1/2 top-[4.5%] z-20 flex w-[min(480px,44vw)] -translate-x-1/2 flex-col gap-1.5 max-sm:w-[88vw]">
+            <WwcdCards
+              api={api}
+              token={token ?? undefined}
+              colorByTeam={colorByTeam}
+            />
+            <TopCenterStats
+              key={slot}
+              slot={slot}
+              teamId={observedTeam?.teamId ?? null}
+              teamName={observedTeam?.teamName ?? null}
+              teamColor={observedColor}
+              standings={standings}
+              players={players}
+            />
+          </div>
+
+          {/* Bible §1 killfeed: x 0-18%, y 4-20%, max 4 entries, newest
+              first, ~5s fade. In the killfeed_focus scene it is replaced
+              by the focused feed (no duplication). The component renders
+              nothing while the feed is quiet — an empty killfeed is
+              normal, not a feed failure. */}
+          {showKillfeed && scene !== 'killfeed_focus' && visibleKills.length > 0 && (
+            <GameKillfeed events={visibleKills} />
+          )}
+
+          {/* Bible §1 + §9 rule #1: the team standings panel is ALWAYS
+              visible during gameplay (x 84-100%, y 8-95%). It takes no
+              visibility props and has no hide path — no mode change,
+              camera switch, scene or overlay toggle can remove it. It
+              stays up even in the manual fullscreen scenes. */}
+          <GameStandingsPanel standings={standings} summary={summary} />
+
+          {/* Bible §1 facecam: x 0-12%, y 82-100%, label above. Keyed on
+              the camera slot so it hard-cuts simultaneously with the game
+              video when the director switches camera. Honest placeholder
+              until a real facecam feed exists — never a fake video. */}
+          <FacecamBox
+            key={slot}
+            slot={slot}
+            teamName={observedTeam?.teamName ?? null}
+            matchLabel={match}
+          />
+
+          {/* Bible §1 player panel: x 35-65%, y 86-100%. Anchored on the
+              observed team (real data); player-level fields render "—"
+              until a feed supplies them. */}
+          <PlayerPanel
+            slot={slot}
+            teamTag={observedTeam?.teamName ?? null}
+            teamColor={observedColor}
+          />
 
           {/* manual scene centerpieces */}
           {manual && scene === 'standings' && (
@@ -345,7 +491,9 @@ export function DirectorOutputView({
           )}
           {manual && scene === 'commentary' && <CommentaryFocus api={api} />}
 
-          {/* lower third */}
+          {/* lower third: confined to the Bible-free strip (x 13-34%,
+              y 86-100%) via positionClass — clear of the facecam and the
+              player panel. */}
           {manual ? (
             effective!.lower_third.visible ? (
               <LowerThirdT
@@ -355,6 +503,7 @@ export function DirectorOutputView({
                 accent={accent}
                 status={status}
                 animKey={`${effective!.lower_third.title}-${effective!.lower_third.subtitle}`}
+                positionClass={lowerThirdPos}
               />
             ) : null
           ) : (
@@ -364,12 +513,15 @@ export function DirectorOutputView({
               accent={accent}
               status={status}
               templateDef={lowerThirdDef}
+              positionClass={lowerThirdPos}
             />
           )}
 
-          {/* director-mode marker: confirms the operator's scene is live */}
+          {/* director-mode marker: confirms the operator's scene is live.
+              Bottom-right, below the standings panel (ends at y 95%) — the
+              old top-left spot overlapped the Bible top bar / killfeed. */}
           {manual && (
-            <div className="absolute left-5 top-5 rounded bg-black/50 px-3 py-1.5 font-mono text-[10px] tracking-[0.25em] text-white/40">
+            <div className="absolute bottom-2 right-4 z-30 rounded bg-black/50 px-3 py-1.5 font-mono text-[10px] tracking-[0.25em] text-white/40">
               MANUAL · {SCENE_LABELS[scene].toUpperCase()}
             </div>
           )}

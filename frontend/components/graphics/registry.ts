@@ -65,6 +65,13 @@ export interface LowerThirdProps {
   status: ConnStatus;
   /** Key that changes when a new line arrives (re-triggers the animation). */
   animKey?: string;
+  /**
+   * Optional position override (Phase 18 W2): replaces the template's
+   * default absolute-position fragment, e.g. to confine the card to a
+   * Bible-safe zone on the broadcast output page. Absent = the
+   * template's own position (gallery / overlay pages unchanged).
+   */
+  positionClass?: string;
 }
 
 /**

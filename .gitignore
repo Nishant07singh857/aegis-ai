@@ -33,3 +33,7 @@ backend/tests/fixtures/sample_videos/
 
 # Runtime log files (written on every backend run — never commit)
 backend/data/logs/
+
+# W3 audio pipeline — runtime artifacts (never commit)
+.local-voices/
+audio_out/

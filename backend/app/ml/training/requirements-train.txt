@@ -1,0 +1,27 @@
+# backend/app/ml/training/requirements-train.txt
+# AEGIS AI — kill-feed training requirements.
+# Pinned set verified to install and work together (Oct 2026).
+#
+# COLAB (free T4 GPU):
+#     pip install -r backend/app/ml/training/requirements-train.txt
+# The torch/torchvision wheels from PyPI bundle CUDA support, so Colab's
+# T4 is picked up automatically. Colab often pre-installs torch already;
+# re-running this file just pins it to the tested versions.
+#
+# CPU-ONLY machine (smoke test, ONNX export verification):
+#     pip install --extra-index-url https://download.pytorch.org/whl/cpu torch torchvision
+#     pip install -r backend/app/ml/training/requirements-train.txt
+# (installing torch+torchvision from the CPU index first avoids the ~2.5 GB
+# CUDA bundle that the PyPI wheels would otherwise pull in.)
+
+torch==2.14.1
+torchvision==0.29.1
+ultralytics==8.4.182
+onnx==1.23.2
+onnxruntime==1.31.0
+onnxsim==0.8.1
+opencv-python-headless==5.0.0.93
+numpy==2.5.4
+pandas==3.0.6
+pillow==13.0.0
+pyyaml==6.0.3

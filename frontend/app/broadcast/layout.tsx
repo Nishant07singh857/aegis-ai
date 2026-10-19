@@ -10,6 +10,7 @@ import type { ReactNode } from 'react';
  */
 
 import '@/components/graphics/graphics.css';
+import '@/components/graphics/animated/animated.css';
 
 export default function BroadcastLayout({
   children,

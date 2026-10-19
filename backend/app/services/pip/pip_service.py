@@ -28,6 +28,14 @@ Broadcasting mirrors the director service (``app/services/director_service.py``)
   When the bus isn't connected (``event_bus._running`` is False) the publish
   is skipped — the listener fan-out still reaches live clients.
 
+Visual Broadcast Bible §4 (docs/VISUAL_BROADCAST_BIBLE.md): Krafton NEVER
+uses PiP for simultaneous fights — they pick ONE fight and commit, and the
+other fight is missed live. The SOURCES keyspace below deliberately
+contains NO fight feed, so fight+fight PiP is unreachable by construction;
+PiP is for map+gameplay (and standings/killfeed/commentary) only. The
+director AI never writes to this service — no director mode
+(full_auto/semi_auto/manual) can route a second live fight to PiP.
+
 Zero paid APIs, no secrets, no placeholders.
 """
 
@@ -51,6 +59,10 @@ INSET_POSITIONS = ("top_left", "top_right", "bottom_left", "bottom_right")
 #: Legal source keys for the main / inset slots. These are *keys* the
 #: frontend maps to real views; "output" means the main director output
 #: view (whatever the director is currently showing).
+#:
+#: Visual Broadcast Bible §4: the keyspace deliberately contains NO fight
+#: feed — PiP is map+gameplay only (fight+fight PiP is unreachable by
+#: construction; see the module docstring).
 SOURCES = ("output", "map-cam", "standings", "killfeed", "commentary")
 
 #: Signature of a broadcast listener: async callable taking the message dict.

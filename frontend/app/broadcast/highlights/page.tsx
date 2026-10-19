@@ -21,6 +21,7 @@
  */
 
 import { useCallback, useEffect, useState } from "react";
+import Link from "next/link";
 import { apiFetch } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { RequireRole } from "@/lib/guard";
@@ -167,6 +168,15 @@ function HighlightsPageInner() {
             <p className="mt-1 text-sm text-zinc-400">
               Top scored moments from the replay buffer — event replay, not
               video. Scores are 0–100 with the detection reason shown.
+            </p>
+            <p className="mt-1 text-sm text-zinc-500">
+              Whole day instead?{" "}
+              <Link
+                href="/broadcast/day-reel"
+                className="text-cyan-300 underline hover:text-cyan-200"
+              >
+                Open the day reel →
+              </Link>
             </p>
           </div>
           <button

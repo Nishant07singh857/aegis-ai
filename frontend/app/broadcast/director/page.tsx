@@ -9,6 +9,8 @@
  *   - 3-way mode selector: Full Auto / Semi-Auto / Manual (always enabled)
  *   - scene buttons: Main / Standings / Killfeed focus / Commentary
  *     (MANUAL mode only)
+ *   - camera buttons: CAM 1..16 observer slot on the program feed
+ *     (MANUAL mode only; Phase 17 W2)
  *   - overlay toggles: scorebug, killfeed (MANUAL mode only)
  *   - lower-third composer: title + subtitle, Show/Hide (MANUAL mode only)
  *   - graphics template picker: per-type template buttons
@@ -48,10 +50,13 @@ import {
   postDirectorMode,
   postDirectorOverlays,
   postDirectorScene,
+  postDirectorCamera,
   rejectDirectorSuggestion,
   setGraphics,
   suggestionExpiresIn,
 } from "@/lib/director";
+import { AudioMixer } from "./components/AudioMixer";
+import { StorytellingPanel } from "./components/StorytellingPanel";
 import type {
   DirectorGraphics,
   DirectorMode,
@@ -464,6 +469,51 @@ function DirectorConsoleInner() {
             </div>
           </Card>
 
+          {/* camera (Phase 17 W2): which observer slot is on the program feed */}
+          <Card
+            title="Camera"
+            action={
+              manual ? (
+                <Badge tone="green">Manual control</Badge>
+              ) : (
+                <Badge tone="slate">
+                  {semiAuto ? "Approve suggestions" : "Locked in Full Auto"}
+                </Badge>
+              )
+            }
+          >
+            <p className="mb-3 text-xs text-white/50">
+              Switches the game video on the broadcast output
+              (GET /api/v1/video/feed/{`{slot}`}). The on-air selection is
+              kept in sync with the video service.
+            </p>
+            <div className="grid grid-cols-4 gap-2 sm:grid-cols-8">
+              {Array.from({ length: 16 }, (_, i) => i + 1).map((slot) => {
+                const active = state.active_camera === slot;
+                return (
+                  <button
+                    key={slot}
+                    type="button"
+                    disabled={controlsDisabled}
+                    onClick={() =>
+                      void run(`camera-${slot}`, () =>
+                        postDirectorCamera(token, slot)
+                      )
+                    }
+                    aria-pressed={active}
+                    className={`rounded-lg border px-3 py-3 font-mono text-sm font-bold transition-all ${
+                      active
+                        ? "border-[#00f0ff] bg-[#00f0ff]/15 text-[#00f0ff]"
+                        : "border-white/10 bg-white/5 text-white/55 hover:border-white/25 hover:text-white/85"
+                    } disabled:cursor-not-allowed disabled:opacity-40`}
+                  >
+                    {busy === `camera-${slot}` ? "…" : `CAM ${slot}`}
+                  </button>
+                );
+              })}
+            </div>
+          </Card>
+
           {/* overlays */}
           <Card
             title="Overlays"
@@ -683,6 +733,14 @@ function DirectorConsoleInner() {
               onRetry={() => setActionError(null)}
             />
           )}
+
+          {/* audio mixer (W3): commentary TTS, game audio, volumes, mute */}
+          <AudioMixer token={token} />
+
+          {/* AI storytelling (Phase 19 W3): story graphics control.
+              director|admin get full trigger control; operator sees a
+              read-only preview; other roles never render the panel. */}
+          <StorytellingPanel token={token} />
 
           {/* current state summary */}
           <Card title="Current state">

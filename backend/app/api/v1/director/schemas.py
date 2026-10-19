@@ -35,6 +35,9 @@ class DirectorScene(str, enum.Enum):
     STANDINGS = "standings"
     KILLFEED_FOCUS = "killfeed_focus"
     COMMENTARY = "commentary"
+    # Phase 18 (W3): tactical map-cam overview (Visual Broadcast Bible §2).
+    # 15-30s holds; the director auto-returns to "main" after 30s max.
+    MAP_CAM = "map_cam"
 
 
 class SuggestionType(str, enum.Enum):
@@ -71,6 +74,19 @@ class SceneRequest(BaseModel):
         ...,
         description='Output scene: "main", "standings", "killfeed_focus" '
         'or "commentary". MANUAL mode only.',
+    )
+
+
+class CameraRequest(BaseModel):
+    """Phase 17 W2: switch the active observer camera (operator, MANUAL)."""
+
+    slot: int = Field(
+        ...,
+        ge=1,
+        le=16,
+        description="Observer camera slot 1..16 shown on the broadcast "
+        "output video layer (GET /api/v1/video/feed/{slot}). MANUAL mode "
+        "only.",
     )
 
 
@@ -182,9 +198,24 @@ class DirectorGraphics(BaseModel):
 class DirectorState(BaseModel):
     mode: str
     scene: str
+    # Phase 18 (W3): ISO timestamp of the last scene change; drives the
+    # map-cam 30s maximum hold and the frontend auto-return countdown.
+    scene_entered_at: str = Field(
+        default="",
+        description="ISO timestamp of the last scene change.",
+    )
     overlays: DirectorOverlays
     lower_third: DirectorLowerThird
     graphics: DirectorGraphics
+    # Phase 17 W2: active observer camera slot (1..16) for the broadcast
+    # output video layer (GET /api/v1/video/feed/{slot}).
+    active_camera: int = Field(
+        default=1,
+        ge=1,
+        le=16,
+        description="Active observer camera slot (1..16) shown on the "
+        "broadcast output video layer.",
+    )
     updated_by: Optional[str] = None
     updated_at: str
 

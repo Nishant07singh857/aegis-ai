@@ -10,6 +10,12 @@
  * (components/graphics-staging/pip-layout.tsx) with the schematic map cam
  * in the inset and the main director output slot.
  *
+ * Visual Broadcast Bible §4: Krafton never uses PiP for simultaneous
+ * fights, so this page is map+gameplay only — the backend PiP service
+ * source keyspace contains no fight feed, which keeps fight+fight PiP
+ * unreachable by construction. No camera transitions here either (§3.2):
+ * the PiP slots swap instantly when the backend state changes.
+ *
  * Layout state comes from the backend PiP service:
  *   GET  /api/v1/pip/state        (initial snapshot; needs a token)
  *   WS   /ws/live  "pip.state"    (live updates — passive WS subscription
@@ -47,7 +53,7 @@ const DEFAULT_PIP: PiPStateFrame = {
 function SourceView({ source, label }: { source: string; label: string }) {
   if (source === 'map-cam') {
     // No live position feed exists yet — MapCam renders its honest standby.
-    return <MapCam map="erangel" positions={[]} className="h-full w-full" />;
+    return <MapCam map="erangel" positions={[]} className="h-full w-full rounded-lg" />;
   }
   if (source === 'output') {
     return (

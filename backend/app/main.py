@@ -48,6 +48,16 @@ from app.api.v1.rundown import router as rundown_router
 from app.api.v1.pip import router as pip_router
 # Phase 12: observer-team slot mapping (operator-gated writes; authenticated reads).
 from app.api.v1.observers import router as observers_router
+# Phase 17 (W4): video feed status / on-air selection (observer ingest).
+from app.api.v1.audio.router import router as audio_router
+# Phase 19: AI storyteller (director-gated generation, broadcast trigger).
+from app.api.v1.stories.router import router as stories_router
+# Phase 20: Global Predictive — live WWCD% prediction cards.
+from app.api.v1.predictions.router import router as predictions_router
+from app.api.v1.video.router import (
+    router as video_router,
+    multi_device_manager,
+)
 # Phase 11: team analysis product (rotations/drops/zones + dossiers/PDF reports).
 from app.analysis.router import router as analysis_router
 from app.dossiers.router import router as dossiers_router
@@ -271,6 +281,7 @@ director_engine = DirectorAIEngine()
 commentary_engine = get_commentary_engine()
 simulation_task = None
 chatter_task = None
+director_hold_task = None
 
 
 def _active_agent_count() -> int:
@@ -823,6 +834,8 @@ async def lifespan(app: FastAPI):
     zone_service.add_listener(manager.broadcast)
     rundown_service.add_listener(manager.broadcast)
     pip_service.add_listener(manager.broadcast)
+    # Phase 17 (W4): fan video.feeds / video.on_air over /ws/live.
+    multi_device_manager.add_listener(manager.broadcast)
     await _seed_first_admin()
         
     try:
@@ -851,7 +864,22 @@ async def lifespan(app: FastAPI):
     # (Redis-backed, standalone fallback when Redis is unreachable).
     await node_registry.start(agent_count_provider=_active_agent_count)
         
-    global simulation_task, chatter_task
+    global simulation_task, chatter_task, director_hold_task
+    # Phase 18 (W3): background ticker enforcing the map-cam 30s maximum
+    # hold (Visual Broadcast Bible §2) in every director mode. The ticker
+    # calls director_service.enforce_scene_holds() every 5s; on expiry the
+    # service hard-cuts back to "main" and broadcasts director.state, so
+    # all WS clients (incl. the OBS capture page) cut within ~5s of the
+    # deadline even when nobody is polling.
+    async def _director_scene_hold_enforcer() -> None:
+        try:
+            while True:
+                await asyncio.sleep(5)
+                await director_service.enforce_scene_holds()
+        except asyncio.CancelledError:
+            pass
+
+    director_hold_task = asyncio.create_task(_director_scene_hold_enforcer())
     # Phase 13: the demo simulators broadcast hardcoded squad names into the
     # live WS frames (kill feed, standings, director state, agent logs), so
     # they run ONLY with explicit DEMO_MODE=1. Default: disabled — the honest
@@ -874,6 +902,8 @@ async def lifespan(app: FastAPI):
         simulation_task.cancel()
     if chatter_task:
         chatter_task.cancel()
+    if director_hold_task:
+        director_hold_task.cancel()
     try:
         await event_bus.disconnect()
     except Exception:
@@ -938,6 +968,16 @@ app.include_router(analysis_router, prefix="/api/v1", tags=["Analysis"])
 app.include_router(dossiers_router, prefix="/api/v1", tags=["Dossiers"])
 # Phase 16: tournament-scoped user management (admin-only).
 app.include_router(users_router, prefix="/api/v1", tags=["Users"])
+# Phase 17 (W4): video feed status / thumbnails / on-air selection.
+# Phase 17 W2: the same router also serves the MJPEG program feed
+# GET /api/v1/video/feed/{slot} for the broadcast output video layer.
+app.include_router(video_router, prefix="/api/v1", tags=["Video"])
+# W3: broadcast audio pipeline — TTS commentary, game audio, mixer.
+app.include_router(audio_router, prefix="/api/v1", tags=["Audio"])
+# Phase 19: AI storyteller — data stories for broadcast graphics.
+app.include_router(stories_router, prefix="/api/v1", tags=["Stories"])
+# Phase 20: Global Predictive — live WWCD% prediction cards (30s cadence).
+app.include_router(predictions_router, prefix="/api/v1", tags=["Predictions"])
 
 @app.get("/")
 async def root():

@@ -41,15 +41,41 @@ export interface TeamPosition {
   alive_count: number;
 }
 
+/**
+ * Real zone-circle geometry (Phase 18, W3). Normalised 0–100 like team
+ * positions. The circle is drawn ONLY from this prop — when it is null
+ * no circle is rendered and the parent shows the zone phase + timer
+ * (real data) with an honest "zone geometry unavailable" note. Zone
+ * geometry is never invented: today the zone service exposes phases and
+ * the countdown only; geometry arrives when a live observer/vision feed
+ * provides it (see the file header contract).
+ */
+export interface ZoneGeometry {
+  cx: number;
+  cy: number;
+  /** Radius in the same 0–100 normalised units. */
+  r: number;
+}
+
 export interface MapCamProps {
   map: MapId;
   positions: TeamPosition[];
   className?: string;
+  /** Real safe-zone circle geometry; null = not drawn (never invented). */
+  zone?: ZoneGeometry | null;
+  /** Real next-zone circle geometry; null = not drawn. */
+  nextZone?: ZoneGeometry | null;
+  /**
+   * viewBox override for zoomed insets (e.g. the Bible's top-right
+   * minimap: "40 30 45 45"). Defaults to the full "0 0 100 100" frame.
+   */
+  viewBox?: string;
 }
 
 /** Marker colours, assigned deterministically from team_id (presentation
- *  only — not data). */
-const MARKER_PALETTE = [
+ *  only — not data). Exported so the map-cam side panel and facecam grid
+ *  use the same team colours as the map markers. */
+export const MARKER_PALETTE = [
   '#ff0055',
   '#00ffcc',
   '#ffcc00',
@@ -68,7 +94,7 @@ const MARKER_PALETTE = [
   '#60a5fa',
 ];
 
-function markerColor(teamId: string): string {
+export function markerColor(teamId: string): string {
   let hash = 0;
   for (let i = 0; i < teamId.length; i += 1) {
     hash = (hash * 31 + teamId.charCodeAt(i)) >>> 0;
@@ -146,7 +172,24 @@ const MAP_ART: Record<
   },
 };
 
-function MapCamInner({ map, positions }: { map: MapId; positions: TeamPosition[] }) {
+/** Approximate pill width for a team-name tag at fontSize 3.2 monospace. */
+function namePillWidth(name: string): number {
+  return Math.max(10, name.length * 2.05 + 3.4);
+}
+
+function MapCamInner({
+  map,
+  positions,
+  zone,
+  nextZone,
+  viewBox,
+}: {
+  map: MapId;
+  positions: TeamPosition[];
+  zone: ZoneGeometry | null;
+  nextZone: ZoneGeometry | null;
+  viewBox: string;
+}) {
   const art = MAP_ART[map] ?? MAP_ART.erangel;
 
   const grid = useMemo(() => {
@@ -157,7 +200,7 @@ function MapCamInner({ map, positions }: { map: MapId; positions: TeamPosition[]
 
   return (
     <svg
-      viewBox="0 0 100 100"
+      viewBox={viewBox}
       className="h-full w-full"
       role="img"
       aria-label={`${art.label} tactical map`}
@@ -199,11 +242,43 @@ function MapCamInner({ map, positions }: { map: MapId; positions: TeamPosition[]
           </text>
         </g>
       ))}
-      {/* team markers */}
+      {/* zone circles — drawn ONLY from real geometry (never invented).
+          White = current safe zone, cyan dashed = next zone. */}
+      {zone && (
+        <g>
+          <circle
+            cx={clamp100(zone.cx)}
+            cy={clamp100(zone.cy)}
+            r={Math.max(0.5, Math.min(100, zone.r))}
+            fill="#ffffff"
+            fillOpacity="0.05"
+            stroke="#ffffff"
+            strokeOpacity="0.9"
+            strokeWidth="0.7"
+            strokeDasharray="2.4 1.6"
+          />
+        </g>
+      )}
+      {nextZone && (
+        <circle
+          cx={clamp100(nextZone.cx)}
+          cy={clamp100(nextZone.cy)}
+          r={Math.max(0.5, Math.min(100, nextZone.r))}
+          fill="none"
+          stroke="#22d3ee"
+          strokeOpacity="0.85"
+          strokeWidth="0.6"
+          strokeDasharray="1.6 1.4"
+        />
+      )}
+      {/* team markers: coloured dot + name pill (Bible §2: coloured
+          pills/tags with player names, e.g. "WTxSpraygod"). Pills render
+          only for real positions — never for invented ones. */}
       {positions.map((p) => {
         const x = clamp100(p.x);
         const y = clamp100(p.y);
         const color = markerColor(p.team_id);
+        const pillW = namePillWidth(p.team_name);
         return (
           <g key={p.team_id}>
             <title>
@@ -225,7 +300,32 @@ function MapCamInner({ map, positions }: { map: MapId; positions: TeamPosition[]
               stroke="#ffffff"
               strokeWidth="0.5"
             />
-            <g transform={`translate(${x + 2.8}, ${y - 5.2})`}>
+            {/* name pill above the marker */}
+            <g transform={`translate(${x - pillW / 2}, ${y - 11.4})`}>
+              <rect
+                width={pillW}
+                height="5.4"
+                rx="2.7"
+                fill={color}
+                fillOpacity="0.92"
+                stroke="#ffffff"
+                strokeOpacity="0.65"
+                strokeWidth="0.4"
+              />
+              <text
+                x={pillW / 2}
+                y="3.9"
+                textAnchor="middle"
+                fontSize="3.2"
+                fontWeight="700"
+                fill="#ffffff"
+                fontFamily="ui-monospace, monospace"
+              >
+                {p.team_name}
+              </text>
+            </g>
+            {/* alive-count badge right of the marker */}
+            <g transform={`translate(${x + 2.8}, ${y + 1.4})`}>
               <rect
                 width="7.4"
                 height="5"
@@ -279,21 +379,48 @@ function MapCamInner({ map, positions }: { map: MapId; positions: TeamPosition[]
  * `map` selects the schematic island drawing; `positions` are the live
  * team markers (see the file header for the expected live feed). With no
  * positions the frame renders an honest standby instead of invented dots.
+ * `zone` / `nextZone` draw real zone-circle geometry when a live feed
+ * provides it — they are never synthesised.
  */
-export function MapCam({ map, positions, className = '' }: MapCamProps) {
+export function MapCam({
+  map,
+  positions,
+  className = '',
+  zone = null,
+  nextZone = null,
+  viewBox = '0 0 100 100',
+  chrome = true,
+}: MapCamProps & {
+  /**
+   * Show the "Map cam ·" label and the honest standby overlay. Set false
+   * for tiny insets (e.g. the minimap) where the parent frame already
+   * carries the standby state — avoids duplicated, unreadably small text.
+   */
+  chrome?: boolean;
+}) {
   const art = MAP_ART[map] ?? MAP_ART.erangel;
   const live = Array.isArray(positions) ? positions : [];
 
   return (
-    <div className={`relative overflow-hidden rounded-lg bg-[#060b14] ${className}`}>
-      <MapCamInner map={map} positions={live} />
-      <div className="pointer-events-none absolute left-2 top-2 rounded bg-black/60 px-2 py-1 text-[10px] font-semibold uppercase tracking-wider text-emerald-300">
-        Map cam · {art.label}
-      </div>
-      {live.length === 0 ? (
+    <div className={`relative overflow-hidden bg-[#060b14] ${className}`}>
+      <MapCamInner
+        map={map}
+        positions={live}
+        zone={zone}
+        nextZone={nextZone}
+        viewBox={viewBox}
+      />
+      {chrome && (
+        <div className="pointer-events-none absolute left-2 top-2 rounded bg-black/60 px-2 py-1 text-[10px] font-semibold uppercase tracking-wider text-emerald-300">
+          Map cam · {art.label}
+        </div>
+      )}
+      {chrome && live.length === 0 ? (
         <div className="absolute inset-0 flex items-center justify-center bg-black/35">
           <p className="max-w-[70%] text-center text-xs text-white/60">
             Waiting for position data — no live observer feed connected.
+            Team positions and zone-circle geometry are not shown until a
+            real feed provides them.
           </p>
         </div>
       ) : (

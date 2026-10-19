@@ -19,6 +19,7 @@ export default function LowerThirdSlide({
   subtitle,
   status,
   animKey,
+  positionClass,
 }: LowerThirdProps) {
   const { phase, content } = useExitingContent(visible && subtitle !== '', {
     title,
@@ -32,7 +33,7 @@ export default function LowerThirdSlide({
   return (
     <div
       key={animKey}
-      className={`absolute bottom-12 left-8 max-w-[46rem] ${
+      className={`absolute ${positionClass ?? 'bottom-12 left-8 max-w-[46rem]'} ${
         phase === 'exit' ? 'gfx-anim-slide-out-left' : 'gfx-anim-slide-in-left'
       }`}
     >

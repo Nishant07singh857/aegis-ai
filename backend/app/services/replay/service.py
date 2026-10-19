@@ -24,7 +24,14 @@ import structlog
 
 from .buffer import ReplayBuffer
 from .highlights import HighlightDetector
-from .schemas import Clip, Highlight, Mark
+from .schemas import Clip, DayReel, DayReelSegment, Highlight, Mark
+from app.agents.highlight.day_reel import (
+    DEFAULT_MAX_DURATION_MS,
+    DEFAULT_MAX_SEGMENTS,
+    compile_day_reel,
+    day_utc_label,
+    from_replay_highlights,
+)
 
 logger = structlog.get_logger("aegis.replay.service")
 
@@ -161,6 +168,52 @@ class ReplayService:
         self.buffer.prune()
         events = self.buffer.recent(limit=50_000)
         return self.detector.build_reel(events, limit=limit)
+
+    def get_day_reel(self, limit: int = 50) -> DayReel:
+        """Whole-day highlight reel from recorded highlights.
+
+        Compiles the top scored moments recorded in this process's
+        replay buffer (``GET /replay/highlights`` source), ordered by
+        excitement score with the day-reel duration/segment caps.
+
+        Honest scope: the replay buffer is the current session's
+        recorded events — highlights only exist for matches played
+        while this process was running. There is intentionally no
+        match-day persistence yet; an empty buffer returns an empty
+        reel (``is_empty``), never synthesised moments.
+        """
+        self.buffer.prune()
+        events = self.buffer.recent(limit=50_000)
+        highlights = self.detector.build_reel(events, limit=limit)
+        moments = from_replay_highlights(highlights)
+        reel = compile_day_reel(moments, day=day_utc_label())
+        return DayReel(
+            day=reel.day,
+            segments=[
+                DayReelSegment(
+                    rank=s.rank,
+                    moment_id=s.moment_id,
+                    match_id=s.match_id,
+                    match_number=s.match_number,
+                    title=s.title,
+                    kind=s.kind,
+                    score=s.score,
+                    duration_ms=s.duration_ms,
+                    window_start_iso=_iso(s.start_ts) if s.start_ts else None,
+                    window_end_iso=_iso(s.end_ts) if s.end_ts else None,
+                    player=s.player,
+                    team=s.team,
+                )
+                for s in reel.segments
+            ],
+            total_duration_ms=reel.total_duration_ms,
+            moment_count=reel.moment_count,
+            trimmed_count=reel.trimmed_count,
+            match_ids=reel.match_ids,
+            max_duration_ms=reel.max_duration_ms,
+            max_segments=reel.max_segments,
+            is_empty=reel.is_empty,
+        )
 
     def snapshot(self) -> Dict:
         """Lightweight status for /feed-like introspection."""

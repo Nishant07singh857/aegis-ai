@@ -1,0 +1,331 @@
+/**
+ * AEGIS AI — animated story graphics keyframes (Phase 19, W2).
+ *
+ * Rules (same as graphics.css):
+ *  - transform / opacity ONLY — GPU-accelerated, smooth inside an OBS
+ *    browser source, no layout thrash, 60fps.
+ *  - Bar fills use scaleX (never width transitions) for the same reason.
+ *  - Entrance classes use fill mode `backwards`: during a stagger delay
+ *    the `from` keyframe applies, then the element falls back to its own
+ *    styles once the entrance finishes.
+ *  - `prefers-reduced-motion`: every animation is disabled — elements
+ *    snap to their final state (JS count-ups snap too, via the hooks).
+ *
+ * Timing tokens: entrances 0.5–1.0s, easing ease-out (cubic-bezier
+ * 0.22, 1, 0.36, 1 — fast start, soft landing, cricket-broadcast snap).
+ */
+
+:root {
+  --ag-dur-enter: 0.8s; /* slides, rises (doc: 0.8s H2H slide-in) */
+  --ag-dur-bar: 1s; /* win-probability bar fill (doc: 1s) */
+  --ag-dur-fade: 0.6s;
+  --ag-dur-pop: 0.7s;
+  --ag-dur-badge: 0.4s; /* form W/L badge pop, staggered 0.2s */
+  --ag-ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+  --ag-ease-in: cubic-bezier(0.55, 0.06, 0.68, 0.19);
+  --ag-gold: #f5b301;
+  --ag-cyan: #00f0ff;
+}
+
+/* ------------------------------------------------------------------ */
+/* Entrance keyframes                                                 */
+/* ------------------------------------------------------------------ */
+
+@keyframes ag-slide-in-left {
+  from {
+    transform: translateX(-96px);
+    opacity: 0;
+  }
+  to {
+    transform: translateX(0);
+    opacity: 1;
+  }
+}
+
+@keyframes ag-slide-in-right {
+  from {
+    transform: translateX(96px);
+    opacity: 0;
+  }
+  to {
+    transform: translateX(0);
+    opacity: 1;
+  }
+}
+
+@keyframes ag-rise {
+  from {
+    transform: translateY(48px);
+    opacity: 0;
+  }
+  to {
+    transform: translateY(0);
+    opacity: 1;
+  }
+}
+
+@keyframes ag-fade {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes ag-pop {
+  from {
+    transform: scale(0.9);
+    opacity: 0;
+  }
+  to {
+    transform: scale(1);
+    opacity: 1;
+  }
+}
+
+/* Badge pop-in with a slight overshoot (form guide W/L badges). */
+@keyframes ag-badge-pop {
+  0% {
+    transform: scale(0.4);
+    opacity: 0;
+  }
+  60% {
+    transform: scale(1.15);
+    opacity: 1;
+  }
+  100% {
+    transform: scale(1);
+    opacity: 1;
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* Entrance classes (style-picker aware)                              */
+/* ------------------------------------------------------------------ */
+
+.ag-enter-slide {
+  animation: ag-rise var(--ag-dur-enter) var(--ag-ease-out) backwards;
+}
+.ag-enter-slide.ag-from-left {
+  animation-name: ag-slide-in-left;
+}
+.ag-enter-slide.ag-from-right {
+  animation-name: ag-slide-in-right;
+}
+.ag-enter-slide.ag-from-up {
+  animation-name: ag-rise;
+}
+
+.ag-enter-fade {
+  animation: ag-fade var(--ag-dur-fade) var(--ag-ease-out) backwards;
+}
+
+.ag-enter-scale {
+  animation: ag-pop var(--ag-dur-pop) var(--ag-ease-out) backwards;
+}
+
+/* 'none' style — no entrance at all. */
+.ag-enter-none {
+  animation: none;
+}
+
+/* ------------------------------------------------------------------ */
+/* Exit classes (fill: forwards — hold the faded state until unmount)  */
+/* ------------------------------------------------------------------ */
+
+@keyframes ag-slide-out-down {
+  from {
+    transform: translateY(0);
+    opacity: 1;
+  }
+  to {
+    transform: translateY(48px);
+    opacity: 0;
+  }
+}
+
+@keyframes ag-fade-out {
+  from {
+    opacity: 1;
+  }
+  to {
+    opacity: 0;
+  }
+}
+
+.ag-exit-slide-down {
+  animation: ag-slide-out-down 0.38s var(--ag-ease-in) forwards;
+}
+
+.ag-exit-fade {
+  animation: ag-fade-out 0.38s var(--ag-ease-in) forwards;
+}
+
+/* ------------------------------------------------------------------ */
+/* Win probability bar                                                */
+/* ------------------------------------------------------------------ */
+
+/* Fill via scaleX (GPU) — the --ag-fill var carries 0..1. Updates glide
+ * through the 1s transition, so 30s feed updates are smooth. */
+.ag-bar-track {
+  position: relative;
+  overflow: hidden;
+  border-radius: 9999px;
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.ag-bar-fill {
+  position: absolute;
+  inset: 0;
+  transform: scaleX(var(--ag-fill, 0));
+  transform-origin: left center;
+  transition: transform var(--ag-dur-bar) var(--ag-ease-out);
+  border-radius: inherit;
+}
+
+/* Leader glow — pulsing box-shadow on the leader's bar. Box-shadow is
+ * not transform/opacity, so the glow pulses via a wrapper opacity key
+ * instead: the .ag-glow element behind the bar fades in/out. */
+@keyframes ag-glow-pulse {
+  0%,
+  100% {
+    opacity: 0.55;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+.ag-glow {
+  position: absolute;
+  inset: -2px;
+  border-radius: 9999px;
+  background: var(--ag-cyan);
+  filter: blur(10px);
+  opacity: 0.55;
+  animation: ag-glow-pulse 2.4s ease-in-out infinite;
+  pointer-events: none;
+}
+
+/* ------------------------------------------------------------------ */
+/* LIVE badge                                                          */
+/* ------------------------------------------------------------------ */
+
+@keyframes ag-live-dot {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.25;
+  }
+}
+
+.ag-live-dot {
+  display: inline-block;
+  width: 0.5rem;
+  height: 0.5rem;
+  border-radius: 9999px;
+  background: #ff3b3b;
+  animation: ag-live-dot 1.2s ease-in-out infinite;
+}
+
+/* ------------------------------------------------------------------ */
+/* Milestone pulse (gold border + gentle scale pulse)                 */
+/* ------------------------------------------------------------------ */
+
+@keyframes ag-pulse {
+  0%,
+  100% {
+    transform: scale(1);
+    opacity: 1;
+  }
+  50% {
+    transform: scale(1.025);
+    opacity: 0.96;
+  }
+}
+
+.ag-pulse {
+  animation: ag-pulse 1.8s ease-in-out infinite;
+}
+
+/* ------------------------------------------------------------------ */
+/* Form badges                                                         */
+/* ------------------------------------------------------------------ */
+
+.ag-badge {
+  animation: ag-badge-pop var(--ag-dur-badge) var(--ag-ease-out) backwards;
+  will-change: transform, opacity;
+}
+
+/* ------------------------------------------------------------------ */
+/* Zone map ring                                                       */
+/* ------------------------------------------------------------------ */
+
+@keyframes ag-zone-ring {
+  from {
+    transform: scale(0.6);
+    opacity: 0.9;
+  }
+  to {
+    transform: scale(1.6);
+    opacity: 0;
+  }
+}
+
+.ag-zone-ring {
+  transform-origin: center;
+  transform-box: fill-box;
+  animation: ag-zone-ring 2s var(--ag-ease-out) infinite;
+}
+
+/* ------------------------------------------------------------------ */
+/* Milestone ticker (looping strip, transform-only)                    */
+/* ------------------------------------------------------------------ */
+
+@keyframes ag-ticker-x {
+  from {
+    transform: translateX(100%);
+  }
+  to {
+    transform: translateX(-100%);
+  }
+}
+
+.ag-ticker-inner {
+  display: inline-block;
+  white-space: nowrap;
+  animation: ag-ticker-x 12s linear infinite;
+  will-change: transform;
+}
+
+/* ------------------------------------------------------------------ */
+/* Reduced motion — everything snaps to its final state               */
+/* ------------------------------------------------------------------ */
+
+@media (prefers-reduced-motion: reduce) {
+  .ag-enter-slide,
+  .ag-enter-fade,
+  .ag-enter-scale,
+  .ag-enter-none,
+  .ag-exit-slide-down,
+  .ag-exit-fade,
+  .ag-badge,
+  .ag-ticker-inner {
+    animation: none !important;
+  }
+
+  .ag-pulse,
+  .ag-glow,
+  .ag-live-dot,
+  .ag-zone-ring {
+    animation: none !important;
+    opacity: 1;
+  }
+
+  .ag-bar-fill {
+    transition: none;
+  }
+}

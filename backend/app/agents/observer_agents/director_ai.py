@@ -28,6 +28,26 @@ from .playbook_manager import PlaybookManager
 logger = structlog.get_logger("aegis.agents.observer_director")
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# VISUAL BROADCAST BIBLE (docs/VISUAL_BROADCAST_BIBLE.md) — §3 & §4
+# Camera behaviour measured from Krafton's actual broadcast frames:
+#   §3.1  camera stays on ONE mid-game fight for 45-90 seconds
+#   §3.2  every camera change is a hard cut (1 frame)
+#   §3.4  switch player only when: fight ends (no kills 15+ sec),
+#         a more important fight starts elsewhere, zone forces reposition
+#   §4    NO PiP during live fights — pick ONE fight and commit;
+#         the other simultaneous fight is missed live
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#: Minimum hold on an active mid-game fight before the director may
+#: consider leaving it (Bible §3.1: 45-90s measured hold).
+FIGHT_HOLD_MIN_SECONDS = 45.0
+#: Staleness discount for fight scenes starts only after this long
+#: (Bible §3.1: no exit-hunting before the 45-90s window elapses).
+FIGHT_STALE_AFTER_SECONDS = 90.0
+#: Score gap required for a *new* fight to break the current fight hold
+#: (Bible §3.4 + §4: a strictly more important fight starts elsewhere).
+FIGHT_SWITCH_SCORE_GAP = 40.0
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # ENUMS & DATA MODELS
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -159,7 +179,9 @@ class ObserverDirector(BaseAgent):
         self.max_switches_per_minute = settings.MAX_SWITCHES_PER_MINUTE
         self.replay_cooldown = 15  # seconds between replays
         self.clutch_lock_duration = 8  # seconds to stay on clutch
-        self.fight_lock_duration = 6  # seconds minimum on fight
+        # Visual Broadcast Bible §3.1: hold the camera on one active
+        # mid-game fight for 45+ seconds (measured 45-90s on Krafton).
+        self.fight_lock_duration = FIGHT_HOLD_MIN_SECONDS
         
         # Team priority (can be set by tournament)
         self.priority_teams: Set[str] = set()
@@ -296,9 +318,18 @@ class ObserverDirector(BaseAgent):
             
             self.director_state.candidate_priority_score = intensity_score
             
-            # Force switch if very important
+            # Force switch if very important — but NOT mid-fight.
+            # Visual Broadcast Bible §4: Krafton never shows a second live
+            # fight (no PiP, no split-screen, no instant cutaway); they
+            # commit to the fight already on air and the new fight is
+            # missed live. The new fight is still recorded in
+            # active_fights above, so the decision loop can take it once
+            # the hold bar is met. Clutch situations always cut immediately
+            # (a clutch is by definition a strictly more important fight,
+            # §3.4).
             if intensity_score > 85 or is_clutch:
-                await self._switch_to_fight(fight_id, "Critical fight detected")
+                if is_clutch or not self._in_fight_hold_window():
+                    await self._switch_to_fight(fight_id, "Critical fight detected")
     
     async def _on_fight_ended(self, data: Dict[str, Any]) -> None:
         """Handle fight ending"""
@@ -354,7 +385,7 @@ class ObserverDirector(BaseAgent):
                 # We're already watching this fight - update POV to killer
                 killer_id = data.get("killer_id")
                 if killer_id:
-                    await self._follow_player(killer_id, "Kill follow")
+                    await self._follow_player(killer_id, "Kill follow", fight_id=fight_id)
     
     async def _on_knock(self, data: Dict[str, Any]) -> None:
         """Handle knock event"""
@@ -395,6 +426,27 @@ class ObserverDirector(BaseAgent):
     # DIRECTOR DECISION MAKING
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     
+    def _in_fight_hold_window(self) -> bool:
+        """True while the camera must stay on the current mid-game fight.
+
+        Visual Broadcast Bible §3.1 + §4: stay on ONE active fight until it
+        resolves — do not switch to a second simultaneous fight (Krafton
+        picks one fight and commits; the other is missed live). The hold
+        does not apply in early game or final circles, where Krafton cuts
+        faster (§3.1), nor when the current fight has ended (§3.4).
+        """
+        scene = self.director_state.current_scene
+        if not scene or not scene.fight_id:
+            return False
+        if scene.fight_id not in self.director_state.active_fights:
+            return False  # Fight ended — free to leave
+        if self.director_state.broadcast_state in (
+            BroadcastState.EARLY_GAME,
+            BroadcastState.FINAL_CIRCLE,
+        ):
+            return False  # §3.1: faster switching allowed early/late game
+        return True
+
     async def _make_director_decision(self) -> Optional[Dict[str, Any]]:
         """Make the main director decision - what to show next"""
         
@@ -444,9 +496,14 @@ class ObserverDirector(BaseAgent):
             # Lower threshold for clutch situations
             if best_candidate.is_clutch:
                 min_difference = 5
-            
+            # Visual Broadcast Bible §3.1 + §4: hold the current mid-game
+            # fight for 45-90s. A second simultaneous fight only breaks the
+            # hold if it is *strictly* more important — Krafton commits to
+            # one fight and the other is missed live.
+            elif self._in_fight_hold_window():
+                min_difference = FIGHT_SWITCH_SCORE_GAP
             # Lower threshold if current scene is stale
-            if self.director_state.current_scene.duration > 20:
+            elif self.director_state.current_scene.duration > 20:
                 min_difference = 10
             
             if score_difference < min_difference:
@@ -483,10 +540,20 @@ class ObserverDirector(BaseAgent):
         if self.director_state.current_scene.player_id in self.priority_players:
             score += 15
         
-        # Recent scene penalty (prevent staying too long)
+        # Recent scene penalty (prevent staying too long).
+        # Visual Broadcast Bible §3.1: Krafton holds one fight 45-90s, so
+        # fight scenes are only discounted after 90s — the director must
+        # not hunt for an exit after 30s. Non-fight scenes (map cam runs
+        # 15-30s, §2) keep the old 30s stale line so the director does not
+        # park on a quiet feed.
+        stale_after = (
+            FIGHT_STALE_AFTER_SECONDS
+            if self.director_state.current_scene.fight_id
+            else 30.0
+        )
         duration = self.director_state.current_scene.duration
-        if duration > 30:
-            score -= (duration - 30) * 0.5  # Gradually decrease after 30 seconds
+        if duration > stale_after:
+            score -= (duration - stale_after) * 0.5  # Gradually decrease
         
         return max(0, score)
     
@@ -535,7 +602,15 @@ class ObserverDirector(BaseAgent):
     
     async def _switch_feed(self, candidate: POVCandidate, reason: str) -> None:
         """Switch to a new feed"""
-        
+
+        # Visual Broadcast Bible §4: no split-screen, ever. The director
+        # never shows two live feeds side by side (incl. fight+fight) —
+        # every camera change funnels through this method, so the Bible
+        # rule is enforced here. Hard cut applies below (§3.2).
+        if candidate.feed_type == FeedType.SPLIT_SCREEN:
+            self._log.warning(f"Split-screen switch refused (Bible §4): {reason}")
+            return
+
         # Save current scene to history
         if self.director_state.current_scene:
             self.director_state.previous_scenes.append(self.director_state.current_scene)
@@ -625,15 +700,23 @@ class ObserverDirector(BaseAgent):
         
         await self._switch_feed(candidate, reason)
     
-    async def _follow_player(self, player_id: str, reason: str) -> None:
-        """Follow a specific player"""
+    async def _follow_player(self, player_id: str, reason: str,
+                             fight_id: Optional[str] = None) -> None:
+        """Follow a specific player.
+
+        When the follow happens inside a fight, the fight_id is carried
+        over so the fight-hold window (Bible §3.1) stays active through
+        in-fight POV changes — the camera stays on the same fight even as
+        the observed player changes (facecam syncs with the player, §3.5).
+        """
         candidate = POVCandidate(
             feed_type=FeedType.PLAYER_POV,
             player_id=player_id,
+            fight_id=fight_id,
             priority_score=70,
             reason=reason,
         )
-        
+
         await self._switch_feed(candidate, reason)
     
     async def _show_replay(self, replay_data: Dict[str, Any]) -> None:

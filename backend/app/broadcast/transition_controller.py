@@ -137,17 +137,22 @@ class TransitionController:
         return response.success
     
     def get_transition_for_moment(self, moment_type: str) -> str:
-        """Get appropriate transition for a broadcast moment"""
-        
+        """Get appropriate transition for a broadcast moment.
+
+        Visual Broadcast Bible §3.2 (frame analysis, not guesses): every
+        camera change is a hard cut (1 frame) — zero fades, zero wipes
+        were observed. All moments therefore cut.
+        """
+
         moment_transitions = {
-            "fight_start": "Quick Fade",
+            "fight_start": "Cut",
             "clutch": "Cut",
-            "replay": "Slow Fade",
-            "match_end": "Dramatic Fade",
-            "analysis": "Slide Up",
+            "replay": "Cut",
+            "match_end": "Cut",
+            "analysis": "Cut",
             "default": "Cut",
         }
-        
+
         return moment_transitions.get(moment_type, "Cut")
     
     def get_stats(self) -> Dict[str, Any]:

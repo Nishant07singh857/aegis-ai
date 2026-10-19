@@ -34,6 +34,13 @@ config change and every evaluation publishes::
 ``app/main.py`` registers ``ConnectionManager.broadcast`` as a listener at
 startup, which fans the messages out over ``/ws/live`` — the exact pattern
 used by ``DirectorService``.
+
+Smash Rule championship engine (Phase 20): the service also owns a
+:class:`SmashRuleEngine` (``smash_rule.py``) — the tournament-long state
+machine for match-point detection, 5-beat progression, conversion, and the
+no-conversion fallback. Its transitions publish::
+
+    {"type": "smashrule.state", "data": {<full smash-rule snapshot>}}
 """
 
 from __future__ import annotations
@@ -46,10 +53,30 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 import structlog
 
+from .smash_rule import (
+    InvalidSmashConfigError,
+    SmashRuleConfig,
+    SmashRuleEngine,
+    SmashRuleTransitionError,
+)
+
 logger = structlog.get_logger("aegis.match_point")
 
 #: WS message type pushed to /ws/live on config changes and evaluations.
 WS_MESSAGE_TYPE = "matchpoint.state"
+
+#: WS message type pushed to /ws/live on smash-rule transitions.
+SMASH_WS_MESSAGE_TYPE = "smashrule.state"
+
+
+def _smash_env_int(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
 
 MODES: tuple[str, ...] = ("points_threshold", "final_day_chicken")
 
@@ -104,6 +131,10 @@ class MatchPointService:
             self._config["mode"] = "points_threshold"
         self._last_evaluation: Optional[Dict[str, Any]] = None
         self._updated_at: str = _utcnow_iso()
+        # Smash Rule championship engine (Phase 20). In-memory, like the
+        # rest of this service; use save_smash_state()/load_smash_state()
+        # to persist across restarts.
+        self._smash = SmashRuleEngine()
 
     # ── listeners ────────────────────────────────────────────────
 
@@ -118,6 +149,11 @@ class MatchPointService:
         for listener in list(self._listeners):
             await listener(message)
 
+    async def _notify_smash(self, snapshot: Dict[str, Any]) -> None:
+        message = {"type": SMASH_WS_MESSAGE_TYPE, "data": snapshot}
+        for listener in list(self._listeners):
+            await listener(message)
+
     # ── reads ────────────────────────────────────────────────────
 
     def get_config(self) -> Dict[str, Any]:
@@ -128,6 +164,7 @@ class MatchPointService:
         return {
             "config": self.get_config(),
             "last_evaluation": copy.deepcopy(self._last_evaluation),
+            "smash": self._smash.snapshot(),
             "updated_at": self._updated_at,
         }
 
@@ -202,6 +239,116 @@ class MatchPointService:
         )
         await self._notify(state)
         return state
+
+    # ── smash rule championship engine (Phase 20) ─────────────────
+
+    def smash_status(self) -> Dict[str, Any]:
+        """Current smash-rule engine snapshot (no state change)."""
+        return self._smash.snapshot()
+
+    async def configure_smash(
+        self,
+        updated_by: str = "operator",
+        **updates: Any,
+    ) -> Dict[str, Any]:
+        """(Re)configure the smash-rule engine.
+
+        Accepted keys: ``enabled``, ``target_set_after_match``,
+        ``target_bonus_points``, ``final_match_number``,
+        ``chickens_after_match_point``. Missing keys fall back to the
+        ``SMASH_*`` environment variables (same pattern as the match-point
+        config above); nothing is hardcoded. Reconfiguring resets the
+        engine — it is a fresh tournament.
+        """
+        allowed = {
+            "enabled",
+            "target_set_after_match",
+            "target_bonus_points",
+            "final_match_number",
+            "chickens_after_match_point",
+        }
+        unknown = set(updates) - allowed
+        if unknown:
+            raise InvalidSmashConfigError(
+                f"Unknown smash-rule config keys: {sorted(unknown)}."
+            )
+        values: Dict[str, Any] = {
+            "enabled": updates.get(
+                "enabled", _env_bool("SMASH_ENABLED", False)
+            ),
+            "target_set_after_match": updates.get(
+                "target_set_after_match",
+                _smash_env_int("SMASH_TARGET_SET_AFTER_MATCH", 12),
+            ),
+            "target_bonus_points": updates.get(
+                "target_bonus_points",
+                _smash_env_int("SMASH_TARGET_BONUS_POINTS", 10),
+            ),
+            "final_match_number": updates.get(
+                "final_match_number",
+                _smash_env_int("SMASH_FINAL_MATCH_NUMBER", 18),
+            ),
+            "chickens_after_match_point": updates.get(
+                "chickens_after_match_point",
+                _smash_env_int("SMASH_CHICKENS_AFTER_MATCH_POINT", 1),
+            ),
+        }
+        async with self._lock:
+            config = SmashRuleConfig(**values)  # raises on invalid
+            snapshot = self._smash.configure(config)
+            self._updated_at = _utcnow_iso()
+        logger.info("smash-rule configured by %s: %s", updated_by, values)
+        await self._notify_smash(copy.deepcopy(snapshot))
+        return snapshot
+
+    async def record_smash_match_result(
+        self,
+        match_number: int,
+        winner_team_id: Optional[str],
+        standings: List[Dict[str, Any]],
+        updated_by: str = "operator",
+    ) -> Dict[str, Any]:
+        """Record a completed match into the smash-rule state machine.
+
+        Returns the transition record; also publishes ``smashrule.state``.
+        Raises :class:`SmashRuleTransitionError` on illegal transitions
+        (not configured, duplicate/out-of-order match, already decided).
+        """
+        async with self._lock:
+            transition = self._smash.record_match_result(
+                match_number, winner_team_id, standings
+            )
+            snapshot = self._smash.snapshot()
+            self._updated_at = _utcnow_iso()
+        logger.info(
+            "smash-rule match %d recorded by %s: %s -> %s",
+            match_number,
+            updated_by,
+            transition["from_state"],
+            transition["to_state"],
+        )
+        await self._notify_smash(copy.deepcopy(snapshot))
+        return {"transition": transition, "smash": snapshot}
+
+    async def reset_smash(self, updated_by: str = "operator") -> Dict[str, Any]:
+        """Clear the smash-rule engine back to a fresh unconfigured state."""
+        async with self._lock:
+            self._smash = SmashRuleEngine()
+            snapshot = self._smash.snapshot()
+            self._updated_at = _utcnow_iso()
+        logger.info("smash-rule engine reset by %s", updated_by)
+        await self._notify_smash(copy.deepcopy(snapshot))
+        return snapshot
+
+    def save_smash_state(self) -> Dict[str, Any]:
+        """Serialize the smash engine for persistence (DB/file hook)."""
+        return self._smash.to_dict()
+
+    def load_smash_state(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        """Restore a smash engine previously saved with save_smash_state()."""
+        self._smash = SmashRuleEngine.from_dict(data)
+        self._updated_at = _utcnow_iso()
+        return self._smash.snapshot()
 
     # ── engine ───────────────────────────────────────────────────
 

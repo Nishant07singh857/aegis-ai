@@ -18,6 +18,7 @@ export default function LowerThirdRise({
   subtitle,
   status,
   animKey,
+  positionClass,
 }: LowerThirdProps) {
   const { phase, content } = useExitingContent(visible && subtitle !== '', {
     title,
@@ -31,7 +32,9 @@ export default function LowerThirdRise({
   return (
     <div
       key={animKey}
-      className={`absolute bottom-12 left-1/2 w-max max-w-[52rem] ${
+      className={`absolute ${
+        positionClass ?? 'bottom-12 left-1/2 w-max max-w-[52rem]'
+      } ${
         phase === 'exit'
           ? 'gfx-anim-sink-down-centered'
           : 'gfx-anim-rise-up-centered'

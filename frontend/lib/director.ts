@@ -5,7 +5,9 @@
  * "director.suggestion"):
  *   GET  /api/v1/director/state
  *     -> {"mode": "full_auto"|"semi_auto"|"manual",
- *         "scene": "main"|"standings"|"killfeed_focus"|"commentary",
+ *         "scene": "main"|"standings"|"killfeed_focus"|"commentary"|"map_cam",
+ *         "scene_entered_at": str (Phase 18: ISO of the last scene change;
+ *           drives the map-cam 30s maximum hold),
  *         "overlays": {"scorebug": bool, "killfeed": bool},
  *         "lower_third": {"visible": bool, "title": str, "subtitle": str},
  *         "graphics": {"scorebug_template_id": str,
@@ -19,6 +21,7 @@
  *          "created_at": str, "expires_at": str, "status": "pending"}]
  *   POST /api/v1/director/mode        {"mode": "full_auto"|"semi_auto"|"manual"}
  *   POST /api/v1/director/scene       {"scene": ...}
+ *   POST /api/v1/director/camera      {"slot": 1..16} (Phase 17 W2, MANUAL)
  *   POST /api/v1/director/overlays    {"scorebug"?: bool, "killfeed"?: bool}
  *   POST /api/v1/director/lower-third {"visible": bool, "title"?: str, "subtitle"?: str}
  *   POST /api/v1/director/suggestions/{id}/approve
@@ -43,7 +46,22 @@
 import { apiFetch } from "./api";
 
 export type DirectorMode = "full_auto" | "semi_auto" | "manual";
-export type DirectorScene = "main" | "standings" | "killfeed_focus" | "commentary";
+// Phase 18 (W3): "map_cam" is the tactical-overview scene (Visual
+// Broadcast Bible §2). It auto-returns to "main" after 30s max in every
+// mode — see MAP_CAM_MAX_HOLD_SECONDS.
+export type DirectorScene =
+  | "main"
+  | "standings"
+  | "killfeed_focus"
+  | "commentary"
+  | "map_cam";
+
+/**
+ * Bible §2: map cam holds 15-30s, then a hard cut back to action. The
+ * backend enforces the 30s maximum in every mode; the frontend shows the
+ * countdown and re-polls state at expiry.
+ */
+export const MAP_CAM_MAX_HOLD_SECONDS = 30;
 export type SuggestionType = "scene" | "overlay" | "lower_third";
 
 export interface DirectorOverlays {
@@ -81,8 +99,21 @@ export const DEFAULT_DIRECTOR_GRAPHICS: DirectorGraphics = {
 export interface DirectorState {
   mode: DirectorMode;
   scene: DirectorScene;
+  /**
+   * Phase 18 (W3): ISO timestamp of the last scene change (backend stamps
+   * it on every real scene change). Drives the map-cam auto-return
+   * countdown. "" when the backend predates the field.
+   */
+  scene_entered_at: string;
   overlays: DirectorOverlays;
   lower_third: DirectorLowerThird;
+  /**
+   * Present on every state after normalizeDirectorState (defaults to 1 —
+   * the backend predating Phase 17 W2 emits no active_camera block).
+   * Phase 17 W2: the active observer camera slot (1..16) shown on the
+   * broadcast output video layer (GET /api/v1/video/feed/{slot}).
+   */
+  active_camera: number;
   /**
    * Present on every state after normalizeDirectorState (defaults are
    * filled in when the backend payload predates Phase 8). Consumers can
@@ -120,6 +151,7 @@ export const DIRECTOR_SCENES: readonly DirectorScene[] = [
   "standings",
   "killfeed_focus",
   "commentary",
+  "map_cam",
 ];
 
 export const SCENE_LABELS: Record<DirectorScene, string> = {
@@ -127,6 +159,7 @@ export const SCENE_LABELS: Record<DirectorScene, string> = {
   standings: "Standings",
   killfeed_focus: "Killfeed focus",
   commentary: "Commentary",
+  map_cam: "Map cam",
 };
 
 /** Strict shape check: a malformed director state is rejected, not patched. */
@@ -153,6 +186,26 @@ export function isDirectorState(value: unknown): value is DirectorState {
   if (typeof lowerThird.visible !== "boolean") return false;
   // title/subtitle default to "" when absent; visible=false must never
   // crash the renderer.
+  // Phase 18 (W3): scene_entered_at is optional for backward
+  // compatibility (a backend predating the field emits no stamp); when
+  // present it must be a string.
+  const enteredAt = s.scene_entered_at;
+  if (
+    enteredAt !== undefined &&
+    enteredAt !== null &&
+    typeof enteredAt !== "string"
+  )
+    return false;
+  // active_camera is optional for backward compatibility (a backend
+  // predating Phase 17 W2 emits no active_camera field); when present it
+  // must be an integer slot 1..16.
+  const cam = s.active_camera;
+  if (
+    cam !== undefined &&
+    cam !== null &&
+    !(typeof cam === "number" && Number.isInteger(cam) && cam >= 1 && cam <= 16)
+  )
+    return false;
   // graphics is optional for backward compatibility (a backend predating
   // Phase 8 emits no graphics block); when present it must be an object
   // whose known keys are strings. Unknown ids are NOT rejected here —
@@ -199,9 +252,28 @@ export function normalizeDirectorState(state: DirectorState): DirectorState {
       if (typeof v === "string" && v) graphics[key] = v;
     });
   }
+  // Phase 17 W2: default to camera slot 1 when the backend payload
+  // predates the active_camera field.
+  const rawCam = (state as { active_camera?: unknown }).active_camera;
+  const active_camera =
+    typeof rawCam === "number" &&
+    Number.isInteger(rawCam) &&
+    rawCam >= 1 &&
+    rawCam <= 16
+      ? rawCam
+      : 1;
+  // Phase 18 (W3): default the scene-change stamp to "" when the
+  // backend payload predates it; the map-cam countdown falls back to the
+  // local render time in that case.
+  const rawEnteredAt = (state as { scene_entered_at?: unknown })
+    .scene_entered_at;
+  const scene_entered_at =
+    typeof rawEnteredAt === "string" ? rawEnteredAt : "";
   return {
     ...state,
     graphics,
+    active_camera,
+    scene_entered_at,
     lower_third: {
       visible: state.lower_third.visible,
       title:
@@ -343,6 +415,18 @@ export async function setGraphics(
     method: "POST",
     token: token ?? undefined,
     body: graphics,
+  });
+}
+
+/** POST /api/v1/director/camera (Phase 17 W2) */
+export async function postDirectorCamera(
+  token: string | null,
+  slot: number
+): Promise<void> {
+  await apiFetch<unknown>("/api/v1/director/camera", {
+    method: "POST",
+    token: token ?? undefined,
+    body: { slot },
   });
 }
 

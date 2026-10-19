@@ -22,7 +22,10 @@
  *   ?api=<url>     Backend API base override (also re-points the WS).
  *   ?bg=<mode>     "transparent" (default — OBS/chroma friendly) or "brand"
  *                  (opaque branded backdrop when the capture needs a plate).
- *   ?ttl=<secs>    Kill ticker visibility in seconds (default 12, 3–60).
+ *   ?video=<mode>  "real" (default — live game feed) or "sim" (watermarked
+ *                  simulator test pattern; honest, never real footage).
+ *   ?ttl=<secs>    Kill ticker visibility in seconds (default 5, 3–60;
+ *                  Bible-measured: Krafton killfeed entries fade after ~5s).
  *   ?hold=<secs>   Lower-third visibility in seconds (default 6, 2–30).
  */
 
@@ -31,7 +34,7 @@ import { useSearchParams } from 'next/navigation';
 import { useOverlayParams } from '@/lib/overlay-params';
 import { DirectorOutputView } from '@/components/DirectorOutputView';
 
-const KILL_TTL_DEFAULT = 12;
+const KILL_TTL_DEFAULT = 5;
 const HOLD_DEFAULT = 6;
 
 function clampNum(
@@ -53,6 +56,9 @@ function BroadcastOutputInner() {
   const hold = clampNum(sp.get('hold'), HOLD_DEFAULT, 2, 30);
   const matchLabel =
     params.match === 'live' ? 'LIVE' : params.match.toUpperCase();
+  // Phase 17 W2: ?video=sim streams the watermarked simulator test
+  // pattern instead of the real game feed.
+  const video = sp.get('video') === 'sim' ? 'simulator' : 'real';
 
   return (
     <DirectorOutputView
@@ -62,6 +68,7 @@ function BroadcastOutputInner() {
       ttl={ttl}
       hold={hold}
       brand={brand}
+      video={video}
     />
   );
 }

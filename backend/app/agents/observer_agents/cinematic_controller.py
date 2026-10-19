@@ -196,30 +196,15 @@ class CinematicController(BaseAgent):
         current_scene: Any,
         candidate: Any,
     ) -> TransitionType:
-        """Determine the best transition type for a scene change"""
-        
-        # If no current scene, just cut
-        if not current_scene:
-            return TransitionType.CUT
-        
-        # If switching to clutch, use dramatic transition
-        if getattr(candidate, 'is_clutch', False):
-            return TransitionType.ZOOM_IN
-        
-        # If switching fight, use fast pan
-        if getattr(candidate, 'is_fight', False) and current_scene.fight_id != candidate.fight_id:
-            return TransitionType.WHIP_PAN
-        
-        # If same team, smooth transition
-        if (current_scene.team_id and candidate.team_id and 
-            current_scene.team_id == candidate.team_id):
-            return TransitionType.SMOOTH
-        
-        # If final circle, use cinematic
-        if getattr(candidate, 'is_final_circle', False):
-            return TransitionType.CROSSFADE
-        
-        # Default: cut
+        """Determine the transition type for a scene change.
+
+        Visual Broadcast Bible §3.2: every camera change in Krafton's
+        broadcast is a HARD CUT (1 frame). Zero fades, zero wipes were
+        observed — so the director always cuts, regardless of situation
+        (clutch, fight change, final circle). The TransitionType enum
+        keeps the other members for camera *movement* presets, which are
+        not scene transitions; none of them may be used on a cut.
+        """
         return TransitionType.CUT
     
     async def apply_transition(self, transition: TransitionType) -> None:

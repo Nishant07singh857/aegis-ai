@@ -66,6 +66,19 @@ _schemas = None
 _schemas_lock = threading.Lock()
 
 
+def _default_killfeed_detector():
+    """
+    Phase-15 wiring: when VISION_MODEL_PATH points at a valid kill-feed
+    ONNX model, the detector consults the trained model FIRST for entry
+    localisation (hybrid trained+OCR); otherwise it is the plain Phase-14
+    OCR heuristic — identical behaviour to before. The import is lazy so
+    the vision pipeline never pays for the ml stack at import time.
+    """
+    from app.ml.vision_wiring import build_killfeed_detector
+
+    return build_killfeed_detector()
+
+
 def _feed_schemas():
     global _schemas
     if _schemas is not None:
@@ -164,7 +177,7 @@ class VisionCaptureService:
 
         self._grabber = FrameGrabber()
         self._pipeline = FramePipeline(config=self.config)
-        self._killfeed = killfeed or KillFeedDetector()
+        self._killfeed = killfeed or _default_killfeed_detector()
         self._alive = alive or AliveCountReader()
         self._zone = zone or ZoneTimerReader()
         self._team = team or TeamStatusReader()

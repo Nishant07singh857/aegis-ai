@@ -433,6 +433,22 @@ class KillFeedDetector(BaseDetector):
         if region is None or region.size == 0:
             return []
 
+        return self._ocr_region_to_events(region, match_id, now)
+
+    def _ocr_region_to_events(
+        self,
+        region: np.ndarray,
+        match_id: Optional[str],
+        now: float,
+    ) -> List:
+        """
+        OCR one BGR crop -> list of NEW (deduplicated) NormalizedEvents.
+
+        The shared reading step used by :meth:`parse_frame` (whole
+        kill-feed region) and by the Phase-15 hybrid detector
+        (per-entry crops proposed by the trained model). Never guesses:
+        unclear text is skipped, not emitted.
+        """
         image = self._preprocess(region)
         if image is None:  # blank / uniform region — nothing to read
             return []

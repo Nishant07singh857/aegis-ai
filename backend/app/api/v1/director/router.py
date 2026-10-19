@@ -9,6 +9,9 @@ output page. Auth model:
                                          "full_auto" | "semi_auto" | "manual",
                                          legacy "auto" -> "full_auto")
   * POST /director/scene               — operator+, MANUAL mode only
+  * POST /director/camera              — operator+, MANUAL mode only (Phase 17 W2:
+                                         active observer camera 1..16 for the
+                                         broadcast video layer)
   * POST /director/overlays            — operator+, MANUAL mode only
   * POST /director/lower-third         — operator+, MANUAL mode only
   * POST /director/graphics           — operator+; graphics template
@@ -42,6 +45,7 @@ from app.services.director_service import (
 )
 
 from .schemas import (
+    CameraRequest,
     DirectorState,
     DirectorSuggestion,
     GraphicsRequest,
@@ -90,6 +94,10 @@ async def get_director_state(
     _user: TokenPayload = Depends(get_current_user),
 ):
     """Current director state. Any authenticated user, viewers included."""
+    # Phase 18 (W3): enforce the map-cam 30s maximum hold on every read so
+    # a poll-driven client (OBS capture page) can never sit on an expired
+    # map cam even if it missed the WS broadcast.
+    await director_service.enforce_scene_holds()
     return director_service.snapshot()
 
 
@@ -171,6 +179,37 @@ async def set_director_scene(
         )
     except DirectorModeError:
         raise _mode_conflict()
+
+
+@router.post("/camera", response_model=DirectorState)
+async def set_director_camera(
+    payload: CameraRequest,
+    user: TokenPayload = Depends(require_operator),
+):
+    """Operator camera select (Phase 17 W2). Rejected with 409 unless in
+    MANUAL mode.
+
+    Switches the active observer camera shown on the broadcast output
+    video layer (GET /api/v1/video/feed/{slot}). Also keeps the W4
+    capture manager's on-air selection in sync so
+    GET /api/v1/video/status agrees with the director state.
+    """
+    try:
+        state = await director_service.set_camera(
+            payload.slot, updated_by=user.username
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)
+        )
+    except DirectorModeError:
+        raise _mode_conflict()
+    # Keep the video layer's on-air selection consistent (lazy import:
+    # the video router pulls DB context; both are loaded by main.py).
+    from app.api.v1.video.router import multi_device_manager
+
+    await multi_device_manager.set_on_air(payload.slot, set_by=user.username)
+    return state
 
 
 @router.post("/overlays", response_model=DirectorState)

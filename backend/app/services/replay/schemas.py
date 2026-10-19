@@ -76,3 +76,39 @@ class Highlight(BaseModel):
     window_start_iso: str
     window_end_iso: str
     event_ids: List[str] = Field(default_factory=list)
+
+
+class DayReelSegment(BaseModel):
+    """One ordered slot in the whole-day reel."""
+
+    rank: int = Field(description="1-based position in the reel.")
+    moment_id: str
+    match_id: Optional[str] = None
+    match_number: Optional[int] = None
+    title: str
+    kind: str = Field(description="Detector kind: multi_kill | squad_wipe | clutch.")
+    score: int = Field(ge=0, le=100)
+    duration_ms: int = Field(description="Allocated reel time for this segment.")
+    window_start_iso: Optional[str] = None
+    window_end_iso: Optional[str] = None
+    player: Optional[str] = None
+    team: Optional[str] = None
+
+
+class DayReel(BaseModel):
+    """Whole-day highlight reel: scored moments ordered by excitement,
+    duration-capped. Honestly empty when nothing was recorded."""
+
+    day: str = Field(description="ISO date label (UTC) this reel covers.")
+    segments: List[DayReelSegment] = Field(default_factory=list)
+    total_duration_ms: int = 0
+    moment_count: int = Field(description="Moments considered before capping.")
+    trimmed_count: int = Field(
+        default=0, description="Moments dropped by the duration/segment caps."
+    )
+    match_ids: List[str] = Field(default_factory=list)
+    max_duration_ms: int
+    max_segments: int
+    is_empty: bool = Field(
+        description="True when no highlights were recorded — never synthesised."
+    )

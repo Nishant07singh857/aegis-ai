@@ -9,6 +9,7 @@ import type { ReactNode } from 'react';
  */
 
 import '@/components/graphics/graphics.css';
+import '@/components/graphics/animated/animated.css';
 
 export default function WatchLayout({ children }: { children: ReactNode }) {
   return <>{children}</>;

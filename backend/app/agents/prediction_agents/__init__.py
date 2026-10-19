@@ -9,6 +9,13 @@ from .fight_predictor import FightPredictor, FightPrediction
 from .survival_predictor import SurvivalPredictor, SurvivalPrediction
 from .zone_predictor import ZonePredictor, ZonePrediction
 from .winner_predictor import WinnerPredictor, WinnerPrediction
+from .win_probability import (
+    attach_deltas,
+    form_index,
+    h2h_rate_matrix,
+    score_live_win_probability,
+    snapshot_map,
+)
 
 __all__ = [
     "FightPredictor",
@@ -19,4 +26,9 @@ __all__ = [
     "ZonePrediction",
     "WinnerPredictor",
     "WinnerPrediction",
+    "attach_deltas",
+    "form_index",
+    "h2h_rate_matrix",
+    "score_live_win_probability",
+    "snapshot_map",
 ]

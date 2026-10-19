@@ -15,7 +15,13 @@ ignored by the engine):
       },
       "smash": {
         "enabled": false,                         // Smash-rule variant master switch
-        "chickens_after_match_point": 1           // WWCDs needed after hitting match point
+        "chickens_after_match_point": 1,          // WWCDs needed after hitting match point
+        // Full championship state machine (Phase 20, backend/app/services/
+        // match_point/smash_rule.py) — verbatim BMSD 2026 rule:
+        "target_set_after_match": 12,             // match after which the target is set
+        "target_bonus_points": 10,                // target = leader's score after that match + bonus
+        "final_match_number": 18                  // fallback: most total points wins when this
+                                                  // match completes with no conversion
       },
       "tiebreakers": [                            // ordered; first decisive one wins
         "total_kills", "total_damage", "highest_placement"

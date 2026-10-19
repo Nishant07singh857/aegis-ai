@@ -7,6 +7,7 @@
  */
 
 import '@/components/graphics/graphics.css';
+import '@/components/graphics/animated/animated.css';
 import type { ReactNode } from 'react';
 
 export default function OverlaysLayout({

@@ -7,6 +7,7 @@ Auth model:
   * GET  /replay/marks                 — any authenticated user
   * GET  /replay/clip?from=&to=        — any authenticated user
   * GET  /replay/highlights?limit=     — any authenticated user
+  * GET  /replay/day-reel?limit=       — any authenticated user
   * POST /replay/capture {label?}      — operator+ (bookmark "now")
   * POST /replay/play {mark_id|from,to}— operator+ (WS replay.play fan-out)
   * DELETE /replay/marks/{id}          — operator+
@@ -26,6 +27,7 @@ from app.services.replay import replay_service
 from app.services.replay.schemas import (
     CaptureRequest,
     Clip,
+    DayReel,
     Highlight,
     Mark,
     PlayRequest,
@@ -128,3 +130,19 @@ async def get_highlights(
     kill events — moments are never synthesised.
     """
     return replay_service.get_highlights(limit=limit)
+
+
+@router.get("/day-reel", response_model=DayReel)
+async def get_day_reel(
+    limit: int = Query(50, ge=1, le=200),
+    _user: TokenPayload = Depends(get_current_user),
+) -> DayReel:
+    """Whole-day highlight reel: the day's recorded moments ordered by
+    excitement score, duration-capped (default 5 min / 24 segments).
+
+    Honest scope: moments come from this process's replay buffer, i.e.
+    matches recorded while the server has been running today. When
+    nothing was recorded the reel is empty (``is_empty``) — moments are
+    never synthesised.
+    """
+    return replay_service.get_day_reel(limit=limit)

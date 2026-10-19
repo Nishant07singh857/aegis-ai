@@ -61,6 +61,21 @@ export interface RundownSegmentFrame {
   order: number;
 }
 
+/** Phase 10 zone clock state ("zone.tick" frames); null until received. */
+export interface ZonePhaseFrame {
+  name: string;
+  duration_seconds: number;
+  phase_number: number;
+  total_phases: number;
+}
+
+export interface ZoneStateFrame {
+  status: 'no_data' | 'active' | 'complete' | string;
+  current_phase?: ZonePhaseFrame | null;
+  time_remaining_seconds?: number | null;
+  updated_at?: string;
+}
+
 /** Phase 10 rundown state ("rundown.state" frames); null until received. */
 export interface RundownStateFrame {
   segments: RundownSegmentFrame[];
@@ -84,6 +99,24 @@ function isPiPStateFrame(data: any): data is PiPStateFrame {
       data.inset_position
     )
   );
+}
+
+/** Type guard for zone.tick frames — malformed frames are ignored. */
+function isZoneStateFrame(data: any): data is ZoneStateFrame {
+  if (data === null || typeof data !== 'object') return false;
+  if (typeof data.status !== 'string') return false;
+  const cp = data.current_phase;
+  if (cp !== undefined && cp !== null) {
+    if (typeof cp !== 'object' || typeof cp.name !== 'string') return false;
+  }
+  const rem = data.time_remaining_seconds;
+  if (
+    rem !== undefined &&
+    rem !== null &&
+    (typeof rem !== 'number' || !Number.isFinite(rem))
+  )
+    return false;
+  return true;
 }
 
 /** Type guard for rundown.state frames — malformed frames are ignored. */
@@ -127,6 +160,12 @@ export function useLiveSocket(apiBase?: string): {
   pipState: PiPStateFrame | null;
   /** Phase 10 rundown state ("rundown.state" frames); null until received. */
   rundownState: RundownStateFrame | null;
+  /**
+   * Phase 18 (W3) zone clock state ("zone.tick" frames); null until
+   * received. The live countdown is derived client-side from
+   * time_remaining_seconds — see lib/useZoneClock.
+   */
+  zone: ZoneStateFrame | null;
   health: any;
   agents: any[];
   modes: Record<string, boolean>;
@@ -146,6 +185,7 @@ export function useLiveSocket(apiBase?: string): {
   const [suggestionSeq, setSuggestionSeq] = useState(0);
   const [pipState, setPipState] = useState<PiPStateFrame | null>(null);
   const [rundownState, setRundownState] = useState<RundownStateFrame | null>(null);
+  const [zone, setZone] = useState<ZoneStateFrame | null>(null);
   const [health, setHealth] = useState<any>(null);
   const [agents, setAgents] = useState<any[]>([]);
   const [modes, setModes] = useState<Record<string, boolean>>({});
@@ -284,6 +324,15 @@ export function useLiveSocket(apiBase?: string): {
           setRundownState(data);
         }
         break;
+      case 'zone.tick':
+        // Phase 18 (W3) zone clock: the backend sends a snapshot on WS
+        // connect and on every zone change (phases set / advance / reset).
+        // Malformed frames are ignored. The live countdown is derived
+        // client-side — see lib/useZoneClock.
+        if (isZoneStateFrame(data)) {
+          setZone(data);
+        }
+        break;
       default:
         // commentary and other streams are not consumed by this dashboard
         break;
@@ -398,6 +447,7 @@ export function useLiveSocket(apiBase?: string): {
     suggestionSeq,
     pipState,
     rundownState,
+    zone,
     health,
     agents,
     modes,

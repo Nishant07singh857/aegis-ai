@@ -8,10 +8,12 @@ Pipeline (all binaries must exist on the host / streamer container):
               director page URL
     FFmpeg x11grab → libx264 → tee muxer → N RTMP destinations
 
-AUDIO: video-only, honestly. There is no TTS audio track today, so the
-encoder is explicitly told ``-an`` rather than faking a silent audio
-track. Adding audio later means adding a real source (loopback/monitor)
-and re-encoding; do not pretend one exists.
+AUDIO: the stream carries real audio only when a real source exists.
+``build_ffmpeg_command`` accepts optional audio inputs (commentary PCM
+FIFO from app/audio/commentary_feed.py, game audio via
+``AEGIS_GAME_AUDIO_INPUT``) and mixes them with amix + AAC encode. With
+no inputs the encoder gets ``-an`` — video-only, honestly — rather than
+a faked silent track. Master mute is applied by not passing inputs.
 
 CPU expectations (software x264, veryfast preset, 30 fps):
   * 1280x720@30  — a modest 2–4 vCPU box is enough; this is the default.
@@ -42,7 +44,7 @@ import subprocess
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from . import destinations
 from .destinations import build_destination_urls, key_present
@@ -259,6 +261,53 @@ class StreamService:
             "Install chromium or run the streamer service image."
         )
 
+    @staticmethod
+    def _resolve_audio_inputs() -> Tuple[List[Dict[str, Any]], float]:
+        """Resolve real audio inputs for the FFmpeg command.
+
+        Returns (audio_inputs, game_volume). Sources:
+          * commentary: the commentary PCM FIFO — included ONLY while the
+            commentary feed is running (opening a reader on a FIFO with no
+            writer would block the stream start forever).
+          * game: ``AEGIS_GAME_AUDIO_INPUT`` env, format ``<ffmpeg_format>:<device>``
+            e.g. ``alsa:hw:1,0`` (3.5mm cable route) or
+            ``file:/path/game_audio.mkv`` (scrcpy --record file).
+        Master mute drops every input; game volume comes from the mixer.
+        """
+        import os as _os
+
+        inputs: List[Dict[str, Any]] = []
+        game_volume = 1.0
+        try:
+            from app.audio.commentary_feed import get_commentary_feed
+            from app.audio.mixer import get_audio_mixer
+
+            mixer = get_audio_mixer()
+            if mixer.master_mute:
+                return [], 0.0
+            game_volume = mixer.game_volume
+            feed = get_commentary_feed()
+            if feed.is_running():
+                inputs.append(
+                    {
+                        "kind": "commentary",
+                        "input_args": [
+                            "-f", "s16le", "-ar", "48000", "-ac", "2",
+                            "-i", str(feed.fifo_path),
+                        ],
+                    }
+                )
+            game_spec = _os.environ.get("AEGIS_GAME_AUDIO_INPUT", "").strip()
+            if game_spec and ":" in game_spec:
+                fmt, device = game_spec.split(":", 1)
+                inputs.append(
+                    {"kind": "game", "input_args": ["-f", fmt, "-i", device]}
+                )
+        except Exception as exc:  # audio is optional: never break the stream
+            logger.warning("audio input resolution failed; streaming video-only", error=str(exc))
+            return [], 1.0
+        return inputs, game_volume
+
     def _launch_pipeline(self, resolved: List[Tuple[str, str]]) -> None:
         """Spawn Xvfb → Chromium → FFmpeg. Caller must hold the lock."""
         cfg = self.config
@@ -284,6 +333,7 @@ class StreamService:
             chromium_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
         )
 
+        audio_inputs, game_volume = self._resolve_audio_inputs()
         ffmpeg_cmd = self.build_ffmpeg_command(
             display=display,
             width=cfg.width,
@@ -292,6 +342,8 @@ class StreamService:
             video_bitrate=cfg.video_bitrate,
             x264_preset=cfg.x264_preset,
             urls=[url for _, url in resolved],
+            audio_inputs=audio_inputs,
+            game_volume=game_volume,
         )
         # NOTE: URLs contain stream keys; the command list is passed to
         # Popen directly and is never logged or returned anywhere.
@@ -398,14 +450,25 @@ class StreamService:
         video_bitrate: str,
         x264_preset: str,
         urls: List[str],
+        audio_inputs: Optional[List[Dict[str, Any]]] = None,
+        game_volume: float = 1.0,
     ) -> List[str]:
         """Build the FFmpeg argv capturing the Xvfb display and pushing to N RTMP URLs.
 
-        VIDEO-ONLY (``-an``): there is no TTS audio source today; we encode
-        what exists rather than faking a silent track.
+        ``audio_inputs``: optional list of ``{"input_args": [...], "kind":
+        "commentary"|"game"}``. Each ``input_args`` is appended verbatim as
+        one ``-i`` input (e.g. ``["-f", "s16le", "-ar", "48000", "-ac",
+        "2", "-i", fifo_path]``). Inputs are mixed with ``amix``; the game
+        channel gets the ``game_volume`` gain (the commentary channel is
+        already gained in software by the commentary feed, and master mute
+        is applied by simply not passing inputs).
+
+        With no audio inputs the encoder gets ``-an`` — video-only, honestly,
+        exactly as before. We encode what exists rather than faking a track.
         """
         if not urls:
             raise ValueError("At least one destination URL is required.")
+        audio_inputs = [a for a in (audio_inputs or []) if a.get("input_args")]
         cmd = [
             "ffmpeg",
             "-hide_banner",
@@ -419,7 +482,39 @@ class StreamService:
             str(fps),
             "-i",
             display,
-            "-an",  # video-only: no audio source exists (see module docstring)
+        ]
+        for spec in audio_inputs:
+            cmd += spec["input_args"]
+        if not audio_inputs:
+            cmd += ["-an"]  # video-only: no audio source exists
+        else:
+            # Audio input N (1-based after the video input) -> labelled stream.
+            mix_labels = []
+            for idx, spec in enumerate(audio_inputs, start=1):
+                kind = spec.get("kind", "commentary")
+                vol = game_volume if kind == "game" else 1.0
+                label = f"a{idx}"
+                mix_labels.append((f"[{idx}:a]", label, vol))
+            if len(mix_labels) == 1:
+                (src, label, vol) = mix_labels[0]
+                filtergraph = f"{src}volume={vol:.3f}[aout]"
+            else:
+                parts = []
+                mixed = []
+                for src, label, vol in mix_labels:
+                    parts.append(f"{src}volume={vol:.3f}[{label}]")
+                    mixed.append(f"[{label}]")
+                parts.append(f"{''.join(mixed)}amix=inputs={len(mixed)}:normalize=0[aout]")
+                filtergraph = ";".join(parts)
+            cmd += [
+                "-filter_complex", filtergraph,
+                "-map", "0:v",
+                "-map", "[aout]",
+                "-c:a", "aac",
+                "-b:a", "128k",
+                "-ar", "48000",
+            ]
+        cmd += [
             "-c:v",
             "libx264",
             "-preset",

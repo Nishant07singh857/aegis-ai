@@ -67,3 +67,69 @@ class MatchPointState(BaseModel):
     config: MatchPointConfig
     last_evaluation: Optional[MatchPointEvaluation] = None
     updated_at: str
+
+
+# ── Smash Rule championship engine (Phase 20) ──────────────────────────
+
+
+class SmashConfigUpdate(BaseModel):
+    """Smash-rule configuration. All values come from the tournament
+    ``rules.smash`` JSONB (see ``app/api/v1/tournament/schemas.py``) or
+    operator input — nothing is hardcoded by the engine."""
+
+    enabled: Optional[bool] = Field(
+        default=None, description="Master switch for the smash-rule variant"
+    )
+    target_set_after_match: Optional[int] = Field(
+        default=None,
+        ge=1,
+        description="Match after which the target is set (leader score + "
+        "bonus). BMSD 2026 used 12.",
+    )
+    target_bonus_points: Optional[int] = Field(
+        default=None,
+        ge=0,
+        description="Bonus added to the leader's score to set the target. "
+        "BMSD 2026 used 10 (116 + 10 = 126).",
+    )
+    final_match_number: Optional[int] = Field(
+        default=None,
+        ge=2,
+        description="Last match; the no-conversion fallback fires when it "
+        "completes. BMSD 2026 used 18.",
+    )
+    chickens_after_match_point: Optional[int] = Field(
+        default=None,
+        ge=1,
+        description="WWCDs needed after hitting match point (observed: 1, "
+        "in a later match).",
+    )
+
+
+class SmashStandingRow(BaseModel):
+    """One cumulative standings row after a completed match."""
+
+    team_id: str
+    team_name: Optional[str] = None
+    total_points: float = Field(default=0.0)
+    chickens: int = Field(default=0, ge=0)
+    finishes: int = Field(default=0, ge=0)
+
+
+class SmashMatchResultRequest(BaseModel):
+    """Record one completed match into the smash-rule state machine."""
+
+    match_number: int = Field(ge=1, description="1-based; must increase")
+    winner_team_id: Optional[str] = Field(
+        default=None,
+        description="Chicken-dinner winner; omit when not identifiable",
+    )
+    standings: List[SmashStandingRow] = Field(
+        min_length=1,
+        description="Cumulative standings AFTER this match",
+    )
+
+
+class SmashTransitionResponse(BaseModel):
+    transition: Dict[str, Any]
+    smash: Dict[str, Any]
