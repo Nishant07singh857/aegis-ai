@@ -5,7 +5,8 @@ OCR, object detection, tracking, and game state extraction.
 """
 
 from .base_detector import BaseDetector, DetectionResult, DetectionBox
-from .kill_feed_ocr import KillFeedOCR, KillFeedEntry
+from .killfeed import KillFeedDetector, KillFeedEntry  # production module (Phase 14 W2)
+from .kill_feed_ocr import KillFeedOCR  # deprecated shim -> KillFeedDetector
 from .hp_bar_detector import HPBarDetector, HPBarInfo
 from .minimap_reader import MinimapReader, MinimapData
 from .alive_counter import AliveCounter, AliveCountInfo
@@ -17,10 +18,18 @@ from .zone_detector import ZoneDetector, ZoneInfo
 from .knock_detector import KnockDetector, KnockInfo
 from .healing_detector import HealingDetector, HealingInfo
 from .loot_detector import LootDetector, LootInfo
+from .hud import (
+    HUDRegion, ReadStatus, HUDRead,
+    OCREngine, TesseractEngine, TemplateDigitEngine, select_ocr_engine,
+    AliveCountReader, AliveCountUpdate,
+    ZoneTimerReader,
+    TeamSlotStatus, TeamStatus, TeamStatusReader,
+    HUDPipeline, HUDPipelineOutput,
+)
 
 __all__ = [
     "BaseDetector", "DetectionResult", "DetectionBox",
-    "KillFeedOCR", "KillFeedEntry",
+    "KillFeedDetector", "KillFeedEntry", "KillFeedOCR",
     "HPBarDetector", "HPBarInfo",
     "MinimapReader", "MinimapData",
     "AliveCounter", "AliveCountInfo",
@@ -32,4 +41,10 @@ __all__ = [
     "KnockDetector", "KnockInfo",
     "HealingDetector", "HealingInfo",
     "LootDetector", "LootInfo",
+    "HUDRegion", "ReadStatus", "HUDRead",
+    "OCREngine", "TesseractEngine", "TemplateDigitEngine", "select_ocr_engine",
+    "AliveCountReader", "AliveCountUpdate",
+    "ZoneTimerReader",
+    "TeamSlotStatus", "TeamStatus", "TeamStatusReader",
+    "HUDPipeline", "HUDPipelineOutput",
 ]

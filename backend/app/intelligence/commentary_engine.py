@@ -164,6 +164,10 @@ def get_commentary_engine() -> CommentaryEngine:
 
 
 # ── Standalone test ────────────────────────────────────────────────────────────
+# Dev-only demo (never executed in production — guarded by __name__).
+# The killer/victim/team names below are ILLUSTRATIVE placeholders for a
+# smoke test of the generation path; live commentary always receives real
+# names from the game feed via the ctx argument.
 if __name__ == "__main__":
     async def test():
         engine = CommentaryEngine()

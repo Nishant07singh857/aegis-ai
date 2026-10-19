@@ -5,12 +5,29 @@ Real-time tournament points calculation with placement points,
 kill points, bonus points, and tiebreaker logic.
 """
 
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Mapping, Optional, Any
 from dataclasses import dataclass, field
 from enum import Enum
 import structlog
 
 logger = structlog.get_logger("aegis.analytics.points")
+
+# ── tournament-config wiring (Phase 13 / W1) ──────────────────────────
+# Documented defaults: the Krafton BMSD format — chicken dinner = 10
+# placement points, no other placement points, 1 point per finish.
+# Used whenever no active tournament exists in the database.
+DEFAULT_POINTS_PER_KILL: int = 1
+DEFAULT_CHICKEN_POINTS: int = 10
+
+# The ``tournaments.placement_points`` JSONB schema this loader reads:
+# string keys "1".."16" mapping to integer points, e.g. {"1": 10}.
+# Missing placements score 0.
+PLACEMENT_FIELD_BY_RANK = {
+    1: "first", 2: "second", 3: "third", 4: "fourth",
+    5: "fifth", 6: "sixth", 7: "seventh", 8: "eighth",
+    9: "ninth", 10: "tenth", 11: "eleventh", 12: "twelfth",
+    13: "thirteenth", 14: "fourteenth", 15: "fifteenth", 16: "sixteenth",
+}
 
 
 class TiebreakerMethod(str, Enum):
@@ -51,6 +68,22 @@ class PlacementPoints:
             13: self.thirteenth, 14: self.fourteenth, 15: self.fifteenth, 16: self.sixteenth,
         }
         return mapping.get(placement, 0)
+
+    @classmethod
+    def from_placement_map(cls, mapping: Optional[Mapping[Any, Any]]) -> "PlacementPoints":
+        """Build a placement table from the ``tournaments.placement_points``
+        JSONB schema (``{"1": 10, ...}``). Missing placements score 0 — the
+        map is authoritative, not merged with the dataclass defaults."""
+        pp = cls()
+        source = mapping or {}
+        for rank in range(1, 17):
+            field_name = PLACEMENT_FIELD_BY_RANK[rank]
+            raw = source.get(str(rank), source.get(rank, 0))
+            try:
+                setattr(pp, field_name, max(0, int(raw)))
+            except (TypeError, ValueError):
+                setattr(pp, field_name, 0)
+        return pp
 
 
 @dataclass
@@ -100,9 +133,16 @@ class PointsCalculator:
     """
     
     def __init__(self):
-        # Points configuration
-        self.points_per_kill: int = 1
-        self.placement_points = PlacementPoints()
+        # Points configuration — starts on the documented Krafton BMSD
+        # defaults (chicken=10, 1 point per finish); configure_from_tournament
+        # / configure_from_active_tournament replace them when a tournament
+        # config exists.
+        self.points_per_kill: int = DEFAULT_POINTS_PER_KILL
+        self.placement_points = PlacementPoints.from_placement_map(
+            {"1": DEFAULT_CHICKEN_POINTS}
+        )
+        # Where the current config came from: "defaults" or "tournament:<id>".
+        self.config_source: str = "defaults (Krafton BMSD)"
         
         # Bonus points rules
         self.bonus_rules: Dict[str, Dict[str, Any]] = {
@@ -122,11 +162,103 @@ class PointsCalculator:
         
         # Team points storage
         self.team_points: Dict[str, TournamentPoints] = {}
-        
+
         # Match results storage
         self.match_results: Dict[str, Dict[str, Any]] = {}
-        
+
         self._log = logger.bind(component="points_calculator")
+
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    # TOURNAMENT-CONFIG WIRING
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+    def configure_from_tournament(self, tournament: Any) -> None:
+        """Apply points config from a tournament.
+
+        Accepts the ``Tournament`` SQLAlchemy model, a plain dict with the
+        same fields, or ``None``. When ``None`` (no active tournament) the
+        documented Krafton BMSD defaults are applied (chicken=10,
+        per-finish=1) and a warning is logged. Never raises.
+        """
+        try:
+            if tournament is None:
+                self._apply_defaults("no active tournament found")
+                return
+            data = (
+                tournament
+                if isinstance(tournament, dict)
+                else {c.name: getattr(tournament, c.name, None) for c in tournament.__table__.columns}
+            )
+            ppk = data.get("points_per_kill")
+            self.points_per_kill = int(ppk) if ppk is not None else DEFAULT_POINTS_PER_KILL
+            self.placement_points = PlacementPoints.from_placement_map(
+                data.get("placement_points") or {}
+            )
+            self._apply_bonus_overrides(data.get("rules") or {})
+            tid = data.get("id") or data.get("slug") or "?"
+            self.config_source = f"tournament:{tid}"
+            self._log.info(
+                "points config loaded from tournament",
+                tournament=tid,
+                points_per_kill=self.points_per_kill,
+            )
+        except Exception as exc:
+            self._log.warning("failed to apply tournament points config", error=str(exc))
+            self._apply_defaults("config parse failed")
+
+    def _apply_defaults(self, reason: str) -> None:
+        """Fall back to the documented Krafton BMSD defaults."""
+        self.points_per_kill = DEFAULT_POINTS_PER_KILL
+        self.placement_points = PlacementPoints.from_placement_map(
+            {"1": DEFAULT_CHICKEN_POINTS}
+        )
+        self.config_source = "defaults (Krafton BMSD)"
+        self._log.warning(
+            "no active tournament — using Krafton BMSD defaults "
+            "(chicken=10 placement points, 1 point per finish)",
+            reason=reason,
+        )
+
+    def _apply_bonus_overrides(self, rules: Mapping[Any, Any]) -> None:
+        """Apply ``rules.scoring.bonus_rules`` point overrides, if present."""
+        if not isinstance(rules, Mapping):
+            return
+        overrides = (rules.get("scoring") or {})
+        if not isinstance(overrides, Mapping):
+            return
+        bonus = overrides.get("bonus_rules") or {}
+        if not isinstance(bonus, Mapping):
+            return
+        for name, rule in bonus.items():
+            if name in self.bonus_rules and isinstance(rule, Mapping) and "points" in rule:
+                try:
+                    self.bonus_rules[name]["points"] = max(0, int(rule["points"]))
+                except (TypeError, ValueError):
+                    continue
+
+    async def configure_from_active_tournament(self, session: Any) -> bool:
+        """Load the active tournament from the DB and apply its points config.
+
+        Returns True when a tournament was found and applied, False when the
+        defaults were used instead. Never raises — a dead or missing database
+        degrades to the documented defaults with a logged warning.
+        """
+        try:
+            # Local import: keeps analytics importable without the API layer.
+            from app.api.v1.tournament.service import TournamentService
+
+            svc = TournamentService(session)
+            active = await svc.get_active_tournament()
+            self.configure_from_tournament(
+                active.model_dump() if active is not None else None
+            )
+            return active is not None
+        except Exception as exc:
+            self._log.warning(
+                "active-tournament lookup failed — using defaults", error=str(exc)
+            )
+            self._apply_defaults("active-tournament lookup failed")
+            return False
     
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     # POINTS CALCULATION
@@ -357,6 +489,7 @@ class PointsCalculator:
             "teams_tracked": len(self.team_points),
             "matches_calculated": len(self.match_results),
             "points_per_kill": self.points_per_kill,
+            "config_source": self.config_source,
             "placement_points": {
                 str(p): pts for p, pts in [
                     (1, self.placement_points.first),

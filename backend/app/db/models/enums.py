@@ -112,15 +112,28 @@ class HighlightType(str, enum.Enum):
 
 
 class UserRole(str, enum.Enum):
-    """Control-plane roles (Phase 6).
+    """Control-plane roles (Phase 6; extended Phase 16).
 
-    Hierarchy: admin ⊇ operator ⊇ viewer.
+    Hierarchy: admin ⊇ operator ⊇ {director, spotter} (broadcast control)
+               ⊇ observer ⊇ viewer.
       * admin    — full control (user management, stream start/stop, director).
       * operator — day-to-day broadcast control (director console, stream
         start/stop). Admins can do everything operators can.
+      * director — broadcast-control seat (director console, scene/overlay
+        control). A subset of operator privileges.
+      * spotter  — broadcast-control seat (kill/zone logging via /spotter).
+        A subset of operator privileges.
+      * observer — team-scoped: sees ONLY their assigned team's data on
+        team-data endpoints (teams, players, analysis).
       * viewer   — read-only authenticated access (state, status, WS feed).
+
+    The canonical value list lives here; ``app.core.security.VALID_ROLES``
+    is derived from these members so the two can never drift apart.
     """
 
     ADMIN = "admin"
     OPERATOR = "operator"
+    DIRECTOR = "director"
+    SPOTTER = "spotter"
+    OBSERVER = "observer"
     VIEWER = "viewer"

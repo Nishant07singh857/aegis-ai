@@ -1,13 +1,16 @@
 "use client";
 
 /**
- * AEGIS AI — role-aware login (Phase 6). Uses useAuth().login, which stores
- * the JWT and resolves the role from the login response; surfaces the
- * thrown error honestly. On success — and whenever an already-signed-in
- * user lands here — redirects by role:
- *   viewer   -> /watch
- *   operator -> /broadcast/director
+ * AEGIS AI — role-aware login (Phase 6, redirect matrix extended Phase 16).
+ * Uses useAuth().login, which stores the JWT and resolves the role from the
+ * login response; surfaces the thrown error honestly. On success — and
+ * whenever an already-signed-in user lands here — redirects by role:
+ *   observer -> /observer
+ *   spotter  -> /spotter
+ *   director -> /broadcast/director
  *   admin    -> /admin
+ *   operator -> /control
+ *   viewer   -> /watch
  */
 
 import { useEffect, useState } from "react";

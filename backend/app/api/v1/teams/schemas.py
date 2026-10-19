@@ -12,6 +12,8 @@ class TeamCreate(BaseModel):
     tag: Optional[str] = Field(default=None, max_length=32)
     logo_url: Optional[str] = Field(default=None, max_length=500)
     colors: dict = Field(default_factory=dict)
+    region: Optional[str] = Field(default=None, max_length=100)
+    is_active: bool = True
 
 
 class TeamUpdate(BaseModel):
@@ -21,6 +23,8 @@ class TeamUpdate(BaseModel):
     tag: Optional[str] = Field(default=None, max_length=32)
     logo_url: Optional[str] = Field(default=None, max_length=500)
     colors: dict = Field(default_factory=dict)
+    region: Optional[str] = Field(default=None, max_length=100)
+    is_active: bool = True
 
 
 class TeamPatch(BaseModel):
@@ -30,23 +34,27 @@ class TeamPatch(BaseModel):
     tag: Optional[str] = Field(default=None, max_length=32)
     logo_url: Optional[str] = Field(default=None, max_length=500)
     colors: Optional[dict] = None
+    region: Optional[str] = Field(default=None, max_length=100)
+    is_active: Optional[bool] = None
 
 
 class TeamResponse(BaseModel):
-    """One team. ``source`` tells the caller where it came from.
+    """One team. ``source`` is always ``"db"`` — demo data is never served
+    from this API (the demo dataset lives only in the simulator).
 
-    Demo-sourced teams carry the rich simulation fields (rank, kills, ...).
-    DB-sourced teams honestly report ``None`` for stats columns that do not
-    exist on the ``teams`` table.
+    The teams table has no stats columns, so stats are honestly reported
+    as ``None``.
     """
 
     id: str
     name: str
     tag: Optional[str] = None
-    logo: Optional[str] = None       # demo dataset's emoji logo
+    logo: Optional[str] = None       # reserved for future demo/dataset use
     logo_url: Optional[str] = None   # DB column
-    color: Optional[str] = None      # demo dataset's hex color
+    color: Optional[str] = None      # convenience alias of colors.primary
     colors: dict = Field(default_factory=dict)  # DB JSONB column
+    region: Optional[str] = None
+    is_active: bool = True
     rank: Optional[int] = None
     kills: Optional[int] = None
     placement_pts: Optional[int] = None
@@ -54,7 +62,7 @@ class TeamResponse(BaseModel):
     wwcd: Optional[int] = None
     alive: Optional[bool] = None
     players: Optional[list] = None
-    source: Literal["db", "demo"]
+    source: Literal["db", "demo"] = "db"
 
 
 class TeamListResponse(BaseModel):

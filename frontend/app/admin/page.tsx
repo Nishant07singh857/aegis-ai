@@ -175,6 +175,47 @@ function AdminPageInner() {
           </Link>
         </div>
 
+        <Card title="Master Data">
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+            {[
+              {
+                href: "/admin/teams",
+                title: "Teams",
+                desc: "Team roster: names, tags, regions and active status",
+              },
+              {
+                href: "/admin/players",
+                title: "Players",
+                desc: "Players grouped by team: IGN, role and assignments",
+              },
+              {
+                href: "/admin/tournament",
+                title: "Tournaments",
+                desc: "Tournaments, scoring rules and the active event",
+              },
+              {
+                href: "/admin/users",
+                title: "Users",
+                desc: "Tournament-scoped accounts: staff, spotters, observers and credential sheets",
+              },
+            ].map((item) => (
+              <Link
+                key={item.href}
+                href={item.href}
+                className="group flex min-h-[44px] flex-col gap-1 rounded-lg border border-white/10 bg-white/[0.03] p-4 transition-colors hover:border-[#00f0ff]/50"
+              >
+                <span className="font-semibold text-white group-hover:text-[#00f0ff]">
+                  {item.title}
+                </span>
+                <span className="text-xs text-white/50">{item.desc}</span>
+                <span className="mt-1 text-xs text-white/40 group-hover:text-[#00f0ff]">
+                  Manage →
+                </span>
+              </Link>
+            ))}
+          </div>
+        </Card>
+
         <Card title="System">
           {!system.data && !system.error && <Loading label="Loading system…" />}
           {system.error && (

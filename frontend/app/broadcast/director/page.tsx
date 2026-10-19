@@ -755,7 +755,7 @@ function DirectorConsoleInner() {
 
 export default function DirectorConsolePage() {
   return (
-    <RequireRole roles={["operator", "admin"]}>
+    <RequireRole roles={["operator", "admin", "director"]}>
       <DirectorConsoleInner />
     </RequireRole>
   );

@@ -150,19 +150,28 @@ class DirectorAIEngine:
 
 # ── Usage Example ────────────────────────────────────────────────────────────
 if __name__ == "__main__":
+    # Dev-only demo (never executed in production — guarded by __name__).
+    # Team IDs come from the designated simulator dataset
+    # (app/api/v1/teams/demo_data.py), the single sanctioned source of
+    # illustrative squad data. The engine itself is name-agnostic: in live
+    # operation process_tick() receives team_id as an opaque string from the
+    # orchestrator / event bus, never from a literal.
+    from app.api.v1.teams.demo_data import DEMO_TEAMS
+
+    demo_ids = [t["id"] for t in DEMO_TEAMS[:3]]
     director = DirectorAIEngine()
-    
+
     events = [
-        BroadcastEvent(id="e1", team_id="Soul", type="looting", priority=EventPriority.LOW, confidence=0.99, emotion_score=10, timestamp=time.time(), description="Looting Pochinki"),
-        BroadcastEvent(id="e2", team_id="GodLike", type="fight", priority=EventPriority.HIGH, confidence=0.92, emotion_score=75, timestamp=time.time(), description="Active 3v3 fight at Rozhok"),
-        BroadcastEvent(id="e3", team_id="Revenant", type="wipe", priority=EventPriority.CRITICAL, confidence=0.88, emotion_score=95, timestamp=time.time(), description="Mavi wiping squad")
+        BroadcastEvent(id="e1", team_id=demo_ids[0], type="looting", priority=EventPriority.LOW, confidence=0.99, emotion_score=10, timestamp=time.time(), description="Looting Pochinki"),
+        BroadcastEvent(id="e2", team_id=demo_ids[1], type="fight", priority=EventPriority.HIGH, confidence=0.92, emotion_score=75, timestamp=time.time(), description="Active 3v3 fight at Rozhok"),
+        BroadcastEvent(id="e3", team_id=demo_ids[2], type="wipe", priority=EventPriority.CRITICAL, confidence=0.88, emotion_score=95, timestamp=time.time(), description="Squad wipe in progress")
     ]
-    
-    # 1. Revenant has critical priority wipe, Director should switch
+
+    # 1. demo_ids[2] has critical priority wipe, Director should switch
     decision1 = director.process_tick(events)
     print("Tick 1:", decision1)
-    
-    # 2. Immediate tick again with GodLike fight. Should reject due to cooldown.
+
+    # 2. Immediate tick again with demo_ids[1] fight. Should reject due to cooldown.
     decision2 = director.process_tick([events[1]])
     print("Tick 2 (Cooldown Test):", decision2)
     print("Explainability Log:", director.decision_log[-1])

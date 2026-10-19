@@ -61,6 +61,9 @@ psutil = "^6.1.0"
 obsws-python = "^1.7.0"
 websockets = "^14.0"
 
+# ── Screen capture (free, MIT) ─────────────────────────────────────────
+mss = "^10.1.0"
+
 # ── Utilities ──────────────────────────────────────────────────────
 fpdf2 = "^2.8.0"
 aiofiles = "^24.1.0"
@@ -73,7 +76,7 @@ click = "^8.1.8"
 humanize = "^4.11.0"
 
 [tool.poetry.extras]
-ml = ["torch", "torchvision", "ultralytics", "paddlepaddle", "paddleocr"]
+ml = ["torch", "torchvision", "ultralytics", "paddlepaddle", "paddleocr", "onnxruntime", "opencv-python-headless"]
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.3.0"

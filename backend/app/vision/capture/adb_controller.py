@@ -85,10 +85,13 @@ class ADBController:
         devices = []
         
         for line in result.split('\n')[1:]:
-            if line.strip() and 'device' in line:
-                parts = line.split()
+            parts = line.split()
+            # Only fully-authorized devices in "device" state. This excludes
+            # "unauthorized", "offline", and "no permissions" lines, which
+            # would previously slip through the loose `'device' in line` check.
+            if len(parts) >= 2 and parts[1] == "device":
                 serial = parts[0]
-                
+
                 # Get device info
                 model = await self._get_prop(serial, "ro.product.model")
                 android_ver = await self._get_prop(serial, "ro.build.version.release")
@@ -247,17 +250,74 @@ class ADBController:
     # SCREEN CAPTURE
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     
-    async def screenshot(self, serial: str, output_path: str = "/sdcard/screenshot.png") -> Optional[bytes]:
-        """Take a screenshot"""
-        await self._run_adb(f"-s {serial} shell screencap -p {output_path}")
-        result = await self._run_adb(f"-s {serial} pull {output_path}")
-        
-        # Read the pulled file
+    def screencap_png(self, serial: str) -> Optional[bytes]:
+        """
+        Fast screen capture for the frame loop: streams PNG bytes straight
+        over stdout via ``adb exec-out screencap -p`` (no pull roundtrip).
+
+        Returns None when the device is unreachable (honest "no feed").
+        This is a BLOCKING call -- run it in a thread (``asyncio.to_thread``),
+        which is what FrameGrabber does.
+        """
+        import subprocess
+
         try:
-            with open("screenshot.png", "rb") as f:
+            proc = subprocess.run(
+                [self.adb_path, "-s", serial, "exec-out", "screencap", "-p"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=15,
+            )
+        except (OSError, subprocess.TimeoutExpired) as e:
+            self._log.warning(f"screencap failed for {serial}: {e}")
+            return None
+
+        if proc.returncode != 0 or not proc.stdout:
+            err = proc.stderr.decode(errors="replace")[:200]
+            self._log.warning(f"screencap failed for {serial}: {err or 'empty output'}")
+            return None
+
+        data = proc.stdout
+        # PNG magic bytes -- anything else is an adb error message.
+        if not data.startswith(b"\x89PNG\r\n\x1a\n"):
+            self._log.warning(f"screencap returned non-PNG data for {serial}")
+            return None
+        return data
+
+    async def screenshot(self, serial: str, output_path: str = "/sdcard/screenshot.png") -> Optional[bytes]:
+        """
+        Take a screenshot and return its bytes.
+
+        NOTE: ``screencap_png`` is faster (single exec-out, no pull) and
+        should be used for the capture loop. This method keeps the old
+        capture-to-file flow for compatibility.
+        """
+        import os
+        import tempfile
+
+        await self._run_adb(f"-s {serial} shell screencap -p {output_path}")
+
+        # Pull to a real temp file (previously this read "screenshot.png"
+        # from the CWD, which the pull never wrote -- always returned None).
+        local_path = os.path.join(
+            tempfile.gettempdir(), f"aegis_screenshot_{serial.replace(':', '_')}.png"
+        )
+        pull_out = await self._run_adb(f"-s {serial} pull {output_path} {local_path}")
+
+        if "1 file pulled" not in pull_out and "pulled" not in pull_out.lower():
+            self._log.warning(f"screenshot pull failed for {serial}: {pull_out[:200]}")
+            return None
+
+        try:
+            with open(local_path, "rb") as f:
                 return f.read()
         except FileNotFoundError:
             return None
+        finally:
+            try:
+                os.unlink(local_path)
+            except OSError:
+                pass
     
     async def start_screen_record(
         self,

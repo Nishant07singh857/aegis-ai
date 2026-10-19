@@ -68,6 +68,9 @@ class PointsEngine:
         return teams[:16]
 
 # ── Usage Example ────────────────────────────────────────────────────────────
+# Dev-only demo (never executed in production — guarded by __name__).
+# The team tags below are ILLUSTRATIVE placeholders; the live engine only
+# ever sees team IDs from real kill events via process_kill_event().
 if __name__ == "__main__":
     engine = PointsEngine()
     engine.process_kill_event("GodL", "Soul")

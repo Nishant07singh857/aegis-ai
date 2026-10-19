@@ -28,6 +28,10 @@ class FeedEventType(str, Enum):
     MATCH_END = "match_end"
     STANDINGS_UPDATE = "standings_update"
     COMMENTARY = "commentary"
+    # Phase 14 (vision pipeline): HUD readers emit these. They are real
+    # game-state observations (alive counter, team-bar status), not guesses.
+    ALIVE_COUNT = "alive_count"
+    TEAM_STATUS = "team_status"
 
 
 #: Feed event type -> event-bus event type. kill/knock keep the bus
@@ -42,6 +46,8 @@ BUS_EVENT_TYPE_MAP: Dict[FeedEventType, str] = {
     FeedEventType.MATCH_END: "match_end",
     FeedEventType.STANDINGS_UPDATE: "standings",
     FeedEventType.COMMENTARY: "commentary",
+    FeedEventType.ALIVE_COUNT: "alive_count_update",
+    FeedEventType.TEAM_STATUS: "team_status_update",
 }
 
 

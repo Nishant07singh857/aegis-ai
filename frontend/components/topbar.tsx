@@ -19,6 +19,15 @@ import type { Role } from "@/lib/useRole";
  */
 const NAV_BY_ROLE: Record<Role, { href: string; label: string }[]> = {
   viewer: [{ href: "/watch", label: "Watch" }],
+  observer: [{ href: "/observer", label: "Observer" }],
+  spotter: [
+    { href: "/watch", label: "Watch" },
+    { href: "/spotter", label: "Spotter" },
+  ],
+  director: [
+    { href: "/watch", label: "Watch" },
+    { href: "/broadcast/director", label: "Director" },
+  ],
   operator: [
     { href: "/watch", label: "Watch" },
     { href: "/", label: "Live" },
@@ -42,6 +51,9 @@ const ROLE_BADGE_STYLES: Record<Role, string> = {
   viewer: "border-white/20 bg-white/5 text-zinc-300",
   operator: "border-[#00f0ff]/40 bg-[#00f0ff]/10 text-[#00f0ff]",
   admin: "border-amber-300/40 bg-amber-300/10 text-amber-300",
+  director: "border-violet-300/40 bg-violet-300/10 text-violet-300",
+  spotter: "border-green-300/40 bg-green-300/10 text-green-300",
+  observer: "border-sky-300/40 bg-sky-300/10 text-sky-300",
 };
 
 /**

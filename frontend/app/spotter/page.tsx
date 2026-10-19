@@ -537,7 +537,7 @@ function SpotterInner() {
 
 export default function SpotterPage() {
   return (
-    <RequireRole roles={["operator", "admin"]}>
+    <RequireRole roles={["operator", "admin", "spotter"]}>
       <SpotterInner />
     </RequireRole>
   );

@@ -95,7 +95,8 @@ from fastapi import Depends, Header, HTTPException, WebSocket, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from ..config import settings
-from ..core.security import security_manager, TokenPayload
+from ..core.security import VALID_ROLES, security_manager, TokenPayload
+from ..db.models.enums import UserRole
 
 _bearer_scheme = HTTPBearer(auto_error=False)
 _API_KEY_ALIAS = settings.API_KEY_HEADER  # "X-API-Key" — resolved at import
@@ -176,11 +177,13 @@ async def get_current_user(
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# PHASE 6 — ROLE-BASED ACCESS CONTROL
+# PHASE 6 — ROLE-BASED ACCESS CONTROL (extended Phase 16)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# Roles: admin | operator | viewer (see app.db.models.enums.UserRole).
-# Hierarchy: admin ⊇ operator ⊇ viewer — require_operator() admits admins
-# too, because admins can do everything operators can.
+# Roles: admin | operator | director | spotter | observer | viewer
+# (see app.db.models.enums.UserRole; app.core.security.VALID_ROLES is the
+# derived canonical tuple — never hardcode the list here).
+# Hierarchy: admin ⊇ operator ⊇ {director, spotter} (broadcast control)
+#            ⊇ observer ⊇ viewer.
 #
 # require_admin is bound at the end of this section as require_role("admin")
 # (replacing the Phase 1 definition, which was equivalent to
@@ -197,7 +200,7 @@ def principal_role(user: TokenPayload) -> str:
     Unknown values degrade to "viewer" (least privilege).
     """
     role = (user.role or "").strip().lower()
-    if role in ("admin", "operator", "viewer"):
+    if role in VALID_ROLES:
         return role
     if user.is_superuser or "admin" in (user.scopes or []):
         return "admin"
@@ -212,13 +215,14 @@ def require_role(*roles: str):
 
     Usage: ``user: TokenPayload = Depends(require_role("admin", "operator"))``.
     Raises 401 via get_current_user when unauthenticated, 403 when the role
-    is insufficient. Role names are case-insensitive.
+    is insufficient. Role names are case-insensitive; unknown names raise
+    ValueError at wiring time.
     """
     allowed = {r.strip().lower() for r in roles}
-    unknown = allowed - {"admin", "operator", "viewer"}
+    unknown = allowed - set(VALID_ROLES)
     if unknown:
         raise ValueError(
-            f"Unknown role(s) {sorted(unknown)}: use admin/operator/viewer."
+            f"Unknown role(s) {sorted(unknown)}: use {', '.join(VALID_ROLES)}."
         )
 
     async def _require_role(
@@ -237,8 +241,14 @@ def require_role(*roles: str):
     return _require_role
 
 
-#: Operator-or-above: admits "operator" AND "admin".
-require_operator = require_role("admin", "operator")
+#: Roles allowed on the broadcast-control plane: stream start/stop,
+#: director console, replay/PiP/rundown control, observer-slot assignment
+#: and the /ws/live control channel. admin ⊇ operator ⊇ {director, spotter}
+#: per the UserRole hierarchy.
+BROADCAST_CONTROL_ROLES = ("admin", "operator", "director", "spotter")
+
+#: Broadcast-control-or-above: admits every broadcast-control role.
+require_operator = require_role(*BROADCAST_CONTROL_ROLES)
 
 #: Admin-only. Replaces the Phase 1 definition (which was equivalent to
 #: get_current_user because every authenticated principal was the operator).
@@ -246,6 +256,67 @@ require_operator = require_role("admin", "operator")
 #: API keys resolving to "admin", so existing admin-gated routes behave
 #: exactly as before for the operator.
 require_admin = require_role("admin")
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# PHASE 16 — TEAM-SCOPED READS (observer role)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# Observers carry a ``team_id`` JWT claim. On team-data endpoints (teams,
+# players, analysis) an authenticated observer sees ONLY their own team:
+# list endpoints are filtered to it, and requesting any other team's id
+# (path or query param) is a 403. Non-observer principals — and anonymous
+# callers on the still-public read endpoints — are unaffected (scope None).
+
+
+async def get_current_team_id(
+    user: Optional[TokenPayload] = Depends(get_optional_user),
+) -> Optional[str]:
+    """Return the authenticated principal's ``team_id`` JWT claim, or None.
+
+    Never raises: anonymous callers simply have no team scope.
+    """
+    return user.team_id if user is not None else None
+
+
+async def require_team_scope(
+    user: Optional[TokenPayload] = Depends(get_optional_user),
+) -> Optional[str]:
+    """Team-scope dependency for team-data endpoints.
+
+    Returns the observer's ``team_id`` when the caller is an authenticated
+    observer, else None (no restriction — applies to admins, operators,
+    directors, spotters, viewers and anonymous callers alike).
+
+    Raises 403 when an observer's token carries no team assignment: an
+    observer without a team cannot be scoped, so team-data reads are
+    denied rather than silently widened.
+    """
+    if user is None or principal_role(user) != UserRole.OBSERVER.value:
+        return None
+    team_id = user.team_id
+    if not team_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Observer account has no team assignment: team-data access denied.",
+        )
+    return team_id
+
+
+def enforce_team_scope(requested_team_id: Optional[str], scope: Optional[str]) -> None:
+    """403 when an observer asks for a team other than their own.
+
+    ``scope`` is the value returned by ``require_team_scope()``. ``None``
+    means "not an observer" — no restriction. A ``None`` requested id means
+    "no specific team requested" — also allowed (routers then filter the
+    list to the observer's team instead).
+    """
+    if scope is None or requested_team_id is None:
+        return
+    if str(requested_team_id) != str(scope):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Observers may only access their assigned team's data.",
+        )
 
 
 def authenticate_websocket(

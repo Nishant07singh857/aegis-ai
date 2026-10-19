@@ -3,7 +3,7 @@ from __future__ import annotations
 import uuid
 from typing import Optional
 
-from sqlalchemy import ForeignKey, Float, String
+from sqlalchemy import Boolean, ForeignKey, Float, String
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -14,7 +14,9 @@ class Player(Base):
     __tablename__ = "players"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
-    team_id: Mapped[str] = mapped_column(String(36), ForeignKey("teams.id"), nullable=False)
+    # Nullable so a player can exist unassigned (admin UI "unassigned" roster).
+    team_id: Mapped[Optional[str]] = mapped_column(String(36), ForeignKey("teams.id"), nullable=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
 
     name: Mapped[str] = mapped_column(String(100), nullable=False)
     ign: Mapped[str] = mapped_column(String(50), nullable=False)

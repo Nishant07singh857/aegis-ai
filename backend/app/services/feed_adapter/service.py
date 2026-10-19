@@ -40,6 +40,10 @@ class FeedService:
     def register(self, adapter: "BaseFeedAdapter") -> None:
         self._adapters[adapter.adapter_id] = adapter
 
+    def get_adapter(self, adapter_id: str) -> Optional["BaseFeedAdapter"]:
+        """Return a registered adapter by id, or None."""
+        return self._adapters.get(adapter_id)
+
     def set_active(self, adapter_id: str) -> None:
         if adapter_id not in self._adapters:
             raise KeyError(adapter_id)

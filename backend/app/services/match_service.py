@@ -120,12 +120,11 @@ except ImportError:  # pragma: no cover - fallback until models land
 # DOMAIN CONSTANTS
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-# Placement points (standard battle-royale scoring)
-PLACEMENT_POINTS: Dict[int, int] = {
-    1: 15, 2: 12, 3: 10, 4: 8, 5: 6, 6: 4,
-    7: 2, 8: 1, 9: 1, 10: 1, 11: 1, 12: 1,
-}
-POINTS_PER_KILL = 1
+# Placement points are NOT hardcoded here. Scoring always comes from the
+# active tournament config via app.analytics.points_calculator.PointsCalculator
+# (see record_match_results). The module-level table was removed in Phase 13
+# because it contradicted both the Krafton BMSD defaults and per-tournament
+# configs. Do not reintroduce a hardcoded table.
 
 # Legal status transitions (compared as plain strings; DB returns str)
 _STATUS_TRANSITIONS: Dict[str, set] = {
@@ -167,9 +166,12 @@ class MatchService:
             raise ValueError(f"Match {match_id} not found")
         return match
 
-    @staticmethod
-    def _calculate_points(placement: int, kills: int) -> int:
-        return PLACEMENT_POINTS.get(placement, 0) + kills * POINTS_PER_KILL
+    # ── Points ──────────────────────────────────────────────────
+    # Scoring is tournament-config driven (Phase 13). See record_match_results,
+    # which configures a PointsCalculator from the active tournament.
+    # The old hardcoded _calculate_points table was removed: it contradicted
+    # both the Krafton BMSD defaults (chicken=10, 1/finish) and per-tournament
+    # configs. Do not reintroduce hardcoded scoring.
 
     # ── Creation / retrieval ────────────────────────────────────
 
@@ -319,10 +321,19 @@ class MatchService:
         mvp_player_id: Optional[str] = None,
     ) -> List[MatchTeamStats]:
         """
-        Record per-team results; calculates points = placement + kills.
-        Sets the match winner/MVP when provided.
+        Record per-team results; calculates points = placement + kills using
+        the ACTIVE TOURNAMENT's point system (via PointsCalculator). Falls back
+        to the documented Krafton BMSD defaults (chicken=10, 1/finish) when no
+        tournament is active. Sets the match winner/MVP when provided.
         """
         match = await self._get_match_or_raise(match_id)
+
+        # Tournament-config-driven scoring (Phase 13). Never raises: a dead or
+        # missing database degrades to the documented BMSD defaults.
+        from app.analytics.points_calculator import PointsCalculator
+
+        _calc = PointsCalculator()
+        await _calc.configure_from_active_tournament(self.session)
 
         created: List[MatchTeamStats] = []
         for tr in team_results:
@@ -337,13 +348,17 @@ class MatchService:
             )
             team_result.scalar_one_or_none()
 
+            total_points = (
+                _calc.placement_points.get_points(placement)
+                + kills * _calc.points_per_kill
+            )
             stats = MatchTeamStats(
                 match_id=match.id,
                 team_id=team_id,
                 placement=placement,
                 total_kills=kills,
                 total_damage=damage,
-                total_points=self._calculate_points(placement, kills),
+                total_points=total_points,
             )
             self.session.add(stats)
             created.append(stats)

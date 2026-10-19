@@ -16,6 +16,7 @@ from passlib.context import CryptContext
 from cryptography.fernet import Fernet
 
 from ..config import settings, Environment
+from ..db.models.enums import UserRole
 import structlog
 
 logger = structlog.get_logger("aegis.security")
@@ -28,14 +29,20 @@ class TokenPayload:
     is_superuser: bool = False
     scopes: list = None
     exp: Optional[datetime] = None
-    # Phase 6 RBAC: "admin" | "operator" | "viewer". Legacy tokens issued
-    # before roles existed carry no claim — decode_token() derives it from
-    # is_superuser/scopes so old tokens keep working.
+    # Phase 6 RBAC: "admin" | "operator" | "viewer" (+ "director" | "spotter" |
+    # "observer" since Phase 16). Legacy tokens issued before roles existed
+    # carry no claim — decode_token() derives it from is_superuser/scopes so
+    # old tokens keep working.
     role: str = "viewer"
+    # Phase 16: tournament/user scoping. tournament_id is None for global
+    # (non-tournament) accounts; team_id is set for observer accounts.
+    team_id: Optional[str] = None
+    tournament_id: Optional[str] = None
 
 
-#: Roles recognised by the control plane (mirrors app.db.models.enums.UserRole).
-VALID_ROLES = ("admin", "operator", "viewer")
+#: Roles recognised by the control plane — derived from
+#: app.db.models.enums.UserRole so the two can never drift apart.
+VALID_ROLES = tuple(r.value for r in UserRole)
 
 
 def _role_from_legacy_payload(payload: dict) -> str:
@@ -124,6 +131,8 @@ class SecurityManager:
         scopes: Optional[list] = None,
         expires_delta: Optional[timedelta] = None,
         role: str = "viewer",
+        team_id: Optional[str] = None,
+        tournament_id: Optional[str] = None,
     ) -> str:
         """Create a JWT access token"""
         if role not in VALID_ROLES:
@@ -143,6 +152,8 @@ class SecurityManager:
             "is_superuser": is_superuser,
             "scopes": scopes or [],
             "role": role,
+            "team_id": team_id,
+            "tournament_id": tournament_id,
             "exp": expire,
             "iat": datetime.utcnow(),
             "type": "access",
@@ -208,6 +219,8 @@ class SecurityManager:
                 is_superuser=payload.get("is_superuser", False),
                 scopes=payload.get("scopes", []),
                 role=_role_from_legacy_payload(payload),
+                team_id=payload.get("team_id"),
+                tournament_id=payload.get("tournament_id"),
                 exp=datetime.fromtimestamp(payload.get("exp")),
             )
         except jwt.ExpiredSignatureError:

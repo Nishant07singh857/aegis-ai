@@ -175,13 +175,11 @@ class Settings(BaseSettings):
     BGMI_PLAYERS_PER_TEAM: int = 4
     
     # Tournament Rules
-    POINTS_PER_KILL: int = Field(default=1, ge=0)
-    PLACEMENT_POINTS: Dict[int, int] = Field(default={
-        1: 15, 2: 12, 3: 10, 4: 8,
-        5: 6, 6: 5, 7: 4, 8: 3,
-        9: 2, 10: 2, 11: 1, 12: 1,
-        13: 1, 14: 1, 15: 1, 16: 1,
-    })
+    # NOTE (Phase 13): scoring lives in the tournament master data
+    # (Tournament.points_per_kill / Tournament.placement_points), read via
+    # PointsCalculator.configure_from_active_tournament(). The old hardcoded
+    # POINTS_PER_KILL / PLACEMENT_POINTS settings were removed: they had zero
+    # readers and contradicted per-tournament configs. Do not reintroduce.
     
     # Paths
     BASE_DIR: Path = Path(__file__).parent.parent
@@ -211,6 +209,9 @@ class Settings(BaseSettings):
     ENABLE_FIGHT_PREDICTION: bool = True
     ENABLE_AUTO_HIGHLIGHTS: bool = True
     ENABLE_CHEAT_DETECTION: bool = False  # Phase 2
+    # NOTE (Phase 13): the demo-mode gate lives in app/main.py as the
+    # module-level DEMO_MODE env flag (default OFF) — kept there so the
+    # simulator and inline demo endpoints share one source of truth.
     
     class Config:
         env_file = ".env"

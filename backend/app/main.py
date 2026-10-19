@@ -1,5 +1,6 @@
 import asyncio
 import json
+import os
 import random
 import time
 import uuid
@@ -17,8 +18,9 @@ from sqlalchemy import func, or_, select
 
 from app.config import settings
 from app.core.event_bus import EventBus, EventPriority
-from app.core.security import security_manager
+from app.core.security import VALID_ROLES, security_manager
 from app.api.deps import (
+    BROADCAST_CONTROL_ROLES,
     TokenPayload,
     authenticate_websocket,
     principal_role,
@@ -27,6 +29,11 @@ from app.api.deps import (
 )
 from app.api.v1.teams.demo_data import DEMO_TEAMS
 from app.api.v1.teams.router import router as teams_router
+# Phase 13 / W1: master-data expansion — players CRUD + tournament config.
+from app.api.v1.players.router import router as players_router
+# Phase 16: tournament-scoped user management (admin-only CRUD + bulk observers).
+from app.api.v1.users.router import router as users_router
+from app.api.v1.tournament.router import router as tournament_router
 from app.api.v1.stream.router import router as stream_router
 from app.api.v1.director.router import router as director_router
 from app.api.v1.cluster.router import router as cluster_router
@@ -72,6 +79,35 @@ logger = structlog.get_logger("aegis.main")
 # endpoints mutate these dicts in place.
 TEAMS = DEMO_TEAMS
 
+# ── Phase 13 (W3 dynamic binding): explicit demo-mode gate ──────────────
+# The match simulator, the agent-chatter simulator, and every inline endpoint
+# below that serves the hardcoded demo dataset are ONLY active when
+# DEMO_MODE=1/true/yes/on. Default OFF: with no live game feed connected,
+# the honest state is empty data — demo squad names must never be presented
+# as a live match, and no template may render them.
+DEMO_MODE = os.environ.get("DEMO_MODE", "").strip().lower() in {"1", "true", "yes", "on"}
+
+_DEMO_DISABLED_DETAIL = (
+    "Demo data is disabled (DEMO_MODE is off). Connect a live game feed via "
+    "/api/v1/feed/ingest, or set DEMO_MODE=1 for simulated data."
+)
+
+
+def _demo_unavailable() -> JSONResponse:
+    """Honest 503 for demo-serving endpoints when DEMO_MODE is off."""
+    return JSONResponse(status_code=503, content={"detail": _DEMO_DISABLED_DETAIL})
+
+
+def _live_teams() -> list:
+    """Teams visible to live render paths.
+
+    The demo dataset only when DEMO_MODE is on; otherwise an honest empty
+    list. Renaming a team in the DB (or via /api/v1/teams) is picked up by
+    the real read paths (teams API, 60s cache TTL) — nothing here caches a
+    name, so no literal can go stale.
+    """
+    return MATCH_STATE["teams"] if DEMO_MODE else []
+
 DEVICES = [
     {"id": "gpu1", "name": "Node-GPU-1", "type": "RTX 4090", "load": 92, "status": "online", "task": "Vision CV Pipeline", "assigned_agent": "vision"},
     {"id": "gpu2", "name": "Node-GPU-2", "type": "RTX 3090", "load": 45, "status": "online", "task": "Highlight Rendering", "assigned_agent": "commentary"},
@@ -94,7 +130,9 @@ AGENT_CHATTER_TEMPLATES = [
 MATCH_STATE = {
     "teams": TEAMS,
     "players": [p for team in TEAMS for p in team["players"]],
-    "matches": [{"id": "m1", "title": "BGIS Semifinals - Match 4", "map": "Erangel", "status": "LIVE"}],
+    # Phase 13: the demo match card exists only in DEMO_MODE; otherwise an
+    # honest empty list (served only by the gated demo endpoints anyway).
+    "matches": [{"id": "m1", "title": "BGIS Semifinals - Match 4", "map": "Erangel", "status": "LIVE"}] if DEMO_MODE else [],
     # Bounded ring buffers (Phase 12 reliability): these used to be plain lists
     # appended forever (OOM risk on a long-running server). deque(maxlen=N)
     # keeps only the most recent N entries; every reader below serializes via
@@ -127,7 +165,10 @@ MATCH_STATE = {
     # --- NEW STATE ---
     "devices": DEVICES,
     "agent_assignments": {
-        "vision": {"device_id": "gpu1", "device_name": "Node-GPU-1", "team_id": "t1", "team_name": "SouL"},
+        # Phase 13: no pre-assigned team. A hardcoded squad name here would
+        # leak into the live agent-assignments frame; assignments are set by
+        # the operator via the assign_agent WS action.
+        "vision": {"device_id": "gpu1", "device_name": "Node-GPU-1", "team_id": None, "team_name": None},
         "commentary": {"device_id": "gpu2", "device_name": "Node-GPU-2", "team_id": None, "team_name": None},
         "director": {"device_id": "cpu1", "device_name": "Node-CPU-1", "team_id": None, "team_name": None},
         "fight": {"device_id": "gpu1", "device_name": "Node-GPU-1", "team_id": None, "team_name": None},
@@ -147,8 +188,8 @@ MATCH_STATE = {
         {"name": "LLM Commentary Generator (Hindi Base)", "loss": "1.24", "status": "Fine-tuning", "active": True},
     ],
     "render_jobs": deque([
-        {"id": "j1", "title": "Soul Wipe - YouTube Shorts Format", "status": "RENDERING", "progress": 72, "format": "YouTube Shorts"},
-        {"id": "j2", "title": "Mortal Clutch - TikTok Format", "status": "PENDING", "progress": 0, "format": "TikTok"},
+        {"id": "j1", "title": "Squad Wipe - YouTube Shorts Format", "status": "RENDERING", "progress": 72, "format": "YouTube Shorts"},
+        {"id": "j2", "title": "Clutch Play - TikTok Format", "status": "PENDING", "progress": 0, "format": "TikTok"},
         {"id": "j3", "title": "Match 4 - Cinematic Recap", "status": "COMPLETED", "progress": 100, "format": "Full Broadcast"},
     ], maxlen=200),
 }
@@ -165,7 +206,9 @@ class ConnectionManager:
         self.active_connections.append(websocket)
         # Send initial state
         await websocket.send_json({"type": "connected", "data": {"status": "ok"}})
-        await websocket.send_json({"type": "standings", "data": MATCH_STATE["teams"]})
+        # Phase 13: the standings frame carries demo squads only in DEMO_MODE;
+        # otherwise an honest empty list (live names come from /api/v1/teams).
+        await websocket.send_json({"type": "standings", "data": _live_teams()})
         await websocket.send_json({"type": "kill_feed_init", "data": list(MATCH_STATE["kill_feed"])[-100:]})
         await websocket.send_json({"type": "director_state", "data": MATCH_STATE["director_state"]})
         # Phase 6: current director output state on connect.
@@ -269,13 +312,13 @@ async def handle_action(data: dict, user: Optional[TokenPayload] = None):
     # require_operator gates). Viewers may hold a valid JWT for the read-only
     # WS feeds, but only operator/admin principals may dispatch control
     # actions.
-    if principal_role(user) not in ("admin", "operator"):
+    if principal_role(user) not in BROADCAST_CONTROL_ROLES:
         await manager.broadcast({
             "type": "action_ack",
             "data": {
                 "action": action,
                 "status": "unauthorized",
-                "message": "Insufficient role: this control action requires operator or admin.",
+                "message": "Insufficient role: this control action requires a broadcast-control role (admin, operator, director or spotter).",
             },
         })
         logger.warning(f"Rejected WS action from insufficient role: {action} user={user.username}")
@@ -287,7 +330,9 @@ async def handle_action(data: dict, user: Optional[TokenPayload] = None):
         team_id = data.get("team_id")
 
         device = next((d for d in MATCH_STATE["devices"] if d["id"] == device_id), None)
-        team = next((t for t in MATCH_STATE["teams"] if t["id"] == team_id), None)
+        # Phase 13: resolve the display name from the demo-gated team list —
+        # None (honest unassigned) when DEMO_MODE is off.
+        team = next((t for t in _live_teams() if t["id"] == team_id), None)
 
         if agent_id and device:
             MATCH_STATE["agent_assignments"][agent_id] = {
@@ -310,7 +355,7 @@ async def handle_action(data: dict, user: Optional[TokenPayload] = None):
 
     elif action == "lock_pov":
         team_id = data.get("team_id")
-        team = next((t for t in MATCH_STATE["teams"] if t["id"] == team_id), None)
+        team = next((t for t in _live_teams() if t["id"] == team_id), None)
         if team:
             decision = {
                 "action": "LOCK_POV",
@@ -324,12 +369,14 @@ async def handle_action(data: dict, user: Optional[TokenPayload] = None):
             await manager.broadcast({"type": "action_ack", "data": {"action": "lock_pov", "status": "success", "team": team["name"]}})
 
     elif action == "start_scrim":
-        lobby_id = f"BGIS-{random.randint(1000, 9999)}"
+        lobby_id = f"LOBBY-{random.randint(1000, 9999)}"
         map_name = data.get("map", "Erangel")
         MATCH_STATE["scrim_state"] = {
             "active": True,
             "lobby_id": lobby_id,
-            "teams": [{"name": t["name"], "tag": t["tag"], "kills": 0, "placement": 0, "pts": 0} for t in MATCH_STATE["teams"][:8]],
+            # Phase 13: demo squads only in DEMO_MODE; otherwise an honest
+            # empty roster (the operator picks real teams from /api/v1/teams).
+            "teams": [{"name": t["name"], "tag": t["tag"], "kills": 0, "placement": 0, "pts": 0} for t in _live_teams()[:8]],
             "map": map_name,
             "status": "lobby_open"
         }
@@ -723,6 +770,35 @@ async def _authenticate_db_user(username: str, password: str) -> Optional[User]:
         return None
 
 
+async def _is_deactivated_db_user(username: str) -> bool:
+    """Phase 16: is there a DB user matching this identity whose account is
+    deactivated? Used by the login route to return an explicit 401
+    "account deactivated" instead of the generic "Invalid credentials."
+
+    NOTE: distinguishing deactivated accounts leaks account existence to
+    anyone probing usernames. This is a deliberate product decision for
+    Phase 16 (tournament staff must know WHY their login fails); the
+    usernames involved (obs01..obsNN etc.) are not sensitive.
+    Never raises: on any DB failure it returns False and the normal flow
+    continues.
+    """
+    ident = (username or "").strip().lower()
+    if not ident:
+        return False
+    try:
+        async with get_db_context() as db:
+            stmt = (
+                select(User)
+                .where(or_(func.lower(User.email) == ident, func.lower(User.username) == ident))
+                .limit(1)
+            )
+            user = (await db.execute(stmt)).scalars().first()
+            return user is not None and not user.is_active
+    except Exception as e:
+        logger.warning(f"Deactivation check unavailable, skipping: {e}")
+        return False
+
+
 # ==========================================
 # FASTAPI APP & LIFESPAN
 # ==========================================
@@ -759,13 +835,35 @@ async def lifespan(app: FastAPI):
     replay_service.buffer.subscribe_to(event_bus)
     await feed_service.attach(event_bus)
 
+    # Phase 14: register the vision-pipeline feed adapter so
+    # GET /api/v1/feed/status lists "vision" as a source. It is NOT
+    # started automatically -- capture begins only when an operator calls
+    # POST /api/v1/feed/vision/start. A machine without the vision stack
+    # (no cv2) simply skips registration; the backend keeps working.
+    try:
+        from app.services.feed_adapter.vision_adapter import VisionFeedAdapter
+        feed_service.register(VisionFeedAdapter(event_bus))
+        logger.info("Vision feed adapter registered (idle until operator starts it)")
+    except ImportError as e:
+        logger.warning(f"Vision feed adapter unavailable, skipping: {e}")
+
     # Phase 7 / W3: register this process in the distributed cluster registry
     # (Redis-backed, standalone fallback when Redis is unreachable).
     await node_registry.start(agent_count_provider=_active_agent_count)
         
     global simulation_task, chatter_task
-    simulation_task = asyncio.create_task(match_simulator())
-    chatter_task = asyncio.create_task(agent_chatter_simulator())
+    # Phase 13: the demo simulators broadcast hardcoded squad names into the
+    # live WS frames (kill feed, standings, director state, agent logs), so
+    # they run ONLY with explicit DEMO_MODE=1. Default: disabled — the honest
+    # state with no game feed is empty data, never fake squads.
+    if DEMO_MODE:
+        simulation_task = asyncio.create_task(match_simulator())
+        chatter_task = asyncio.create_task(agent_chatter_simulator())
+        logger.info("Demo simulators started (DEMO_MODE=1).")
+    else:
+        simulation_task = None
+        chatter_task = None
+        logger.info("Demo simulators disabled (DEMO_MODE is off).")
     
     logger.info("✅ AEGIS AI Ready")
     
@@ -809,6 +907,12 @@ app.add_middleware(RateLimitMiddleware)
 # domain extracted from main.py so far.
 app.include_router(teams_router, prefix="/api/v1", tags=["Teams"])
 
+# Phase 13 / W1: players CRUD + tournament config (public reads, admin writes).
+# Mounted BEFORE the legacy inline /api/v1/players + /api/v1/tournaments
+# demo endpoints below, so the real routers always win route matching.
+app.include_router(players_router, prefix="/api/v1", tags=["Players"])
+app.include_router(tournament_router, prefix="/api/v1", tags=["Tournament"])
+
 # Phase 5: automated live streaming (operator-gated start/stop, authenticated status).
 app.include_router(stream_router, prefix="/api/v1", tags=["Stream"])
 
@@ -832,6 +936,8 @@ app.include_router(observers_router, prefix="/api/v1", tags=["Observers"])
 # Phase 11: analysis product.
 app.include_router(analysis_router, prefix="/api/v1", tags=["Analysis"])
 app.include_router(dossiers_router, prefix="/api/v1", tags=["Dossiers"])
+# Phase 16: tournament-scoped user management (admin-only).
+app.include_router(users_router, prefix="/api/v1", tags=["Users"])
 
 @app.get("/")
 async def root():
@@ -852,8 +958,10 @@ async def login(form_data: OAuth2PasswordRequestForm = Depends()):
     1. Phase 1 configured operator credential (ADMIN_USERNAME/ADMIN_PASSWORD
        from settings) → JWT with role "admin".
     2. Phase 6 DB-backed users (email or username + bcrypt password) →
-       JWT carrying the user's DB role. This is how the seeded first admin
-       (ADMIN_EMAIL/ADMIN_PASSWORD) logs in.
+       JWT carrying the user's DB role. Phase 16 adds ``team_id`` and
+       ``tournament_id`` claims for scoped accounts, and deactivated
+       accounts get an explicit 401 "account deactivated". This is how the
+       seeded first admin (ADMIN_EMAIL/ADMIN_PASSWORD) logs in.
 
     Returns a JWT (HS256, ACCESS_TOKEN_EXPIRE_MINUTES expiry) usable as
     `Authorization: Bearer <token>` on protected routes, or as `?token=` on
@@ -870,11 +978,16 @@ async def login(form_data: OAuth2PasswordRequestForm = Depends()):
             role="admin",
         )
         return JSONResponse({"access_token": token, "token_type": "bearer"})
-    # 2) DB-backed users with roles.
+    # 2) DB-backed users with roles (Phase 6; extended Phase 16).
+    # Deactivated accounts fail closed with an explicit message — checked
+    # BEFORE the password so staff know the account itself is shut off.
+    # (See _is_deactivated_db_user for the deliberate user-enumeration note.)
+    if await _is_deactivated_db_user(form_data.username):
+        return JSONResponse({"error": "account deactivated."}, status_code=401)
     db_user = await _authenticate_db_user(form_data.username, form_data.password)
     if db_user is not None:
         role = (db_user.role or "viewer").strip().lower()
-        if role not in ("admin", "operator", "viewer"):
+        if role not in VALID_ROLES:
             role = "viewer"
         token = security_manager.create_access_token(
             user_id=str(db_user.id),
@@ -882,6 +995,10 @@ async def login(form_data: OAuth2PasswordRequestForm = Depends()):
             is_superuser=bool(db_user.is_superuser) or role == "admin",
             scopes=[role],
             role=role,
+            # Phase 16: team/tournament scoping claims (getattr-guarded so
+            # logins keep working against a DB that predates migration 010).
+            team_id=getattr(db_user, "team_id", None),
+            tournament_id=getattr(db_user, "tournament_id", None),
         )
         return JSONResponse({"access_token": token, "token_type": "bearer"})
     if not settings.ADMIN_PASSWORD:
@@ -941,24 +1058,11 @@ async def get_system_status():
         "event_bus": "connected" if event_bus._running else "disconnected",
     })
 
-@app.get("/api/v1/players")
-async def get_players():
-    players_data = []
-    for team in MATCH_STATE["teams"]:
-        for player in team["players"]:
-            players_data.append({
-                "id": f"{team['id']}_{player}",
-                "name": player,
-                "team": team["name"],
-                "role": "Assaulter",
-                "kills": team["kills"] // 4,
-                "damage": team["kills"] * 100,
-                "mvp_score": (team["kills"] * 10) + 50
-            })
-    return JSONResponse({"data": players_data})
-
 @app.get("/api/v1/players/mvp")
 async def get_mvp():
+    # Phase 13: serves the hardcoded demo dataset — gated behind DEMO_MODE.
+    if not DEMO_MODE:
+        return _demo_unavailable()
     players_data = []
     for team in MATCH_STATE["teams"]:
         for player in team["players"]:
@@ -978,6 +1082,9 @@ async def get_mvp():
 
 @app.get("/api/v1/matches")
 async def get_matches():
+    # Phase 13: hardcoded demo match card — gated behind DEMO_MODE.
+    if not DEMO_MODE:
+        return _demo_unavailable()
     return JSONResponse({"data": MATCH_STATE["matches"]})
 
 @app.get("/api/v1/matches/{match_id}/player-stats")
@@ -1053,24 +1160,40 @@ async def get_match_player_stats_endpoint(match_id: str):
 
 @app.get("/api/v1/matches/live")
 async def get_live_match():
+    # Phase 13: hardcoded demo match card — gated behind DEMO_MODE.
+    if not DEMO_MODE:
+        return _demo_unavailable()
     return JSONResponse({"data": MATCH_STATE["matches"][0]})
 
 @app.get("/api/v1/tournaments")
 async def get_tournaments():
+    # Phase 13: hardcoded demo tournament card — gated behind DEMO_MODE.
+    if not DEMO_MODE:
+        return _demo_unavailable()
     return JSONResponse({"data": [{"id": "tour1", "name": "BGIS 2024", "status": "LIVE"}]})
 
 @app.get("/api/v1/analytics/standings")
 async def get_standings():
+    # Phase 13: scores the hardcoded demo dataset — gated behind DEMO_MODE.
+    if not DEMO_MODE:
+        return _demo_unavailable()
     sorted_teams = sorted(MATCH_STATE["teams"], key=lambda x: x["total_pts"], reverse=True)
     return JSONResponse({"data": sorted_teams})
 
 @app.get("/api/v1/analytics/kill_feed")
 @app.get("/api/v1/analytics/kill-feed")
 async def get_kill_feed():
+    # Phase 13: MATCH_STATE["kill_feed"] is filled only by the demo match
+    # simulator — gated behind DEMO_MODE.
+    if not DEMO_MODE:
+        return _demo_unavailable()
     return JSONResponse({"data": list(MATCH_STATE["kill_feed"])})
 
 @app.get("/api/v1/analytics/summary")
 async def get_analytics_summary():
+    # Phase 13: aggregates the hardcoded demo dataset — gated behind DEMO_MODE.
+    if not DEMO_MODE:
+        return _demo_unavailable()
     total_kills = sum(t["kills"] for t in MATCH_STATE["teams"])
     teams_alive = sum(1 for t in MATCH_STATE["teams"] if t["alive"])
     return JSONResponse({

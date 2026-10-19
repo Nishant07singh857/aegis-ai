@@ -4,7 +4,7 @@ import uuid
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import Boolean, DateTime, Index, Integer, String, Text
+from sqlalchemy import Boolean, DateTime, ForeignKey, Index, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from ..base import Base
@@ -24,6 +24,23 @@ class User(Base):
     hashed_password: Mapped[str] = mapped_column(String(255), nullable=False)
     full_name: Mapped[str] = mapped_column(String(200), nullable=False)
     avatar_url: Mapped[Optional[str]] = mapped_column(String(500))
+
+    # Phase 16 tournament/team scoping: a user is bound to at most one
+    # tournament (null = global account) and, for observers, exactly one team.
+    tournament_id: Mapped[Optional[str]] = mapped_column(
+        String(36),
+        ForeignKey("tournaments.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    team_id: Mapped[Optional[str]] = mapped_column(
+        String(36),
+        ForeignKey("teams.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    # Username of the admin who created this account (null for legacy rows).
+    created_by: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
 
     # Account status
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)

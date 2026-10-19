@@ -1,10 +1,10 @@
-"""Team service: DB-first reads with demo fallback, DB-required writes.
+"""Team service: DB-backed master data with honest-empty reads, DB-required writes.
 
-Reads try the database first and fall back to the in-memory demo dataset
-(``app/api/v1/teams/demo_data.py``) whenever the database is unreachable OR
-the teams table exists but is empty. The first ``session.execute()`` is the
-point where a dead database surfaces — that is where every read catches and
-falls back, and where every write converts the failure into a 503.
+Reads NEVER invent teams: when the database is unreachable they raise 503,
+when the teams table is empty they return an empty list, and when no DB
+session is configured (tests, local dev) they return honest empties. The
+demo dataset (``app/api/v1/teams/demo_data.py``) is NOT imported here — it
+exists only as an explicit simulator source.
 
 Writes only touch the database. When it is down they raise 503 with a clear
 message instead of silently mutating in-memory state.
@@ -23,7 +23,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.cache import cache_manager
 from app.db.models.team import Team
 from app.db.repositories.team_repository import TeamRepository
-from .demo_data import DEMO_TEAMS
 from .schemas import TeamCreate, TeamPatch, TeamResponse, TeamUpdate
 
 logger = logging.getLogger("aegis.teams")
@@ -98,27 +97,6 @@ def _invalidate_teams_cache() -> None:
     logger.debug(f"Teams cache invalidated (generation {_cache_generation})")
 
 
-def _demo_response(d: dict) -> TeamResponse:
-    color = d.get("color")
-    return TeamResponse(
-        id=d["id"],
-        name=d["name"],
-        tag=d.get("tag"),
-        logo=d.get("logo"),
-        logo_url=None,
-        color=color,
-        colors={"primary": color} if color else {},
-        rank=d.get("rank"),
-        kills=d.get("kills"),
-        placement_pts=d.get("placement_pts"),
-        total_pts=d.get("total_pts"),
-        wwcd=d.get("wwcd"),
-        alive=d.get("alive"),
-        players=list(d.get("players", [])),
-        source="demo",
-    )
-
-
 def _db_response(team: Team) -> TeamResponse:
     """Map a DB row. The teams table has no stats columns, so stats are
     honestly reported as None."""
@@ -131,6 +109,8 @@ def _db_response(team: Team) -> TeamResponse:
         logo_url=team.logo_url,
         color=colors.get("primary"),
         colors=colors,
+        region=team.region,
+        is_active=bool(team.is_active),
         rank=None,
         kills=None,
         placement_pts=None,
@@ -162,7 +142,7 @@ class TeamService:
             raise _db_unavailable(RuntimeError("no database session"))
         return self.repo
 
-    # ---------- reads (DB-first, demo fallback, cached 60s) ----------
+    # ---------- reads (cached 60s, honest empty — NEVER fake teams) ----------
 
     async def list_teams(self, skip: int = 0, limit: int = 100) -> List[TeamResponse]:
         key = _cache_key("list", str(skip), str(limit))
@@ -174,17 +154,17 @@ class TeamService:
         return result
 
     async def _fetch_list_teams(self, skip: int = 0, limit: int = 100) -> List[TeamResponse]:
-        if self.repo is not None:
-            try:
-                rows = await self.repo.get_all(skip=skip, limit=limit, order_by="name")
-            except Exception as exc:  # DB down — first execute() surfaces here
-                logger.warning(f"DB read failed, falling back to demo teams: {exc}")
-                rows = None
-            if rows:
-                return [_db_response(t) for t in rows]
-            if rows is not None:
-                logger.info("Teams table is empty, falling back to demo teams")
-        return [_demo_response(d) for d in DEMO_TEAMS][skip : skip + limit]
+        if self.repo is None:
+            return []  # no DB configured — honest empty, never fake
+        try:
+            rows = await self.repo.get_all(skip=skip, limit=limit, order_by="name")
+        except Exception as exc:  # DB down — first execute() surfaces here
+            logger.warning(f"DB read failed for teams list: {exc}")
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Database unavailable — cannot list teams right now.",
+            )
+        return [_db_response(t) for t in rows]
 
     async def get_team(self, team_id: str) -> Optional[TeamResponse]:
         key = _cache_key("get", team_id)
@@ -196,17 +176,17 @@ class TeamService:
         return result
 
     async def _fetch_team(self, team_id: str) -> Optional[TeamResponse]:
-        if self.repo is not None:
-            try:
-                row = await self.repo.get(team_id)
-            except Exception as exc:
-                logger.warning(f"DB read failed, falling back to demo teams: {exc}")
-                row = None
-            if row is not None:
-                return _db_response(row)
-            # DB up but row missing (or table empty) — check demo data too
-        demo = next((d for d in DEMO_TEAMS if d["id"] == team_id), None)
-        return _demo_response(demo) if demo else None
+        if self.repo is None:
+            return None
+        try:
+            row = await self.repo.get(team_id)
+        except Exception as exc:
+            logger.warning(f"DB read failed for team {team_id}: {exc}")
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Database unavailable — cannot fetch team right now.",
+            )
+        return _db_response(row) if row is not None else None
 
     # ---------- writes (DB required) ----------
 

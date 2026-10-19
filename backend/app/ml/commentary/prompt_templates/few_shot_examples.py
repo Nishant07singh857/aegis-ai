@@ -2,6 +2,13 @@
 """
 AEGIS AI - Few-Shot Examples
 Curated few-shot examples for commentary generation.
+
+ILLUSTRATIVE NAMES ONLY: every player/team name in this file (ScoutOP,
+Jonathan, Mortal, Snax, ClutchGod, GodLike, Team Soul, ...) is a fictional
+placeholder used to teach the LLM a commentary STYLE. They are prompt
+examples, never live data — no live path may render or return them, and the
+live commentary generator (agents/commentary_agents/script_generator.py)
+uses its own name-free example set.
 """
 
 from typing import Dict, List

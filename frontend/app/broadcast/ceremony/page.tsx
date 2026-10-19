@@ -160,7 +160,7 @@ function OperatorPanel({ onChanged }: { onChanged: () => void }) {
       <textarea
         value={interviewJson}
         onChange={(e) => setInterviewJson(e.target.value)}
-        placeholder='{"player": "Sarang", "quote": "We just played our game."}'
+        placeholder='{"player": "PLAYER_NAME", "quote": "We just played our game."}'
         rows={3}
         style={{ ...inputStyle, fontFamily: 'monospace' }}
       />

@@ -3,7 +3,7 @@ from __future__ import annotations
 import uuid
 from typing import Optional
 
-from sqlalchemy import String
+from sqlalchemy import Boolean, String
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -18,5 +18,7 @@ class Team(Base):
     tag: Mapped[Optional[str]] = mapped_column(String(32))
     logo_url: Mapped[Optional[str]] = mapped_column(String(500))
     colors: Mapped[dict] = mapped_column(JSONB, default=dict, nullable=False)
+    region: Mapped[Optional[str]] = mapped_column(String(100))
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
 
     players = relationship("Player", back_populates="team", cascade="all, delete-orphan")
