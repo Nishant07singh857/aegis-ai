@@ -3,6 +3,12 @@
 AEGIS AI - OBS WebSocket Client
 Production-grade OBS WebSocket client with auto-reconnect,
 command queuing, state tracking, and error recovery.
+
+CANONICAL (Phase 22 / W3): this is THE OBS client of the product.
+The parallel ``app.production`` OBS stack is deprecated (see the
+notice in ``production/obs_manager.py``) and must not gain features.
+The declared ``obsws-python`` dependency is not used — this client
+speaks the obs-websocket v5 protocol directly.
 """
 
 import asyncio

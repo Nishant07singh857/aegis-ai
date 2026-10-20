@@ -30,8 +30,10 @@ paid LLM providers.
 
 import asyncio
 import os
+import re
 import time
 import hashlib
+from pathlib import Path
 from typing import Dict, List, Optional, Any, Tuple
 from dataclasses import dataclass, field
 from enum import Enum
@@ -40,6 +42,96 @@ from ..base_agent import BaseAgent, AgentConfig
 from ...core.event_bus import EventBus, EventRecord
 
 logger = structlog.get_logger("aegis.agents.voice")
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# PIPER VOICE ROUTING (Phase 21 / T5a)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# Local Piper voices live in one directory (default: <repo>/.local-voices,
+# override with AEGIS_VOICES_DIR). Routing is by language: English lines
+# use the English voice, Hindi/Hinglish lines use the Hindi voice. A voice
+# that is not on disk is simply unavailable — routing never fakes one.
+
+#: language code -> Piper voice file in the voices directory.
+PIPER_VOICE_FILES: Dict[str, str] = {
+    "hi": "hi_IN-pratham-medium.onnx",  # Hindi (also reads Hinglish)
+    "en": "en_US-amy-medium.onnx",  # English (US)
+}
+
+#: HuggingFace source of the free voices (rhasspy/piper-voices).
+PIPER_VOICE_URLS: Dict[str, str] = {
+    "hi": "https://huggingface.co/rhasspy/piper-voices/resolve/main/hi/hi_IN/pratham/medium/hi_IN-pratham-medium.onnx",
+    "en": "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/amy/medium/en_US-amy-medium.onnx",
+}
+
+# Roman-script Hindi (Hinglish) marker words. English commentary rarely
+# contains two or more of these; Hinglish lines almost always do.
+_HINGLISH_MARKERS = {
+    "hai", "hain", "kya", "aur", "ne", "ka", "ki", "ke", "ko", "mein",
+    "se", "bhi", "yeh", "woh", "ab", "toh", "nahi", "bahut", "khel",
+    "raha", "rahe", "gaya", "liye", "wala", "wali", "diya", "hoga",
+    "karega", "jeet", "haar", "mauka", "dhamaka",
+}
+
+
+def default_voices_dir() -> Path:
+    """Directory holding the local Piper voices.
+
+    ``$AEGIS_VOICES_DIR`` wins; otherwise ``<repo>/.local-voices`` (the
+    directory the Hindi voice was installed into — see docs/AUDIO.md).
+    """
+    env = os.environ.get("AEGIS_VOICES_DIR", "").strip()
+    if env:
+        return Path(env).expanduser()
+    return Path(__file__).resolve().parents[4] / ".local-voices"
+
+
+def piper_voice_path(language: str, voices_dir: Optional[Path] = None) -> Optional[Path]:
+    """On-disk Piper model for a language, or None if not installed."""
+    name = PIPER_VOICE_FILES.get((language or "").strip().lower())
+    if not name:
+        return None
+    path = (voices_dir or default_voices_dir()) / name
+    return path if path.exists() else None
+
+
+def available_piper_voices(voices_dir: Optional[Path] = None) -> Dict[str, bool]:
+    """Honest availability map: language -> voice file present on disk."""
+    return {
+        lang: piper_voice_path(lang, voices_dir) is not None
+        for lang in PIPER_VOICE_FILES
+    }
+
+
+def resolve_piper_model_path(
+    language: str, voices_dir: Optional[Path] = None
+) -> Optional[str]:
+    """Model path to synthesize ``language`` with, or None.
+
+    Order: (1) the per-language voice in the voices directory;
+    (2) the legacy single-model ``AEGIS_TTS_MODEL_PATH`` override;
+    (3) None — synthesis stays honestly disabled for that language.
+    """
+    voice = piper_voice_path(language, voices_dir)
+    if voice is not None:
+        return str(voice)
+    legacy = os.environ.get("AEGIS_TTS_MODEL_PATH", "").strip()
+    if legacy and os.path.exists(legacy):
+        return legacy
+    return None
+
+
+def detect_text_language(text: str) -> str:
+    """Route a commentary line: ``"hi"`` for Hindi/Hinglish, else ``"en"``.
+
+    Devanagari script is Hindi outright. Roman-script lines count as
+    Hinglish when they carry >= 2 distinct Hinglish marker words —
+    English lines essentially never do.
+    """
+    if any("\u0900" <= ch <= "\u097f" for ch in text):
+        return "hi"
+    tokens = re.findall(r"[a-z]+", text.lower())
+    markers = {t for t in tokens if t in _HINGLISH_MARKERS}
+    return "hi" if len(markers) >= 2 else "en"
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # ENUMS & DATA MODELS
@@ -117,6 +209,11 @@ class SynthesizedAudio:
       * synthesized=False  -> no real audio was produced (no engine
         configured, or synthesis failed). audio_data will be None.
       * synthesized=True   -> audio_data holds real bytes from a real engine.
+      * source             -> provenance: "live" (synthesized for this
+        exact text just now), "cache" (LRU hit for this exact text), or
+        "cached_fallback" (live synthesis FAILED and a pre-rendered
+        generic line was substituted — `text` is then the generic line
+        actually spoken and `requested_text` the line that failed).
       * naturalness_score  -> 0.0 means "not measured"; it is only set to a
         real value when the engine actually reports one. Never hardcode it.
     """
@@ -126,6 +223,8 @@ class SynthesizedAudio:
     audio_url: Optional[str] = None
     duration_seconds: float = 0.0
     synthesized: bool = False
+    source: str = "live"
+    requested_text: Optional[str] = None
 
     # Voice used
     profile: Optional[VoiceProfile] = None
@@ -189,12 +288,13 @@ class VoiceSynthesizer(BaseAgent):
     def _initialize_profiles(self) -> None:
         """Initialize default voice profiles"""
         
-        # Primary Hindi caster (engine configured via AEGIS_TTS_ENGINE; NONE by default)
+        # Primary Hindi caster — wired to the real installed Piper voice
+        # (Phase 21/22: hi_IN-pratham-medium.onnx in the voices dir).
         self.profiles["hindi_caster_1"] = VoiceProfile(
             profile_id="hindi_caster_1",
             name="Aryan - Hindi Hype Caster",
-            engine=TTSEngine.NONE,  # honest default: no engine configured
-            voice_id="eleven_hindi_hype_01",
+            engine=TTSEngine.PIPER,
+            voice_id="hi_IN-pratham-medium",
             gender=VoiceGender.MALE,
             language="hi",
             pitch=1.1,
@@ -209,12 +309,13 @@ class VoiceSynthesizer(BaseAgent):
             emotion_boost=0.8,
         )
         
-        # English analyst caster (engine configured via AEGIS_TTS_ENGINE; NONE by default)
+        # English analyst caster — wired to the real installed Piper voice
+        # (Phase 21/22: en_US-amy-medium.onnx in the voices dir).
         self.profiles["english_analyst"] = VoiceProfile(
             profile_id="english_analyst",
             name="James - English Analyst",
-            engine=TTSEngine.NONE,  # honest default: no engine configured
-            voice_id="eleven_english_analyst_01",
+            engine=TTSEngine.PIPER,
+            voice_id="en_US-amy-medium",
             gender=VoiceGender.MALE,
             language="en",
             pitch=0.95,
@@ -229,12 +330,13 @@ class VoiceSynthesizer(BaseAgent):
             emotion_boost=0.4,
         )
         
-        # Hinglish caster (engine configured via AEGIS_TTS_ENGINE; NONE by default)
+        # Hinglish caster — Hindi Piper voice reads Roman-script Hinglish
+        # (Phase 21 routing decision; same installed voice file).
         self.profiles["hinglish_caster"] = VoiceProfile(
             profile_id="hinglish_caster",
             name="Rahul - Hinglish Caster",
-            engine=TTSEngine.NONE,  # honest default: no engine configured
-            voice_id="eleven_hinglish_01",
+            engine=TTSEngine.PIPER,
+            voice_id="hi_IN-pratham-medium",
             gender=VoiceGender.MALE,
             language="hi",
             pitch=1.05,
@@ -280,10 +382,14 @@ class VoiceSynthesizer(BaseAgent):
             SynthesizedAudio or None if failed
         """
         
-        # Get profile
-        profile_id = profile_id or self.active_profile_id
+        # Get profile — explicit profile_id wins; otherwise route the
+        # line to the right language profile (Phase 21/T5a).
+        if profile_id is None:
+            language = detect_text_language(text)
+            routed = self.get_profile_for_language(language)
+            profile_id = routed.profile_id if routed is not None else self.active_profile_id
         profile = self.profiles.get(profile_id)
-        
+
         if not profile:
             self._log.error(f"Voice profile not found: {profile_id}")
             return None
@@ -292,7 +398,10 @@ class VoiceSynthesizer(BaseAgent):
         cache_key = self._get_cache_key(text, profile_id, style)
         if cache and cache_key in self.audio_cache:
             self.total_cache_hits += 1
-            return self.audio_cache[cache_key]
+            hit = self.audio_cache[cache_key]
+            if hit.source == "live":
+                hit.source = "cache"
+            return hit
         
         # Apply emotion modulation
         voice_params = self._apply_emotion_modulation(
@@ -336,9 +445,96 @@ class VoiceSynthesizer(BaseAgent):
             
         except Exception as e:
             self._log.error(f"Synthesis failed: {e}")
-        
+
+        # Phase 22 fallback: live synthesis was configured (Piper) but
+        # failed — substitute a pre-rendered generic line from the
+        # fallback pack, honestly labelled source="cached_fallback".
+        # Only when a Piper attempt was intended; an explicitly disabled
+        # engine (env "none") stays silent.
+        env_engine = os.environ.get("AEGIS_TTS_ENGINE")
+        intended_piper = (
+            env_engine.strip().lower() == "piper"
+            if env_engine is not None
+            else profile.engine == TTSEngine.PIPER
+        )
+        if intended_piper:
+            fallback = self._fallback_from_pack(text, profile)
+            if fallback is not None:
+                return fallback
+
         return None
-    
+
+    def _fallback_from_pack(
+        self, requested_text: str, profile: VoiceProfile
+    ) -> Optional[SynthesizedAudio]:
+        """Load a pre-rendered generic line for the profile's language."""
+        try:
+            from app.audio.fallback_pack import (
+                fallback_text_for,
+                find_fallback_wav,
+            )
+
+            wav_path = find_fallback_wav(profile.language)
+            if wav_path is None:
+                return None
+            audio_bytes = wav_path.read_bytes()
+            duration = max(1.5, len(requested_text.split()) / 3.0)
+            try:
+                import io
+                import wave
+
+                with wave.open(io.BytesIO(audio_bytes), "rb") as wav:
+                    frames = wav.getnframes()
+                    rate = wav.getframerate() or 22050
+                    duration = frames / rate
+            except Exception:
+                pass
+            generic_text = fallback_text_for(wav_path) or requested_text
+            self._log.warning(
+                "live synthesis failed; serving cached fallback line",
+                language=profile.language,
+                fallback_file=wav_path.name,
+            )
+            return SynthesizedAudio(
+                audio_id=hashlib.md5(
+                    f"fallback_{wav_path.name}_{time.time()}".encode()
+                ).hexdigest()[:16],
+                text=generic_text,
+                audio_data=audio_bytes,
+                duration_seconds=duration,
+                synthesized=True,  # real pre-rendered Piper audio
+                source="cached_fallback",
+                requested_text=requested_text,
+                profile=profile,
+                engine_used=TTSEngine.PIPER,
+            )
+        except Exception as e:
+            self._log.error(f"Fallback pack lookup failed: {e}")
+            return None
+
+    async def warm_models(self) -> Dict[str, bool]:
+        """Load each installed Piper voice once (pays the cold model-load
+        cost at boot / match start instead of on the first live line)."""
+        warmed: Dict[str, bool] = {}
+        for lang in PIPER_VOICE_FILES:
+            path = resolve_piper_model_path(lang)
+            if not path:
+                warmed[lang] = False
+                continue
+            try:
+                from piper import PiperVoice
+
+                voice = await asyncio.to_thread(PiperVoice.load, path)
+                cache = getattr(self, "_voice_cache", None)
+                if cache is None:
+                    cache = self._voice_cache = {}
+                cache[path] = voice
+                warmed[lang] = True
+            except Exception as e:
+                self._log.warning(f"voice warm-up failed for {lang}: {e}")
+                warmed[lang] = False
+        return warmed
+
     async def synthesize_batch(
         self,
         lines: List[Tuple[str, Optional[str], Optional[VoiceStyle]]],
@@ -366,7 +562,16 @@ class VoiceSynthesizer(BaseAgent):
         when a real engine actually produced audio.
         """
 
-        engine = os.environ.get("AEGIS_TTS_ENGINE", "none").strip().lower()
+        # Engine resolution (Phase 22): an explicit AEGIS_TTS_ENGINE env
+        # wins (including "none" = deliberately disabled). When the env is
+        # UNSET, the profile's own engine applies — profiles are wired to
+        # the local Piper voices, so routing works out of the box when the
+        # voice files are installed, and stays honestly silent when they
+        # are not (resolve_piper_model_path returns None).
+        if "AEGIS_TTS_ENGINE" in os.environ:
+            engine = os.environ.get("AEGIS_TTS_ENGINE", "none").strip().lower()
+        else:
+            engine = profile.engine.value
 
         if engine in ("", "none"):
             if not self._no_engine_warned:
@@ -416,19 +621,30 @@ class VoiceSynthesizer(BaseAgent):
             )
             return None
 
-        model_path = os.environ.get("AEGIS_TTS_MODEL_PATH", "").strip()
-        if not model_path or not os.path.exists(model_path):
+        model_path = resolve_piper_model_path(profile.language)
+        if not model_path:
             self._log.error(
-                "AEGIS_TTS_ENGINE=piper but AEGIS_TTS_MODEL_PATH is missing "
-                "or not a file. Download a voice (python -m "
-                "piper.download_voices <voice>) and point AEGIS_TTS_MODEL_PATH "
-                "at the .onnx file."
+                "AEGIS_TTS_ENGINE=piper but no Piper voice is available for "
+                f"language '{profile.language}'. Expected "
+                f"{PIPER_VOICE_FILES.get(profile.language, '<unknown voice>')} "
+                f"in {default_voices_dir()} (download: "
+                f"{PIPER_VOICE_URLS.get(profile.language, 'see docs/AUDIO.md')}), "
+                "or set AEGIS_TTS_MODEL_PATH to a .onnx voice file."
             )
             return None
 
         try:
             start_time = time.time()
-            voice = PiperVoice.load(model_path)
+            # Phase 22 latency fix: cache loaded voices per model path.
+            # Reloading the ONNX voice on EVERY line was most of the warm
+            # synthesis cost; a loaded PiperVoice is reusable across lines.
+            cache = getattr(self, "_voice_cache", None)
+            if cache is None:
+                cache = self._voice_cache = {}
+            voice = cache.get(model_path)
+            if voice is None:
+                voice = PiperVoice.load(model_path)
+                cache[model_path] = voice
 
             # Piper synthesis is blocking; keep it off the event loop.
             def _render() -> bytes:
@@ -582,7 +798,11 @@ class VoiceSynthesizer(BaseAgent):
     
     def get_stats(self) -> Dict[str, Any]:
         """Get synthesizer statistics"""
-        engine = os.environ.get("AEGIS_TTS_ENGINE", "none").strip().lower() or "none"
+        if "AEGIS_TTS_ENGINE" in os.environ:
+            engine = os.environ.get("AEGIS_TTS_ENGINE", "none").strip().lower() or "none"
+        else:
+            # Profiles default to Piper; enabled iff a voice is installed.
+            engine = "piper" if any(available_piper_voices().values()) else "none"
         return {
             "total_synthesized": self.total_synthesized,
             "cache_hits": self.total_cache_hits,
@@ -592,6 +812,9 @@ class VoiceSynthesizer(BaseAgent):
             # Honest engine status: "none" means synthesis is disabled.
             "tts_engine": engine,
             "synthesis_enabled": engine not in ("", "none"),
+            # Phase 21/T5a: per-language Piper voice availability on disk.
+            "voices_dir": str(default_voices_dir()),
+            "voices": available_piper_voices(),
             "profiles": {
                 pid: {
                     "name": p.name,

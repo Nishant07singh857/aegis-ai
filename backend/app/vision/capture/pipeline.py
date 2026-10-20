@@ -80,6 +80,13 @@ class FramePipeline:
     ):
         self.config = config or load_capture_config()
         self._detectors: Dict[str, Any] = {}
+        # Phase 21: per-detector frame-skip state (see CaptureConfig
+        # detector_intervals). Counter counts frames since the detector
+        # last ran; a detector is due when the counter reaches its
+        # interval. Counters are seeded at registration so different
+        # detectors with the same interval do NOT all land on the same
+        # frame (stagger by registration index).
+        self._since_run: Dict[str, int] = {}
         self._executor = ThreadPoolExecutor(
             max_workers=max_workers,
             thread_name_prefix="aegis-pipeline",
@@ -95,10 +102,18 @@ class FramePipeline:
     def register_detector(self, detector: Any) -> None:
         """Register a detector (must expose ``.name`` and async ``detect``)."""
         name = getattr(detector, "name", None) or detector.__class__.__name__
+        interval = self.config.detector_interval(name)
+        registration_index = len(self._detectors)
+        # Stagger: first run happens after 1 + (index % interval) frames,
+        # so e.g. the three interval-5 detectors run on different frames.
+        self._since_run[name] = (
+            interval - 1 - (registration_index % interval) if interval > 1 else 0
+        )
         self._detectors[name] = detector
         self._log.info("Detector registered", detector=name)
 
     def unregister_detector(self, name: str) -> bool:
+        self._since_run.pop(name, None)
         return self._detectors.pop(name, None) is not None
 
     @property
@@ -180,8 +195,23 @@ class FramePipeline:
             outcome.processing_time_ms = (time.perf_counter() - det_started) * 1000
             return outcome
 
+        # --- frame-skip gating: not every detector runs every frame ---
+        due: Dict[str, Any] = {}
+        for name, det in self._detectors.items():
+            self._since_run[name] = self._since_run.get(name, 0) + 1
+            if self._since_run[name] >= self.config.detector_interval(name):
+                self._since_run[name] = 0
+                due[name] = det
+            else:
+                # Honest "not run this frame": outcome is "skipped" with
+                # no result, so consumers emit nothing for it (same
+                # contract as the no-feed path).
+                result.outcomes[name] = DetectorOutcome(
+                    detector_name=name, status="skipped"
+                )
+
         outcomes = await asyncio.gather(
-            *(_run_one(name, det) for name, det in self._detectors.items())
+            *(_run_one(name, det) for name, det in due.items())
         )
         for outcome in outcomes:
             result.outcomes[outcome.detector_name] = outcome
@@ -222,6 +252,10 @@ class FramePipeline:
     def get_stats(self) -> Dict[str, Any]:
         return {
             "detectors": self.detector_names,
+            "detector_intervals": {
+                name: self.config.detector_interval(name)
+                for name in self._detectors
+            },
             "frames_processed": self._frames_processed,
             "frames_skipped_no_feed": self._frames_skipped_no_feed,
             "preprocess": {

@@ -41,6 +41,9 @@ class FrameSource(str, Enum):
     """Types of frame sources"""
     RTMP_STREAM = "rtmp_stream"
     NDI_FEED = "ndi_feed"
+    # Phase 22 (W3, M2): plug-ready only — see vision/ingest_plugins.py.
+    # Honest no-feed until a real WebRTC producer is implemented.
+    WEBRTC_FEED = "webrtc_feed"
     SCREEN_CAPTURE = "screen_capture"
     ADB_DEVICE = "adb_device"
     VIDEO_FILE = "video_file"
@@ -70,6 +73,12 @@ class CapturedFrame:
     source_id: str
     source_type: FrameSource
     timestamp: float = field(default_factory=time.time)
+    # Phase 22 (W3, M1/M2 latency sync): ``timestamp`` IS the server
+    # capture (grab) time. ``device_capture_ts`` stays None until a
+    # source can supply a genuine on-device capture timestamp — the
+    # sync tracker labels offsets accordingly and never pretends
+    # grab-time offsets are device-clock offsets.
+    device_capture_ts: Optional[float] = None
 
     # Image data
     image: Optional[np.ndarray] = None
@@ -189,6 +198,17 @@ class FrameGrabber:
         self._capture_errors: Dict[str, int] = {}
 
         self._ndi_warned = False
+        self._webrtc_warned = False
+
+        # Phase 22 (W3, M1/M2): feed-health scoring + latency-sync
+        # tracking, wired into the capture loop below. Before Phase 22
+        # FeedHealthMonitor.record_frame()/record_frame_drop() had ZERO
+        # call sites, so the (real) health score was never exposed.
+        from .feed_health_monitor import FeedHealthMonitor
+        from .latency_sync import LatencySyncTracker
+
+        self.health = FeedHealthMonitor()
+        self.sync = LatencySyncTracker()
 
         self._running = False
         self._log = logger.bind(component="frame_grabber")
@@ -209,6 +229,8 @@ class FrameGrabber:
         self._last_frame_time[source_id] = 0.0
         self._last_error[source_id] = ""
         self._consecutive_failures[source_id] = 0
+        self.health.register_feed(source_id, expected_fps=float(config.target_fps))
+        self.sync.register_feed(source_id)
 
         self._log.info(
             f"Source added: {source_id}",
@@ -233,6 +255,8 @@ class FrameGrabber:
             del self.frame_buffers[source_id]
             del self._frame_counter[source_id]
             del self._capture_errors[source_id]
+            self.health.unregister_feed(source_id)
+            self.sync.unregister_feed(source_id)
             self._states.pop(source_id, None)
             self._last_frame_time.pop(source_id, None)
             self._last_error.pop(source_id, None)
@@ -340,6 +364,11 @@ class FrameGrabber:
             handle = self._open_cv_handle(config)
         elif config.source_type == FrameSource.NDI_FEED:
             raise RuntimeError("NDI capture is not supported in this build")
+        elif config.source_type == FrameSource.WEBRTC_FEED:
+            raise RuntimeError(
+                "WebRTC capture is plug-ready only in this build "
+                "(see app/vision/ingest_plugins.py)"
+            )
         else:
             raise RuntimeError(f"Unsupported source type: {config.source_type}")
 
@@ -438,7 +467,18 @@ class FrameGrabber:
                     self._last_error[source_id] = ""
                     self._states[source_id] = SourceState.LIVE
                     backoff = config.reconnect_delay  # reset backoff on success
+                    # Phase 22 (W3): health + sync bookkeeping per frame.
+                    self.health.record_frame(source_id, timestamp=frame.timestamp)
+                    self.health.update_health(source_id)
+                    self.sync.record_frame(
+                        source_id,
+                        capture_ts=frame.timestamp,
+                        device_ts=frame.device_capture_ts,
+                    )
                 else:
+                    # Phase 22 (W3): a missed capture IS a frame drop —
+                    # log it in the health monitor (was never wired).
+                    self.health.record_frame_drop(source_id)
                     # No frame this tick (silent device / stalled stream):
                     # not fatal, but after enough misses the source is
                     # honestly reported as RECONNECTING and the handle is
@@ -480,6 +520,9 @@ class FrameGrabber:
         """Record a failure, flip state, close the stale handle, back off."""
         source_id = config.source_id
         self._capture_errors[source_id] += 1
+        # Phase 22 (W3): failures count as drops + health errors too.
+        self.health.record_frame_drop(source_id)
+        self.health.record_error(source_id, error)
         self._consecutive_failures[source_id] += 1
         self._last_error[source_id] = error
         self._close_handle(source_id)
@@ -521,6 +564,8 @@ class FrameGrabber:
             return await self._capture_cv(config, handle, FrameSource.WEBCAM)
         elif config.source_type == FrameSource.NDI_FEED:
             return await self._capture_ndi(config)
+        elif config.source_type == FrameSource.WEBRTC_FEED:
+            return await self._capture_webrtc(config)
         elif config.source_type == FrameSource.SCREEN_CAPTURE:
             return await self._capture_screen(config, handle)
         elif config.source_type == FrameSource.ADB_DEVICE:
@@ -561,6 +606,31 @@ class FrameGrabber:
             )
             self._ndi_warned = True
         await asyncio.sleep(0)  # keep the signature async
+        return None
+
+    async def _capture_webrtc(self, config: StreamConfig) -> Optional[CapturedFrame]:
+        """WebRTC is plug-ready only — honest no-feed via the plug point."""
+        from ..ingest_plugins import get_ingest_plugin
+
+        plugin = get_ingest_plugin("webrtc")
+        if plugin is not None and plugin.available():
+            image = plugin.grab_frame()
+            if image is not None:  # pragma: no cover - future producer
+                return CapturedFrame(
+                    frame_id=self._frame_counter.get(config.source_id, 0) + 1,
+                    source_id=config.source_id,
+                    source_type=FrameSource.WEBRTC_FEED,
+                    image=image,
+                    width=image.shape[1],
+                    height=image.shape[0],
+                )
+        if not self._webrtc_warned:
+            self._log.warning(
+                "WebRTC capture is plug-ready only in this build -- "
+                f"source {config.source_id} will report NO_FEED."
+            )
+            self._webrtc_warned = True
+        await asyncio.sleep(0)
         return None
 
     async def _capture_screen(
@@ -713,6 +783,10 @@ class FrameGrabber:
                     now - self._last_frame_time.get(source_id, 0.0), 2
                 ) if self._last_frame_time.get(source_id) else None,
                 "last_error": self._last_error.get(source_id, ""),
+                # Phase 22 (W3, M1): the health score, live at last —
+                # plus this feed's latency-sync report (±500 ms frame).
+                "health": self.health.get_feed_health(source_id),
+                "sync": self.sync.feed_report(source_id),
             }
 
         return {
@@ -722,6 +796,9 @@ class FrameGrabber:
             ),
             "total_sources": len(self.captures),
             "sources": source_stats,
+            # Phase 22 (W3): fleet health summary + alignment report.
+            "feed_health": self.health.get_stats(),
+            "latency_sync": self.sync.alignment_report(),
         }
 
     def reset(self) -> None:
@@ -732,4 +809,10 @@ class FrameGrabber:
             buffer.clear()
         self._frame_counter.clear()
         self._total_frames_captured = 0
+        self.health.reset()
+        self.sync.reset()
+        for source_id in self.captures:
+            cfg = self.captures[source_id]
+            self.health.register_feed(source_id, expected_fps=float(cfg.target_fps))
+            self.sync.register_feed(source_id)
         self._log.info("Frame grabber reset")

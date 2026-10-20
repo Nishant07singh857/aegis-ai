@@ -1,3 +1,16 @@
+"""
+DEPRECATED (Phase 22 / W3, Tech — OBS consolidation).
+
+The canonical OBS client for this product is
+``app.broadcast.obs_client.OBSClient`` (hand-rolled obs-websocket v5,
+the client the director/broadcast path actually uses). This
+``production/`` stack is a parallel mock-era implementation kept ONLY
+because ``app.live_production_integration`` still imports
+``OBSManager`` from here. Do not add features here; new OBS work goes
+through ``broadcast/obs_client.py``. Removing this stack is blocked
+on migrating ``live_production_integration.py``.
+"""
+
 import asyncio
 from .production_state import ProductionState
 from .websocket_client import OBSWebsocketClient

@@ -304,25 +304,31 @@ def sample_fight_features():
 
 @pytest.fixture
 def sample_commentary_prompt():
-    """Create a sample commentary prompt"""
-    from app.ml.commentary.llm_chain import CommentaryPrompt, CommentaryStyle, CommentaryTone
-    
-    return CommentaryPrompt(
-        event_type="kill",
-        event_description="ScoutOP eliminates Jonathan with M416",
-        player_name="ScoutOP",
-        team_name="Team Soul",
-        opponent_name="Jonathan",
-        opponent_team="GodLike",
-        weapon="M416",
-        damage=100,
-        headshot=True,
-        distance=50.0,
-        zone_phase=3,
-        teams_alive=12,
-        style=CommentaryStyle.HINGLISH,
-        tone=CommentaryTone.EXCITED,
-    )
+    """Create a sample commentary prompt.
+
+    Phase 22 (W3): the dead ``app.ml.commentary.llm_chain`` module this
+    fixture used to import was deleted (zero production callers, stale
+    paid-provider defaults). No test consumed this fixture; it now
+    returns a plain dict with the same fields so any future consumer
+    migrates to the live commentary types in ``app.ai`` /
+    ``agents.commentary_agents`` instead of resurrecting the chain.
+    """
+    return {
+        "event_type": "kill",
+        "event_description": "ScoutOP eliminates Jonathan with M416",
+        "player_name": "ScoutOP",
+        "team_name": "Team Soul",
+        "opponent_name": "Jonathan",
+        "opponent_team": "GodLike",
+        "weapon": "M416",
+        "damage": 100,
+        "headshot": True,
+        "distance": 50.0,
+        "zone_phase": 3,
+        "teams_alive": 12,
+        "style": "hinglish",
+        "tone": "excited",
+    }
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

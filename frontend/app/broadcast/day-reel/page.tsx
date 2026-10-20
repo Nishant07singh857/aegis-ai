@@ -23,7 +23,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
-import { apiFetch } from "@/lib/api";
+import { apiFetch, API_BASE } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { RequireRole } from "@/lib/guard";
 import { Badge, Card, EmptyState, ErrorState, Loading } from "@/components/ui";
@@ -53,6 +53,14 @@ interface DayReel {
   max_duration_ms: number;
   max_segments: number;
   is_empty: boolean;
+}
+
+// Phase 21/T4: per-moment video render state (GET /api/v1/replay/renders).
+interface HighlightRender {
+  moment_id: string;
+  status: "not_requested" | "pending" | "rendered" | "no_source" | "failed";
+  files: Record<string, string>;
+  error: string | null;
 }
 
 const KIND_TONE: Record<string, "amber" | "red" | "cyan"> = {
@@ -86,6 +94,9 @@ function DayReelPageInner() {
   const [error, setError] = useState<string | null>(null);
   const [playingId, setPlayingId] = useState<string | null>(null);
   const [playMsg, setPlayMsg] = useState<string | null>(null);
+  const [renders, setRenders] = useState<Record<string, HighlightRender>>({});
+  const [renderingId, setRenderingId] = useState<string | null>(null);
+  const [renderMsg, setRenderMsg] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     setError(null);
@@ -94,11 +105,65 @@ function DayReelPageInner() {
         token: token ?? undefined,
       });
       setReel(data);
+      const list = await apiFetch<HighlightRender[]>("/api/v1/replay/renders", {
+        token: token ?? undefined,
+      }).catch(() => [] as HighlightRender[]);
+      setRenders(
+        Object.fromEntries((list ?? []).map((r) => [r.moment_id, r])),
+      );
     } catch (e) {
       setReel(null);
       setError(e instanceof Error ? e.message : "Request failed");
     }
   }, [token]);
+
+  async function downloadRender(momentId: string, kind: string, filename: string) {
+    try {
+      const res = await fetch(
+        `${API_BASE}/api/v1/replay/highlights/${momentId}/files/${kind}`,
+        { headers: token ? { Authorization: `Bearer ${token}` } : {} },
+      );
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 10_000);
+    } catch (e) {
+      setRenderMsg(
+        `Download failed: ${e instanceof Error ? e.message : "unknown error"}`,
+      );
+    }
+  }
+
+  async function handleRender(seg: DayReelSegment) {
+    setRenderingId(seg.moment_id);
+    setRenderMsg(null);
+    try {
+      const render = await apiFetch<HighlightRender>(
+        `/api/v1/replay/highlights/${seg.moment_id}/render`,
+        { method: "POST", token: token ?? undefined, body: {} },
+      );
+      setRenders((prev) => ({ ...prev, [render.moment_id]: render }));
+      setRenderMsg(
+        render.status === "rendered"
+          ? "Video rendered — downloads are on the segment card."
+          : render.status === "no_source"
+            ? "No recorded match video for this moment yet — no clip was fabricated."
+            : `Render ${render.status}${render.error ? `: ${render.error}` : ""}`,
+      );
+    } catch (e) {
+      setRenderMsg(
+        e instanceof Error ? `Render failed: ${e.message}` : "Render failed",
+      );
+    } finally {
+      setRenderingId(null);
+    }
+  }
 
   useEffect(() => {
     void load();
@@ -149,6 +214,12 @@ function DayReelPageInner() {
         {playMsg && (
           <p className="mb-4 rounded border border-cyan-800 bg-cyan-950/40 px-3 py-2 text-sm text-cyan-200">
             {playMsg}
+          </p>
+        )}
+
+        {renderMsg && (
+          <p className="mb-4 rounded border border-emerald-800 bg-emerald-950/40 px-3 py-2 text-sm text-emerald-200">
+            {renderMsg}
           </p>
         )}
 
@@ -216,6 +287,57 @@ function DayReelPageInner() {
                       {seg.team && <span>Team: {seg.team}</span>}
                       <span>{fmtDuration(seg.duration_ms)} in reel</span>
                     </div>
+                    {(() => {
+                      const r = renders[seg.moment_id];
+                      const status = r?.status ?? "not_requested";
+                      return (
+                        <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-zinc-400">
+                          <span>
+                            Video:{" "}
+                            <span
+                              className={
+                                status === "rendered"
+                                  ? "font-semibold text-emerald-300"
+                                  : status === "failed"
+                                    ? "font-semibold text-red-300"
+                                    : "text-amber-300"
+                              }
+                            >
+                              {status === "not_requested"
+                                ? "not rendered yet"
+                                : status}
+                            </span>
+                          </span>
+                          {status === "rendered" &&
+                            Object.entries(r!.files).map(([kind, filename]) => (
+                              <button
+                                key={kind}
+                                onClick={() =>
+                                  void downloadRender(
+                                    seg.moment_id,
+                                    kind,
+                                    filename,
+                                  )
+                                }
+                                className="underline text-cyan-300 hover:text-cyan-200"
+                              >
+                                ⤓ {kind}
+                              </button>
+                            ))}
+                          {canOperate && status !== "rendered" && (
+                            <button
+                              onClick={() => void handleRender(seg)}
+                              disabled={renderingId === seg.moment_id}
+                              className="rounded border border-cyan-600 px-2 py-0.5 text-xs font-semibold text-cyan-300 hover:bg-cyan-600 hover:text-white disabled:opacity-50"
+                            >
+                              {renderingId === seg.moment_id
+                                ? "Rendering…"
+                                : "🎬 Render video"}
+                            </button>
+                          )}
+                        </div>
+                      );
+                    })()}
                     {canOperate &&
                       seg.window_start_iso &&
                       seg.window_end_iso && (

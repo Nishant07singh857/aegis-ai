@@ -22,7 +22,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
-import { apiFetch } from "@/lib/api";
+import { apiFetch, API_BASE } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { RequireRole } from "@/lib/guard";
 import { Badge, Card, EmptyState, ErrorState, Loading } from "@/components/ui";
@@ -40,6 +40,18 @@ interface HighlightMoment {
   window_start_iso: string;
   window_end_iso: string;
   event_ids: string[];
+  // Phase 21/T4 video render state (populated by the backend renderer).
+  render_status: "not_requested" | "pending" | "rendered" | "no_source" | "failed";
+  render_files: Record<string, string>;
+  render_error: string | null;
+}
+
+interface HighlightRender {
+  moment_id: string;
+  status: HighlightMoment["render_status"];
+  files: Record<string, string>;
+  file_urls: Record<string, string>;
+  error: string | null;
 }
 
 interface ReplayMark {
@@ -83,6 +95,126 @@ function HighlightsPageInner() {
   const [playMsg, setPlayMsg] = useState<string | null>(null);
   const [label, setLabel] = useState("");
   const [markMsg, setMarkMsg] = useState<string | null>(null);
+  const [renderingId, setRenderingId] = useState<string | null>(null);
+  const [renderMsg, setRenderMsg] = useState<string | null>(null);
+
+  const KIND_URL: Record<string, string> = {
+    landscape: "16:9",
+    portrait: "9:16",
+    gif: "GIF",
+  };
+
+  async function downloadRender(
+    momentId: string,
+    kind: string,
+    filename: string,
+  ) {
+    try {
+      const res = await fetch(
+        `${API_BASE}/api/v1/replay/highlights/${momentId}/files/${kind}`,
+        { headers: token ? { Authorization: `Bearer ${token}` } : {} },
+      );
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 10_000);
+    } catch (e) {
+      setRenderMsg(
+        `Download failed: ${e instanceof Error ? e.message : "unknown error"}`,
+      );
+    }
+  }
+
+  async function handleRender(m: HighlightMoment) {
+    setRenderingId(m.moment_id);
+    setRenderMsg(null);
+    try {
+      const render = await apiFetch<HighlightRender>(
+        `/api/v1/replay/highlights/${m.moment_id}/render`,
+        { method: "POST", token, body: {} },
+      );
+      setReel((prev) =>
+        (prev ?? []).map((x) =>
+          x.moment_id === m.moment_id
+            ? {
+                ...x,
+                render_status: render.status,
+                render_files: render.files,
+                render_error: render.error,
+              }
+            : x,
+        ),
+      );
+      setRenderMsg(
+        render.status === "rendered"
+          ? "Video rendered — download the 16:9, 9:16 or GIF cut below."
+          : render.status === "no_source"
+            ? "No recorded match video for this moment yet — no clip was fabricated."
+            : `Render ${render.status}${render.error ? `: ${render.error}` : ""}`,
+      );
+    } catch (e) {
+      setRenderMsg(
+        e instanceof Error ? `Render failed: ${e.message}` : "Render failed",
+      );
+    } finally {
+      setRenderingId(null);
+    }
+  }
+
+  function renderStateLine(m: HighlightMoment) {
+    return (
+      <div className="mt-3 border-t border-zinc-800 pt-2">
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-zinc-400">
+          <span>
+            Video:{" "}
+            <span
+              className={
+                m.render_status === "rendered"
+                  ? "font-semibold text-emerald-300"
+                  : m.render_status === "failed"
+                    ? "font-semibold text-red-300"
+                    : m.render_status === "no_source"
+                      ? "text-zinc-400"
+                      : "text-amber-300"
+              }
+            >
+              {m.render_status === "not_requested"
+                ? "not rendered yet"
+                : m.render_status}
+            </span>
+          </span>
+          {m.render_status === "rendered" &&
+            Object.entries(m.render_files).map(([kind, filename]) => (
+              <button
+                key={kind}
+                onClick={() => void downloadRender(m.moment_id, kind, filename)}
+                className="underline text-cyan-300 hover:text-cyan-200"
+              >
+                ⤓ {KIND_URL[kind] ?? kind}
+              </button>
+            ))}
+          {m.render_error && (
+            <span className="text-red-400">{m.render_error}</span>
+          )}
+        </div>
+        {canOperate && m.render_status !== "rendered" && (
+          <button
+            onClick={() => void handleRender(m)}
+            disabled={renderingId === m.moment_id}
+            className="mt-2 rounded border border-cyan-600 px-3 py-1 text-xs font-semibold text-cyan-300 hover:bg-cyan-600 hover:text-white disabled:opacity-50"
+          >
+            {renderingId === m.moment_id ? "Rendering…" : "🎬 Render video"}
+          </button>
+        )}
+      </div>
+    );
+  }
 
   const load = useCallback(async () => {
     setError(null);
@@ -214,6 +346,12 @@ function HighlightsPageInner() {
           </p>
         )}
 
+        {renderMsg && (
+          <p className="mb-4 rounded border border-emerald-800 bg-emerald-950/40 px-3 py-2 text-sm text-emerald-200">
+            {renderMsg}
+          </p>
+        )}
+
         {error && <ErrorState message={error} />}
         {reel === null && !error && <Loading label="Loading highlights" />}
 
@@ -251,6 +389,7 @@ function HighlightsPageInner() {
                       {playingId === m.moment_id ? "Playing…" : "▶ Play replay"}
                     </button>
                   )}
+                  {renderStateLine(m)}
                 </Card>
               </li>
             ))}

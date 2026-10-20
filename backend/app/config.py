@@ -148,7 +148,17 @@ class Settings(BaseSettings):
     OBS_PASSWORD: Optional[str] = None
     OBS_RECONNECT_INTERVAL: int = Field(default=5, ge=1)
     MIN_SCENE_TIME_SECONDS: int = Field(default=10, ge=3, le=60)
+    # Phase 22 (W3, M6): the PRD's ONE named switch cooldown. Distinct
+    # from the fight lock (45s Bible hold), team cooldown (10s) and
+    # replay cooldown (15s), which are separate named concepts in the
+    # director/safety code — this is the minimum gap between ANY two
+    # feed switches (anti-flicker floor).
+    SWITCH_COOLDOWN_SECONDS: float = Field(default=3.0, ge=0.5, le=30.0)
     MAX_SWITCHES_PER_MINUTE: int = Field(default=8, ge=1, le=30)
+    # Phase 22 (W3, Tech): video encoder for streaming/highlight
+    # renders: "auto" probes for NVENC (GPU + ffmpeg) and falls back
+    # to libx264; see app/streaming/encoder.py.
+    VIDEO_ENCODER: str = Field(default="auto", description="auto | nvenc | libx264")
     BROADCAST_LATENCY_MS: int = Field(default=3000, ge=0, le=10000)
     
     # Commentary

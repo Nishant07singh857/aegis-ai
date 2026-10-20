@@ -1,14 +1,18 @@
 /**
  * AEGIS AI — standings template: MVP Board.
  *
- * Per-player rows: rank, player + team, MVP rating (~1.0x scale),
+ * Per-player rows: rank, player + team, canonical MVP score,
  * finishes, damage, survival time and knocks. Rows reveal with a
- * staggered entrance.
+ * staggered entrance and are sorted by MVP score (finishes break
+ * ties; a missing score sorts last).
  *
  * Honest-data contract: the `players` prop is populated by the page from
- * GET /api/v1/matches/{id}/player-stats (recorded by a game-stats feed).
- * Fields the feed has not delivered render "—" — ratings are NEVER
- * derived from team totals. No player data yet → the WaitingFeed state.
+ * GET /api/v1/matches/{id}/player-stats. The MVP score is the single
+ * canonical formula persisted server-side by MatchService
+ * (kills*5 + damage*0.05 + revives*3 + survival*0.02 + clutches*10 +
+ * headshots*2) — NEVER derived client-side or from team totals.
+ * Fields the feed has not delivered render "—". No player data yet →
+ * the WaitingFeed state.
  */
 
 import { WaitingFeed } from '@/components/overlay-kit';
@@ -30,8 +34,19 @@ export default function StandingsMvp({
 }: StandingsProps) {
   if (players.length === 0) return <WaitingFeed what="PLAYER STATS FEED" />;
 
+  // Sort by the canonical MVP score (explicit mvpScore field, falling
+  // back to the long-standing `rating` alias); ties break on finishes.
+  const mvpOf = (p: (typeof players)[number]) =>
+    p.mvpScore ?? p.rating ?? null;
   const rows = [...players]
-    .sort((a, b) => (b.finishes ?? -1) - (a.finishes ?? -1))
+    .sort((a, b) => {
+      const sa = mvpOf(a);
+      const sb = mvpOf(b);
+      if (sa !== null || sb !== null) {
+        if ((sb ?? -1) !== (sa ?? -1)) return (sb ?? -1) - (sa ?? -1);
+      }
+      return (b.finishes ?? -1) - (a.finishes ?? -1);
+    })
     .slice(0, 8);
 
   return (
@@ -64,7 +79,7 @@ export default function StandingsMvp({
           cells={
             <>
               <StatCell
-                value={p.rating}
+                value={mvpOf(p)}
                 format={(n) => n.toFixed(1)}
                 strong={i === 0}
               />

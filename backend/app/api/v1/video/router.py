@@ -99,6 +99,12 @@ class SlotFeedStatus(BaseModel):
     last_frame_age_s: Optional[float] = None
     last_error: Optional[str] = None
     adb_misses: int = 0
+    # Phase 22 (W3, M1): feed-health score + latency-sync offset.
+    health_score: Optional[float] = None
+    health_status: Optional[str] = None
+    frame_drops: Optional[int] = None
+    sync_offset_ms: Optional[float] = None
+    sync_within_tolerance: Optional[bool] = None
 
 
 class VideoStatusResponse(BaseModel):
@@ -108,6 +114,10 @@ class VideoStatusResponse(BaseModel):
     generated_at: str
     counts: Dict[str, int]
     slots: List[SlotFeedStatus]
+    # Phase 22 (W3, M1): backup pool + fleet latency alignment.
+    backup_pool: Optional[Dict[str, Any]] = None
+    recent_failovers: List[Dict[str, Any]] = []
+    latency_sync: Optional[Dict[str, Any]] = None
 
 
 class OnAirRequest(BaseModel):

@@ -53,10 +53,94 @@ class FightSignal(str, Enum):
     MOVEMENT = "movement"
     KNOCK = "knock"
     HEALING = "healing"
+    # Phase 22 (M4): a team's alive count fell — players were eliminated
+    # (distinct from a knock: the squad actually shrank).
+    ALIVE_DELTA = "alive_delta"
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # DATA MODELS
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+@dataclass
+class HpVelocitySample:
+    """Outcome of feeding one HP observation into the velocity tracker."""
+
+    drop_in_window: float = 0.0   # HP lost from the window peak to now
+    velocity_per_sec: float = 0.0  # drop_in_window / span (>= MIN_SPAN_S)
+    span_seconds: float = 0.0     # time from the peak sample to now
+
+
+class HpVelocityTracker:
+    """Sliding-window HP-drop velocity (Phase 22, M4).
+
+    The PRD asks for HP-drop *velocity* — HP lost per second over a short
+    window (~2s) — not a single-event threshold. For each player we keep
+    the recent (timestamp, hp) samples inside the window; the drop is
+    ``peak_hp_in_window - current_hp`` and the velocity is that drop over
+    the time since the peak sample. A single burst hit therefore reads as
+    a high burst velocity (span floored at ``MIN_SPAN_S`` so one instant
+    hit cannot divide by ~0), while a slow drip (bandage fights, zone
+    tick damage) stays below the fight threshold even though each
+    individual event may be small.
+
+    Pure and clock-injectable: ``record()`` takes the timestamp so tests
+    (and replayed feeds) control time exactly.
+    """
+
+    MIN_SPAN_S = 0.25
+
+    def __init__(self, window_seconds: float = 2.0):
+        self.window_seconds = max(0.1, float(window_seconds))
+        self._samples: Dict[str, Deque] = {}
+
+    def record(
+        self, player_key: str, hp: float, timestamp: Optional[float] = None
+    ) -> HpVelocitySample:
+        """Record one HP observation; return the current window velocity."""
+        ts = time.time() if timestamp is None else float(timestamp)
+        hp = float(hp)
+        dq = self._samples.setdefault(player_key, deque(maxlen=64))
+        dq.append((ts, hp))
+        # Prune samples older than the window, but always keep the newest
+        # two so a peak->current span can still be measured.
+        cutoff = ts - self.window_seconds
+        while len(dq) > 2 and dq[0][0] < cutoff:
+            dq.popleft()
+
+        peak_ts, peak_hp = max(dq, key=lambda s: s[1])
+        drop = max(0.0, peak_hp - hp)
+        span = ts - peak_ts
+        velocity = drop / max(span, self.MIN_SPAN_S) if drop > 0 else 0.0
+        return HpVelocitySample(
+            drop_in_window=drop, velocity_per_sec=velocity, span_seconds=span
+        )
+
+    def velocity(
+        self, player_key: str, timestamp: Optional[float] = None
+    ) -> HpVelocitySample:
+        """Read the current window velocity without recording a sample."""
+        dq = self._samples.get(player_key)
+        if not dq:
+            return HpVelocitySample()
+        ts = time.time() if timestamp is None else float(timestamp)
+        peak_ts, peak_hp = max(dq, key=lambda s: s[1])
+        _, current_hp = dq[-1]
+        drop = max(0.0, peak_hp - current_hp)
+        span = ts - peak_ts
+        velocity = drop / max(span, self.MIN_SPAN_S) if drop > 0 else 0.0
+        return HpVelocitySample(
+            drop_in_window=drop, velocity_per_sec=velocity, span_seconds=span
+        )
+
+    def has_player(self, player_key: str) -> bool:
+        return player_key in self._samples
+
+    def clear(self, player_key: Optional[str] = None) -> None:
+        if player_key is None:
+            self._samples.clear()
+        else:
+            self._samples.pop(player_key, None)
+
 
 @dataclass
 class FightSignalData:
@@ -115,6 +199,10 @@ class PotentialFight:
     kills: int = 0
     utility_used: int = 0
     proximity_events: int = 0
+    # Phase 22 (M4): players currently downed (knock signals) and players
+    # permanently lost (squad-size delta) as independent evidence.
+    downs: int = 0
+    squad_losses: int = 0
     
     # Location
     location_x: float = 0.0
@@ -148,7 +236,17 @@ class PotentialFight:
         # Kill/knock is definitive
         if self.kills > 0 or self.knocks > 0:
             return True
-        
+
+        # Phase 22 (M4): a squad that lost 2+ players while another signal
+        # type is also present is in a fight, even without a kill-feed line
+        # (vision-only feeds see the alive-count fall before OCR confirms).
+        if self.squad_losses >= 2 and len(self.signal_types) >= 2:
+            return True
+
+        # Two players down plus real HP damage = a fight in progress.
+        if self.downs >= 2 and self.hp_drops >= 1:
+            return True
+
         return False
 
 @dataclass
@@ -235,9 +333,11 @@ class FightDetector(BaseAgent):
 
         # Detection thresholds
         self.thresholds = {
-            "hp_drop_min_damage": 20,        # Minimum HP drop to consider
-            "hp_drop_window_seconds": 2.0,    # Time window for rapid HP drops
-            "proximity_max_distance": 150,    # Max distance for proximity signal (meters)
+            "hp_drop_min_damage": 20,        # Minimum HP lost inside the velocity window
+            "hp_drop_window_seconds": 2.0,    # Sliding window for HP-drop velocity
+            # PRD M4: proximity is an engagement signal only under 50 m
+            # (at the old 150 m it fired for mere co-location on the map).
+            "proximity_max_distance": 50,     # Max distance for proximity signal (meters)
             "signal_buffer_window": 10.0,     # How long to keep signals
             "fight_cooldown_seconds": 8.0,    # Cooldown between fights for same team
             "promotion_confidence": 0.7,      # Confidence to promote potential fight
@@ -255,7 +355,16 @@ class FightDetector(BaseAgent):
             FightSignal.SHOOTING: 0.05,     # Shooting alone is weak
             FightSignal.MOVEMENT: 0.03,     # Movement is weakest
             FightSignal.HEALING: 0.02,      # Healing is contextual
+            FightSignal.KNOCK: 0.20,        # A downed player is strong evidence
+            FightSignal.ALIVE_DELTA: 0.15,  # A lost player is real evidence
         }
+
+        # Phase 22 (M4): real sliding-window HP-drop velocity. The window
+        # length is the declared hp_drop_window_seconds threshold — before
+        # Phase 22 it was declared but never used.
+        self.hp_velocity = HpVelocityTracker(
+            window_seconds=self.thresholds["hp_drop_window_seconds"]
+        )
         
         self._log = logger.bind(component="fight_detector")
     
@@ -307,28 +416,108 @@ class FightDetector(BaseAgent):
         location_x: float = 0.0,
         location_y: float = 0.0,
         weapon: Optional[str] = None,
+        damage: Optional[int] = None,
+        timestamp: Optional[float] = None,
     ) -> Optional[str]:
-        """Process HP change as a fight signal"""
-        damage = old_hp - new_hp
-        
-        if damage < self.thresholds["hp_drop_min_damage"]:
+        """Process an HP change as a fight signal — velocity-based (M4).
+
+        The signal fires on HP-drop *velocity*: HP lost inside the
+        sliding ``hp_drop_window_seconds`` window (peak-to-current),
+        measured by :class:`HpVelocityTracker`. A caller that only knows
+        one (old, new) pair seeds the window with ``old_hp`` first, so a
+        single burst hit still registers; callers streaming HP samples
+        (the vision loop) accumulate real multi-sample velocity.
+
+        ``damage`` is accepted for call-site compatibility but never
+        trusted: the drop is always recomputed from the HP samples.
+        ``timestamp`` lets replay/test callers control the window clock.
+        """
+        ts = time.time() if timestamp is None else float(timestamp)
+        key = f"{team_id}:{player_id}"
+        # Seed the window with the previous HP when this player is new to
+        # the tracker, so the (old -> new) pair forms a real sample pair.
+        if not self.hp_velocity.has_player(key):
+            self.hp_velocity.record(key, float(old_hp), ts)
+        sample = self.hp_velocity.record(key, float(new_hp), ts)
+
+        drop = sample.drop_in_window
+        if drop < self.thresholds["hp_drop_min_damage"]:
             return None
-        
+
         signal = FightSignalData(
             signal_type=FightSignal.HP_DROP,
-            timestamp=time.time(),
+            timestamp=ts,
             source_team_id=team_id,
             target_team_id=source_team_id,
             source_player_id=player_id,
             target_player_id=source_player_id,
-            value=damage,
+            # Signal strength = HP lost per second over the window.
+            value=round(sample.velocity_per_sec, 2),
             location_x=location_x,
             location_y=location_y,
-            damage=damage,
+            damage=int(round(drop)),
             weapon=weapon,
             confidence=0.9 if source_team_id else 0.5,
         )
-        
+
+        return self.process_signal(signal)
+
+    def process_down_count(
+        self,
+        team_id: str,
+        downed_count: int,
+        location_x: float = 0.0,
+        location_y: float = 0.0,
+        timestamp: Optional[float] = None,
+    ) -> Optional[str]:
+        """Process a down-count observation as a fight signal (Phase 22, M4).
+
+        Derived by callers from team-status / HP events (players seen
+        knocked), independent of the kill feed: ``downed_count`` is the
+        number of *newly* downed players in this observation.
+        """
+        if downed_count <= 0:
+            return None
+        signal = FightSignalData(
+            signal_type=FightSignal.KNOCK,
+            timestamp=time.time() if timestamp is None else float(timestamp),
+            source_team_id=team_id,
+            value=float(downed_count),
+            location_x=location_x,
+            location_y=location_y,
+            damage=0,
+            confidence=0.8,
+        )
+        return self.process_signal(signal)
+
+    def process_squad_size_delta(
+        self,
+        team_id: str,
+        previous_alive: int,
+        current_alive: int,
+        location_x: float = 0.0,
+        location_y: float = 0.0,
+        timestamp: Optional[float] = None,
+    ) -> Optional[str]:
+        """Process an alive-count change as a fight signal (Phase 22, M4).
+
+        Only *losses* are fight evidence. An increase is not a fight
+        signal at all (it is impossible in a real match — the anti-cheat
+        alive-count check reviews those), so it returns None here.
+        """
+        lost = int(previous_alive) - int(current_alive)
+        if lost <= 0:
+            return None
+        signal = FightSignalData(
+            signal_type=FightSignal.ALIVE_DELTA,
+            timestamp=time.time() if timestamp is None else float(timestamp),
+            source_team_id=team_id,
+            value=float(lost),
+            location_x=location_x,
+            location_y=location_y,
+            damage=0,
+            confidence=0.85,
+        )
         return self.process_signal(signal)
     
     def process_kill_feed(
@@ -365,12 +554,18 @@ class FightDetector(BaseAgent):
     def process_proximity(
         self,
         team_id: str,
-        other_team_id: str,
-        distance: float,
+        other_team_id: Optional[str] = None,
+        distance: float = 0.0,
         location_x: float = 0.0,
         location_y: float = 0.0,
     ) -> Optional[str]:
-        """Process team proximity as a fight signal"""
+        """Process team proximity as a fight signal.
+
+        ``distance`` is in METERS and the PRD threshold is 50 m.
+        ``other_team_id`` may be None when the opponent is observed but
+        not identified (vision minimap enemy markers carry no team id) —
+        the signal is still real proximity evidence for ``team_id``.
+        """
         
         if distance > self.thresholds["proximity_max_distance"]:
             return None
@@ -391,6 +586,23 @@ class FightDetector(BaseAgent):
         
         return self.process_signal(signal)
     
+    def process_audio_gunshots(self, provider: Any = None) -> Optional[str]:
+        """Process the audio-gunshot signal via its plug provider (M4).
+
+        Phase 22 (W3): the SHOOTING signal has NO producer in this
+        build (spectator audio is mixed/delayed program audio). The
+        default provider is the Null provider — this method returns
+        None and creates NO signal. A real per-feed gunshot producer
+        implements ``audio_signal.AudioGunshotProvider`` and is passed
+        in here; only its real readings become SHOOTING signals.
+        """
+        from .audio_signal import NullAudioGunshotProvider, poll_audio_signal
+
+        signal = poll_audio_signal(provider or NullAudioGunshotProvider())
+        if signal is None:
+            return None
+        return self.process_signal(signal)
+
     def process_utility(
         self,
         player_id: str,
@@ -500,6 +712,10 @@ class FightDetector(BaseAgent):
             fight.proximity_events += 1
         elif signal.signal_type == FightSignal.UTILITY:
             fight.utility_used += 1
+        elif signal.signal_type == FightSignal.KNOCK:
+            fight.downs += max(1, int(signal.value))
+        elif signal.signal_type == FightSignal.ALIVE_DELTA:
+            fight.squad_losses += max(1, int(signal.value))
         
         # Update location (weighted average)
         if signal.location_x and signal.location_y:
@@ -589,7 +805,7 @@ class FightDetector(BaseAgent):
             location_y=potential.location_y,
             total_damage=potential.total_damage,
             total_kills=potential.kills,
-            total_knocks=potential.knocks,
+            total_knocks=potential.knocks + potential.downs,
             total_utility=potential.utility_used,
             current_intensity=self._calculate_initial_intensity(potential),
             peak_intensity=0.0,
@@ -984,6 +1200,8 @@ class FightDetector(BaseAgent):
     def reset(self) -> None:
         """Reset detector state"""
         self.detection_state = FightDetectionState()
+        self.hp_velocity.clear()
+        self._pending_fight_events.clear()
         self._log.info("Fight detector reset")
 
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

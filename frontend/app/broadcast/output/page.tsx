@@ -59,6 +59,8 @@ function BroadcastOutputInner() {
   // Phase 17 W2: ?video=sim streams the watermarked simulator test
   // pattern instead of the real game feed.
   const video = sp.get('video') === 'sim' ? 'simulator' : 'real';
+  // Phase 22: ?captions=1 burns the live caption cues into the capture.
+  const captions = sp.get('captions') === '1';
 
   return (
     <DirectorOutputView
@@ -69,6 +71,7 @@ function BroadcastOutputInner() {
       hold={hold}
       brand={brand}
       video={video}
+      captions={captions}
     />
   );
 }

@@ -40,6 +40,7 @@ class SafetyViolation(str, Enum):
     REPLAY_INTERRUPTED = "replay_interrupted"
     RAPID_SWITCHING = "rapid_switching"
     SAME_TEAM_SWITCH = "same_team_switch"
+    FINAL_ZONE_INTERRUPTED = "final_zone_interrupted"
 
 @dataclass
 class SafetyState:
@@ -49,6 +50,10 @@ class SafetyState:
     is_clutch: bool = False
     is_replay: bool = False
     is_final_circle: bool = False
+    # Phase 22 (W3, M6): teams alive, fed by the director each tick —
+    # drives the final-zone HARD lock thresholds (top-5 / top-3).
+    teams_alive: int = 16
+    current_is_final_zone: bool = False
     
     # Switch tracking
     switch_timestamps: deque = field(default_factory=lambda: deque(maxlen=50))
@@ -65,16 +70,38 @@ class SafetyState:
     # Cooldowns
     team_cooldowns: Dict[str, float] = field(default_factory=dict)
 
+def _settings_float(name: str, default: float) -> float:
+    try:
+        from ...config import settings
+
+        return float(getattr(settings, name, default))
+    except Exception:  # pragma: no cover - config unavailable in tools
+        return default
+
+
 @dataclass
 class SafetyConfig:
-    """Safety configuration"""
-    min_scene_time: float = 8.0          # Minimum seconds on a scene
+    """Safety configuration.
+
+    Phase 22 (W3, M6) unification: ``min_scene_time`` and
+    ``rapid_switch_threshold`` (the ONE named switch cooldown) default
+    from the central settings (``MIN_SCENE_TIME_SECONDS`` = 10 s,
+    ``SWITCH_COOLDOWN_SECONDS`` = 3 s). Before Phase 22 this class
+    carried a divergent private 8.0 s / 2.0 s pair that silently
+    disagreed with the director's configured values.
+    """
+    min_scene_time: float = field(
+        default_factory=lambda: _settings_float("MIN_SCENE_TIME_SECONDS", 10.0)
+    )
     max_switches_per_minute: int = 8     # Maximum switches per minute
     clutch_lock_time: float = 10.0       # Lock on clutch (seconds)
     fight_lock_time: float = 6.0         # Lock on fight (seconds)
     replay_lock_time: float = 5.0        # Lock during replay
     team_cooldown_time: float = 10.0     # Cooldown between same team
-    rapid_switch_threshold: float = 2.0  # Minimum seconds between switches
+    # The named switch cooldown (PRD 3 s): minimum gap between switches.
+    rapid_switch_threshold: float = field(
+        default_factory=lambda: _settings_float("SWITCH_COOLDOWN_SECONDS", 3.0)
+    )
     final_circle_stability: float = 12.0 # Minimum scene time in final circle
 
 
@@ -178,6 +205,32 @@ class SafetyController(BaseAgent):
                 "Cannot switch away from clutch",
             )
             return False
+
+        # Phase 22 (W3, M6): final-zone HARD lock — mirrors the clutch
+        # lock. In the final circle (top-5, and absolutely at top-3)
+        # the camera does not leave a final-zone scene for a lesser
+        # one; only another final-zone scene or a clutch may take over.
+        if self.safety_state.current_is_final_zone:
+            new_is_final = bool(
+                getattr(new_scene, 'is_final_circle', False)
+                or getattr(new_scene, 'is_final_zone', False)
+            )
+            new_is_clutch = bool(getattr(new_scene, 'is_clutch', False))
+            if not (new_is_final or new_is_clutch):
+                if self.safety_state.teams_alive <= 3:
+                    self._record_violation(
+                        SafetyViolation.FINAL_ZONE_INTERRUPTED,
+                        "Final-zone hard lock (top-3): cannot switch away",
+                    )
+                    return False
+                if self.safety_state.teams_alive <= 5:
+                    scene_age = time.time() - self.safety_state.current_scene_started_at
+                    if scene_age < self.safety_config.final_circle_stability:
+                        self._record_violation(
+                            SafetyViolation.FINAL_ZONE_INTERRUPTED,
+                            "Final-zone hard lock (top-5): scene still locked",
+                        )
+                        return False
         
         # Don't switch to same team immediately
         if (current_scene and current_scene.team_id and 
@@ -241,6 +294,22 @@ class SafetyController(BaseAgent):
         
         # Track scene type
         self.safety_state.current_scene_type = scene.feed_type.value if hasattr(scene, 'feed_type') else ""
+
+        # Phase 22 (W3, M6): final-zone scene tracking for the hard
+        # lock. A scene counts as final-zone when it is flagged
+        # final-circle or its feed type is the final-zone/map overview
+        # in the late game (state.is_final_circle set by the director).
+        feed_val = scene.feed_type.value if hasattr(scene, 'feed_type') else ""
+        self.safety_state.current_is_final_zone = bool(
+            getattr(scene, 'is_final_circle', False)
+            or getattr(scene, 'is_final_zone', False)
+            or (feed_val in ("final_zone", "map_overview") and self.safety_state.is_final_circle)
+        )
+        if self.safety_state.current_is_final_zone:
+            self._apply_lock(
+                self.safety_config.final_circle_stability,
+                "Final zone coverage",
+            )
         
         # Apply locks based on scene type
         if getattr(scene, 'is_clutch', False):

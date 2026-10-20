@@ -119,10 +119,17 @@ class ReportGenerator:
     - AI-generated analysis
     """
     
-    def __init__(self):
+    def __init__(self, event_bus: Any = None):
         self.match_reports: Dict[str, MatchReport] = {}
         self.player_reports: Dict[str, List[PlayerReport]] = defaultdict(list)
+        # Phase 22 (W3, M12): optional bus for insight.generated —
+        # set via constructor or set_event_bus(); emission best-effort.
+        self._event_bus = event_bus
         self._log = logger.bind(component="report_generator")
+
+    def set_event_bus(self, bus: Any) -> None:
+        """Attach an event bus so generated insights emit insight.generated."""
+        self._event_bus = bus
     
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     # MATCH REPORT
@@ -184,6 +191,30 @@ class ReportGenerator:
         
         # AI Insights
         report.ai_insights = self._generate_match_insights(report)
+
+        # Phase 22 (W3, M12): publish each insight as insight.generated
+        # (best-effort; sync context schedules on a running loop or
+        # runs inline — never breaks report generation).
+        if self._event_bus is not None:
+            try:
+                import asyncio
+
+                from app.core.event_names import emit_insight_generated
+
+                for text in report.ai_insights:
+                    coro = emit_insight_generated(
+                        self._event_bus,
+                        insight={"text": text, "kind": "match_report"},
+                        match_id=match_id,
+                    )
+                    try:
+                        loop = asyncio.get_running_loop()
+                    except RuntimeError:
+                        asyncio.run(coro)
+                    else:
+                        loop.create_task(coro)
+            except Exception as exc:  # pragma: no cover - defensive
+                self._log.warning("insight_emit_failed", error=str(exc)[:200])
         
         # Turning points
         report.turning_points = self._identify_turning_points(key_events)

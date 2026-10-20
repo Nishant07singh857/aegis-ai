@@ -285,7 +285,12 @@ class LanguageManager(BaseAgent):
         """
         if self._llm_provider is None and not self._llm_provider_failed:
             try:
-                from backend.app.ai import get_llm_provider
+                try:
+                    from backend.app.ai import get_llm_provider
+                except ImportError:
+                    # `app` package layout (backend/ on sys.path) — the
+                    # layout the running server actually uses.
+                    from app.ai import get_llm_provider
                 self._llm_provider = get_llm_provider()
             except Exception as e:
                 self._log.warning(

@@ -59,6 +59,19 @@ logger = structlog.get_logger("aegis.vision.multi_device")
 MAX_OBSERVER_SLOTS = 16
 """A tournament runs exactly 16 observer slots (Phase 12 contract)."""
 
+BACKUP_POOL_SIZE = 2
+"""Phase 22 (W3, M1): spare devices held ready for auto-failover.
+
+The PRD's 8-device backup fleet is out of scope for the 1-PC product;
+1–2 spares cover the realistic failure (one phone dies mid-match).
+Devices discovered beyond the 16 slots fill this pool first."""
+
+FAILOVER_MISS_THRESHOLD = 3
+"""Consecutive supervisor ADB misses before a slot fails over to a
+spare. At the default 10 s supervisor interval that is ~30 s of a
+genuinely missing device — a cable bump (1–2 misses) never triggers
+a failover."""
+
 DEFAULT_SUPERVISOR_INTERVAL_S = 10.0
 """How often the supervisor re-discovers devices and refreshes labels."""
 
@@ -200,6 +213,11 @@ class MultiDeviceCaptureManager:
         self._slots: Dict[int, SlotFeed] = {
             n: SlotFeed(slot_number=n) for n in range(1, max_slots + 1)
         }
+        # Phase 22 (W3, M1): backup device pool (serials, in the order
+        # they were discovered) + an audit trail of failovers.
+        self._backup_serials: List[str] = []
+        self._backup_info: Dict[str, Any] = {}
+        self.failover_events: List[Dict[str, Any]] = []
         self._on_air_slot: Optional[int] = None
         self._listeners: List[BroadcastListener] = []
         self._lock = asyncio.Lock()
@@ -314,20 +332,30 @@ class MultiDeviceCaptureManager:
                     )
 
             # 2. Map brand-new serials to free slots, lowest slot first.
+            #    Serials beyond the 16 slots fill the BACKUP POOL
+            #    (Phase 22): they are spares, not a 17th team feed.
             assigned = {s.serial for s in self._slots.values() if s.serial}
             free_slots = sorted(
                 n for n, s in self._slots.items() if not s.serial
             )
             newly_mapped: List[Dict[str, Any]] = []
             for device in sorted(devices, key=lambda d: d.serial):
-                if device.serial in assigned:
+                if device.serial in assigned or device.serial in self._backup_serials:
                     continue
                 if not free_slots:
-                    self._log.warning(
-                        f"no free observer slot for device {device.serial} "
-                        f"({self.max_slots} slots full)"
-                    )
-                    break
+                    if len(self._backup_serials) < BACKUP_POOL_SIZE:
+                        self._backup_serials.append(device.serial)
+                        self._backup_info[device.serial] = device
+                        self._log.info(
+                            f"backup pool <- device {device.serial} "
+                            f"({len(self._backup_serials)}/{BACKUP_POOL_SIZE})"
+                        )
+                    else:
+                        self._log.warning(
+                            f"no free observer slot and backup pool full "
+                            f"for device {device.serial}"
+                        )
+                    continue
                 slot_no = free_slots.pop(0)
                 slot = self._slots[slot_no]
                 slot.serial = device.serial
@@ -344,7 +372,52 @@ class MultiDeviceCaptureManager:
                     model=device.model,
                 )
 
-        # 3. Ensure a capture source exists + runs for every mapped slot
+            # 3. Auto-failover (Phase 22): a slot whose device has been
+            #    missing for FAILOVER_MISS_THRESHOLD consecutive probes
+            #    takes a live spare from the backup pool.
+            failover_slots: List[int] = []
+            for slot in self._slots.values():
+                if (
+                    slot.serial
+                    and slot.serial not in seen_serials
+                    and slot.consecutive_misses >= FAILOVER_MISS_THRESHOLD
+                    and self._backup_serials
+                ):
+                    spare = next(
+                        (s for s in self._backup_serials if s in seen_serials),
+                        None,
+                    )
+                    if spare is None:
+                        break
+                    self._backup_serials.remove(spare)
+                    device = self._backup_info.pop(spare, None)
+                    old_serial = slot.serial
+                    slot.serial = spare
+                    slot.device_name = (
+                        getattr(device, "model", "") or spare if device else spare
+                    )
+                    slot.model = getattr(device, "model", "") if device else ""
+                    slot.connection_type = (
+                        getattr(device, "connection_type", "") if device else ""
+                    )
+                    slot.consecutive_misses = 0
+                    slot.backoff_s = 1.0
+                    event = {
+                        "slot_number": slot.slot_number,
+                        "team_id": slot.team_id,
+                        "from_serial": old_serial,
+                        "to_serial": spare,
+                        "reason": "slot_failure_auto_failover",
+                        "at": self._utcnow_iso(),
+                    }
+                    self.failover_events.append(event)
+                    failover_slots.append(slot.slot_number)
+                    self._log.warning(
+                        f"slot {slot.slot_number}: FAILOVER {old_serial} -> {spare}",
+                        team_id=slot.team_id,
+                    )
+
+        # 4. Ensure a capture source exists + runs for every mapped slot
         #    (outside the lock; start_capture is idempotent per source).
         for info in newly_mapped:
             slot = self._slots[info["slot_number"]]
@@ -353,10 +426,24 @@ class MultiDeviceCaptureManager:
             if not ok:
                 self._log.error(f"failed to start capture for {slot.source_id}")
 
+        # 5. Failover slots: swap the grabber source to the spare device.
+        for slot_no in failover_slots:
+            slot = self._slots[slot_no]
+            await self._grabber.stop_capture(slot.source_id)
+            self._grabber.remove_source(slot.source_id)
+            self._ensure_source(slot)
+            ok = await self._grabber.start_capture(slot.source_id)
+            if not ok:
+                self._log.error(f"failover capture failed for {slot.source_id}")
+        if failover_slots:
+            await self._broadcast_feeds(reason="failover")
+
         return {
             "devices_seen": len(seen_serials),
             "slots_mapped": sum(1 for s in self._slots.values() if s.serial),
             "newly_mapped": newly_mapped,
+            "backup_pool": list(self._backup_serials),
+            "failovers": failover_slots,
         }
 
     async def _discover_devices(self) -> List[Any]:
@@ -479,10 +566,54 @@ class MultiDeviceCaptureManager:
         status = self._slot_status_locked(slot, seen)
         return self._slot_dict(slot, status)
 
+    async def on_team_eliminated(self, team_id: str) -> Optional[Dict[str, Any]]:
+        """Auto role reassignment on team elimination (Phase 22, M1).
+
+        The eliminated team's slot no longer needs a dedicated feed:
+        its device returns to the backup pool (ready to fail over onto
+        a failed slot) and the slot is freed. Returns the reassignment
+        record, or None when the team had no slot. The director's
+        POV selector already skips eliminated teams for broadcast;
+        this releases the HARDWARE role to match.
+        """
+        async with self._lock:
+            slot = next(
+                (s for s in self._slots.values() if s.team_id == team_id), None
+            )
+            if slot is None or not slot.serial:
+                return None
+            serial = slot.serial
+            record = {
+                "slot_number": slot.slot_number,
+                "team_id": team_id,
+                "serial": serial,
+                "reason": "team_eliminated_device_to_backup_pool",
+                "at": self._utcnow_iso(),
+            }
+            if len(self._backup_serials) < BACKUP_POOL_SIZE and serial not in self._backup_serials:
+                self._backup_serials.append(serial)
+            slot.serial = ""
+            slot.team_id = None
+            slot.team_name = None
+            slot.consecutive_misses = 0
+        await self._grabber.stop_capture(slot.source_id)
+        self._grabber.remove_source(slot.source_id)
+        if self._on_air_slot == slot.slot_number:
+            self._on_air_slot = None
+        self.failover_events.append(record)
+        await self._broadcast_feeds(reason="team_eliminated_reassignment")
+        self._log.info(
+            f"slot {slot.slot_number}: team {team_id} eliminated — "
+            f"device {serial} returned to backup pool"
+        )
+        return record
+
     def _slot_dict(self, slot: SlotFeed, status: FeedStatus) -> Dict[str, Any]:
         stats = self._grabber.get_stats().get("sources", {}).get(
             slot.source_id, {}
         )
+        health = stats.get("health") or {}
+        sync = stats.get("sync") or {}
         return {
             "slot_number": slot.slot_number,
             "team_id": slot.team_id,
@@ -503,6 +634,13 @@ class MultiDeviceCaptureManager:
             "last_frame_age_s": stats.get("last_frame_age_s"),
             "last_error": stats.get("last_error") or None,
             "adb_misses": slot.consecutive_misses,
+            # Phase 22 (W3, M1): live feed-health score + latency-sync
+            # offset for this slot (None until frames have flowed).
+            "health_score": health.get("health_score"),
+            "health_status": health.get("status"),
+            "frame_drops": (health.get("quality") or {}).get("frame_drops"),
+            "sync_offset_ms": sync.get("offset_ms"),
+            "sync_within_tolerance": sync.get("within_tolerance"),
         }
 
     async def get_status(self) -> Dict[str, Any]:
@@ -523,6 +661,14 @@ class MultiDeviceCaptureManager:
             "generated_at": self._utcnow_iso(),
             "counts": counts,
             "slots": slots,
+            # Phase 22 (W3, M1): backup pool + latency alignment summary
+            # for the whole fleet (the ±500 ms framework surface).
+            "backup_pool": {
+                "capacity": BACKUP_POOL_SIZE,
+                "serials": list(self._backup_serials),
+            },
+            "recent_failovers": self.failover_events[-5:],
+            "latency_sync": self._grabber.sync.alignment_report(),
         }
 
     async def thumbnail_jpeg(self, slot_number: int) -> Optional[bytes]:

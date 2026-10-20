@@ -232,7 +232,16 @@ class ObserverDirector(BaseAgent):
         
         # Update broadcast state based on match phase
         self._update_broadcast_state()
-        
+
+        # Phase 22 (W3, M6): keep the safety controller's view of the
+        # endgame current so the final-zone HARD lock thresholds
+        # (top-5 / top-3) use real alive counts.
+        self.safety.safety_state.teams_alive = self.director_state.teams_alive
+        self.safety.safety_state.is_final_circle = (
+            self.director_state.broadcast_state == BroadcastState.FINAL_CIRCLE
+            or self.director_state.zone_phase >= 6
+        )
+
         # Check safety constraints
         if not self.safety.can_switch(self.director_state):
             return  # Safety prevents switching
@@ -539,6 +548,21 @@ class ObserverDirector(BaseAgent):
             score += 15
         if self.director_state.current_scene.player_id in self.priority_players:
             score += 15
+
+        # Phase 22 (W3, M6): narrative-continuity bonus. The director
+        # records scene history (previous_scenes) but never used it;
+        # now a current scene whose team/fight is an ongoing storyline
+        # (appears in recent history) earns a stay bonus — +4 per
+        # recent appearance, capped at +12 — so storylines are not
+        # dropped for a marginally higher-scoring unrelated feed.
+        scene = self.director_state.current_scene
+        history_hits = 0
+        for prev in self.director_state.previous_scenes:
+            if scene.fight_id and prev.fight_id == scene.fight_id:
+                history_hits += 1
+            elif scene.team_id and prev.team_id == scene.team_id:
+                history_hits += 1
+        score += min(12.0, history_hits * 4.0)
         
         # Recent scene penalty (prevent staying too long).
         # Visual Broadcast Bible §3.1: Krafton holds one fight 45-90s, so
@@ -642,6 +666,18 @@ class ObserverDirector(BaseAgent):
         self.director_state.last_switch_time = time.time()
         self.director_state.switch_count_last_minute += 1
         self.director_state.total_scene_changes += 1
+
+        # Phase 22 (W3, M6): record the switch with the safety
+        # controller (previously never called on this path, so its
+        # scene clock / clutch / final-zone locks never engaged).
+        try:
+            new_scene.is_final_circle = bool(candidate.is_final_circle)  # type: ignore[attr-defined]
+            new_scene.is_clutch = bool(candidate.is_clutch)  # type: ignore[attr-defined]
+            new_scene.is_fight = bool(candidate.is_fight)  # type: ignore[attr-defined]
+        except Exception:
+            pass
+        self.safety.safety_state.teams_alive = self.director_state.teams_alive
+        self.safety.record_switch(new_scene)
         
         # Record decision
         self.director_state.recent_decisions.append({

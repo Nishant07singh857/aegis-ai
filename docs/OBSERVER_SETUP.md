@@ -145,6 +145,30 @@ budget accordingly (§6).
 
 ---
 
+## 5b. Android emulators over ADB (Phase 22, M2)
+
+Emulators need **no special support**: the capture path talks to ADB
+serials only, and an emulator is just another serial.
+
+- **Android Studio / AVD emulators** appear as `emulator-5554`,
+  `emulator-5556`, … in `adb devices`. The manager maps them to slots
+  exactly like phones (lowest free slot first).
+- **TCP emulators** (Genymotion, cloud devices, `adb emu` setups):
+  `adb connect 127.0.0.1:5555` (the emulator's console port) and the
+  serial becomes `127.0.0.1:5555`.
+- Both backends work unchanged: `adb_poll` runs
+  `adb -s <serial> exec-out screencap` and `scrcpy` attaches to the
+  same serial.
+- Honest limits: an emulator's rendered frame rate and input latency
+  depend on the host GPU/CPU the emulator gets; 16 local emulators on
+  one PC is not a realistic substitute for 16 phones (RAM/CPU). Use
+  1–2 emulators for pipeline testing and rehearsals, phones for the
+  real fleet. Emulator frames are real frames of whatever the
+  emulator displays — if BGMI is not running in it, the feed is
+  honestly whatever is on its screen.
+- Backup pool: spare emulator instances count as backup devices the
+  same way spare phones do (see the Phase 22 ledger, M1).
+
 ## 6. Server sizing (honest numbers)
 
 - `adb_poll` backend: ~16 subprocess spawns/sec total, PNG decode ~2.3 fps

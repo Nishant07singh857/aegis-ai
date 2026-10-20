@@ -308,6 +308,39 @@ class StreamService:
             return [], 1.0
         return inputs, game_volume
 
+    @staticmethod
+    def _resolve_dual_track_inputs() -> Optional[Dict[str, Any]]:
+        """Phase 22 dual-track inputs: per-language commentary FIFOs.
+
+        Returns {"hi": input_args, "en": input_args, "recording_path": str}
+        only when the commentary feed is running AND the active mode is
+        bilingual (dual_track). Otherwise None — single-track path stays.
+        """
+        try:
+            import os as _os
+
+            from app.audio.commentary_feed import get_commentary_feed
+            from app.audio.commentary_modes import get_commentary_mode_service
+
+            if not get_commentary_mode_service().behavior().dual_track:
+                return None
+            feed = get_commentary_feed()
+            if not feed.is_running():
+                return None
+            from app.audio.mixer import default_audio_dir
+
+            program_dir = default_audio_dir() / "program"
+            program_dir.mkdir(parents=True, exist_ok=True)
+            recording = program_dir / f"program_{int(time.time())}.mkv"
+            return {
+                "hi": ["-f", "s16le", "-ar", "48000", "-ac", "2", "-i", str(feed.hi_fifo_path)],
+                "en": ["-f", "s16le", "-ar", "48000", "-ac", "2", "-i", str(feed.en_fifo_path)],
+                "recording_path": str(recording),
+            }
+        except Exception as exc:
+            logger.warning("dual-track input resolution failed: %s", exc)
+            return None
+
     def _launch_pipeline(self, resolved: List[Tuple[str, str]]) -> None:
         """Spawn Xvfb → Chromium → FFmpeg. Caller must hold the lock."""
         cfg = self.config
@@ -334,17 +367,36 @@ class StreamService:
         )
 
         audio_inputs, game_volume = self._resolve_audio_inputs()
-        ffmpeg_cmd = self.build_ffmpeg_command(
-            display=display,
-            width=cfg.width,
-            height=cfg.height,
-            fps=cfg.fps,
-            video_bitrate=cfg.video_bitrate,
-            x264_preset=cfg.x264_preset,
-            urls=[url for _, url in resolved],
-            audio_inputs=audio_inputs,
-            game_volume=game_volume,
-        )
+        dual = self._resolve_dual_track_inputs()
+        if dual is not None:
+            # Dual-track: RTMP outputs carry the primary (Hindi) track —
+            # FLV/RTMP carries ONE audio track, the second is dropped by
+            # the protocol (see docs/AUDIO.md) — while the local program
+            # .mkv recording carries BOTH language-tagged tracks.
+            ffmpeg_cmd = self.build_ffmpeg_command_dual_track(
+                display=display,
+                width=cfg.width,
+                height=cfg.height,
+                fps=cfg.fps,
+                video_bitrate=cfg.video_bitrate,
+                x264_preset=cfg.x264_preset,
+                urls=[url for _, url in resolved],
+                hi_input_args=dual["hi"],
+                en_input_args=dual["en"],
+                recording_path=dual["recording_path"],
+            )
+        else:
+            ffmpeg_cmd = self.build_ffmpeg_command(
+                display=display,
+                width=cfg.width,
+                height=cfg.height,
+                fps=cfg.fps,
+                video_bitrate=cfg.video_bitrate,
+                x264_preset=cfg.x264_preset,
+                urls=[url for _, url in resolved],
+                audio_inputs=audio_inputs,
+                game_volume=game_volume,
+            )
         # NOTE: URLs contain stream keys; the command list is passed to
         # Popen directly and is never logged or returned anywhere.
         self._ffmpeg = subprocess.Popen(ffmpeg_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -531,6 +583,70 @@ class StreamService:
         else:
             segments = "|".join(f"[f=flv]{cls._escape_tee_url(u)}" for u in urls)
             cmd += ["-f", "tee", segments]
+        return cmd
+
+
+    @classmethod
+    def build_ffmpeg_command_dual_track(
+        cls,
+        *,
+        display: str,
+        width: int,
+        height: int,
+        fps: int,
+        video_bitrate: str,
+        x264_preset: str,
+        urls: List[str],
+        hi_input_args: List[str],
+        en_input_args: List[str],
+        recording_path: str,
+    ) -> List[str]:
+        """FFmpeg argv with TWO language-tagged audio tracks (Phase 22).
+
+        Inputs: 0 = x11grab video, 1 = Hindi commentary FIFO, 2 = English
+        commentary FIFO.
+
+        Outputs:
+          1. RTMP destination(s) via flv/tee with the PRIMARY (Hindi)
+             track only — FLV/RTMP transports a single audio track, so
+             track 2 cannot reach YouTube/Twitch/Facebook live (honest
+             protocol limit, documented in docs/AUDIO.md).
+          2. A local Matroska program recording carrying BOTH audio
+             streams with ISO language metadata (hin/eng) — this is the
+             dual-track deliverable viewers/players select from.
+        """
+        if not urls:
+            raise ValueError("At least one destination URL is required.")
+        cmd = [
+            "ffmpeg", "-hide_banner", "-loglevel", "warning",
+            "-f", "x11grab", "-video_size", f"{width}x{height}",
+            "-framerate", str(fps), "-i", display,
+        ]
+        cmd += hi_input_args
+        cmd += en_input_args
+        # Output 1: live RTMP (primary track only).
+        cmd += [
+            "-map", "0:v", "-map", "1:a",
+            "-c:v", "libx264", "-preset", x264_preset, "-pix_fmt", "yuv420p",
+            "-b:v", video_bitrate, "-g", str(fps * 2),
+            "-c:a", "aac", "-b:a", "128k", "-ar", "48000",
+            "-metadata:s:a:0", "language=hin",
+        ]
+        if len(urls) == 1:
+            cmd += ["-f", "flv", urls[0]]
+        else:
+            segments = "|".join(f"[f=flv]{cls._escape_tee_url(u)}" for u in urls)
+            cmd += ["-f", "tee", segments]
+        # Output 2: dual-track program recording (.mkv, both tracks).
+        cmd += [
+            "-map", "0:v", "-map", "1:a", "-map", "2:a",
+            "-c:v", "libx264", "-preset", x264_preset, "-pix_fmt", "yuv420p",
+            "-b:v", video_bitrate, "-g", str(fps * 2),
+            "-c:a", "aac", "-b:a", "128k", "-ar", "48000",
+            "-metadata:s:a:0", "language=hin",
+            "-metadata:s:a:1", "language=eng",
+            "-f", "matroska", recording_path,
+        ]
         return cmd
 
 

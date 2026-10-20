@@ -152,3 +152,82 @@ export async function stopGameAudio(
     { method: "POST", token: token ?? undefined }
   );
 }
+
+/* ── Phase 22: commentary modes ─────────────────────────────────── */
+
+export type CommentaryModeId =
+  | "hindi_main"
+  | "english_main"
+  | "bilingual_blend"
+  | "silent"
+  | "human_assist";
+
+export interface CommentaryModeState {
+  mode: CommentaryModeId;
+  label: string;
+  speaks: boolean;
+  suggestions_only: boolean;
+  text_overlay: boolean;
+  primary_language: string;
+  secondary_language: string | null;
+  min_gap_seconds: number;
+  dual_track: boolean;
+  content_mix: Record<string, number>;
+  all_modes: Array<{ mode: CommentaryModeId; label: string }>;
+}
+
+/** GET /api/v1/audio/commentary-mode */
+export async function getCommentaryMode(
+  token: string | null
+): Promise<CommentaryModeState> {
+  return apiFetch<CommentaryModeState>("/api/v1/audio/commentary-mode", {
+    token: token ?? undefined,
+  });
+}
+
+/** POST /api/v1/audio/commentary-mode — operator+ */
+export async function setCommentaryMode(
+  token: string | null,
+  mode: CommentaryModeId
+): Promise<CommentaryModeState> {
+  return apiFetch<CommentaryModeState>("/api/v1/audio/commentary-mode", {
+    method: "POST",
+    token: token ?? undefined,
+    body: { mode },
+  });
+}
+
+export interface CasterSuggestion {
+  text: string;
+  language: string;
+  mode: string;
+  created_at: number;
+}
+
+/** GET /api/v1/audio/suggestions — Human Assist suggestions (operator+) */
+export async function getCasterSuggestions(
+  token: string | null
+): Promise<{ suggestions: CasterSuggestion[] }> {
+  return apiFetch<{ suggestions: CasterSuggestion[] }>(
+    "/api/v1/audio/suggestions",
+    { token: token ?? undefined }
+  );
+}
+
+export interface CurrentCaption {
+  language: string;
+  text: string;
+  start: number;
+  end: number;
+  source: string;
+}
+
+/** GET /api/v1/audio/captions/current — cue active right now, or null */
+export async function getCurrentCaption(
+  token: string | null
+): Promise<{ caption: CurrentCaption | null }> {
+  return apiFetch<{ caption: CurrentCaption | null }>(
+    "/api/v1/audio/captions/current",
+    { token: token ?? undefined }
+  );
+}

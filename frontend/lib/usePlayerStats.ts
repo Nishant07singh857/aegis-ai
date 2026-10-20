@@ -31,6 +31,11 @@ interface PlayerStatsRow {
   survival_seconds?: number | null;
   knocks?: number | null;
   rating?: number | null;
+  mvp_score?: number | null;
+  headshots?: number | null;
+  revives?: number | null;
+  clutches?: number | null;
+  is_mvp?: boolean;
   igl_rating?: number | null;
   finals_mvp_rating?: number | null;
   is_igl?: boolean;
@@ -54,6 +59,13 @@ function toPlayerStat(row: PlayerStatsRow): PlayerStat | null {
     survivalSeconds: row.survival_seconds ?? null,
     knocks: row.knocks ?? null,
     rating: row.rating ?? null,
+    // Canonical MVP score (explicit field first, long-standing
+    // `rating` alias as fallback).
+    mvpScore: row.mvp_score ?? row.rating ?? null,
+    headshots: row.headshots ?? null,
+    revives: row.revives ?? null,
+    clutches: row.clutches ?? null,
+    isMvp: row.is_mvp ?? false,
     iglRating: row.igl_rating ?? null,
     finalsMvpRating: row.finals_mvp_rating ?? null,
     isIgl: row.is_igl ?? false,

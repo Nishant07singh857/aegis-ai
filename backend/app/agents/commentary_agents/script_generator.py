@@ -355,6 +355,37 @@ Keep it informative but casual. Bridge the silence naturally.
             CommentaryLine or None if generation failed
         """
         
+        # Phase 22: the active commentary mode shapes generation —
+        # language (Hindi Main / English Main / Bilingual Blend),
+        # content mix (style pick) and pacing (cooldown multiplier).
+        # Silent / Human Assist still generate TEXT here (lower-thirds /
+        # caster suggestions); the audio feed decides whether it is spoken.
+        try:
+            from app.audio.commentary_modes import (
+                STYLE_FOR_CONTENT,
+                get_commentary_mode_service,
+                pick_style,
+            )
+
+            behavior = get_commentary_mode_service().behavior(
+                context.get("match_id") if isinstance(context, dict) else None
+            )
+            self._mode_cooldown_multiplier = behavior.cooldown_multiplier
+            if language == "hinglish":
+                language = (
+                    "hinglish" if behavior.primary_language == "hi" else "en"
+                )
+                if behavior.mode.value == "bilingual_blend":
+                    self._blend_flip = not getattr(self, "_blend_flip", False)
+                    language = "hinglish" if self._blend_flip else "en"
+            if style is None:
+                import random as _random
+
+                content = pick_style(behavior.mode, trigger.value, _random.random())
+                style = CommentaryStyle(STYLE_FOR_CONTENT[content])
+        except Exception:
+            self._mode_cooldown_multiplier = 1.0
+
         # Check cooldown for this trigger type
         if self._is_in_cooldown(trigger.value):
             return None
@@ -826,7 +857,9 @@ Keep it informative but casual. Bridge the silence naturally.
             "filler": 8.0,
             "interesting_moment": 8.0,
         }
-        cooldown = cooldowns.get(trigger_key, 5.0)
+        cooldown = cooldowns.get(trigger_key, 5.0) * getattr(
+            self, "_mode_cooldown_multiplier", 1.0
+        )
         return (time.time() - last_time) < cooldown
     
     def _is_repetitive(self, text: str) -> bool:

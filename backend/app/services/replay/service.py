@@ -24,6 +24,7 @@ import structlog
 
 from .buffer import ReplayBuffer
 from .highlights import HighlightDetector
+from .renderer import HighlightRenderer, RenderRecord, highlight_renderer
 from .schemas import Clip, DayReel, DayReelSegment, Highlight, Mark
 from app.agents.highlight.day_reel import (
     DEFAULT_MAX_DURATION_MS,
@@ -56,9 +57,14 @@ def _iso(ts: float) -> str:
 class ReplayService:
     """Process-wide replay coordinator."""
 
-    def __init__(self, window_seconds: int = 300) -> None:
+    def __init__(
+        self,
+        window_seconds: int = 300,
+        renderer: Optional[HighlightRenderer] = None,
+    ) -> None:
         self.buffer = ReplayBuffer(window_seconds=window_seconds)
         self.detector = HighlightDetector()
+        self.renderer = renderer if renderer is not None else highlight_renderer
         self._marks: Dict[str, Mark] = {}
         self._listeners: List[BroadcastListener] = []
 
@@ -163,11 +169,58 @@ class ReplayService:
         """Top-N scored moments from the current buffer window.
 
         Honestly empty when the simulator / feed has produced no
-        qualifying kill events — never synthesised.
+        qualifying kill events — never synthesised. Each moment carries
+        its current video render state (Phase 21/T4).
         """
         self.buffer.prune()
         events = self.buffer.recent(limit=50_000)
-        return self.detector.build_reel(events, limit=limit)
+        highlights = self.detector.build_reel(events, limit=limit)
+        return [self._with_render_state(h) for h in highlights]
+
+    def _with_render_state(self, highlight: Highlight) -> Highlight:
+        record = self.renderer.get_record(highlight.moment_id)
+        highlight.render_status = record.status  # type: ignore[assignment]
+        highlight.render_files = dict(record.files)
+        highlight.render_error = record.error
+        return highlight
+
+    # ── video rendering (Phase 21 / T4) ──────────────────────────
+
+    def request_render(
+        self,
+        moment_id: str,
+        match_id: Optional[str] = None,
+        source_path: Optional[str] = None,
+        source_started_at: Optional[float] = None,
+        limit: int = 50,
+    ) -> RenderRecord:
+        """Render a video cut of one highlight moment (operator+ via API).
+
+        The moment must be present in the current highlight reel (real,
+        scored data) — unknown moment_ids are a KeyError, never guessed.
+        Runs the FFmpeg cut synchronously; callers should offload with
+        ``asyncio.to_thread``.
+        """
+        moment = next(
+            (h for h in self.get_highlights(limit=limit) if h.moment_id == moment_id),
+            None,
+        )
+        if moment is None:
+            raise KeyError(moment_id)
+        return self.renderer.render(
+            moment_id=moment.moment_id,
+            window_start=moment.window_start,
+            window_end=moment.window_end,
+            match_id=match_id,
+            source_path=source_path,
+            source_started_at=source_started_at,
+        )
+
+    def render_status(self, moment_id: str) -> RenderRecord:
+        return self.renderer.get_record(moment_id)
+
+    def list_renders(self) -> List[RenderRecord]:
+        return self.renderer.list_records()
 
     def get_day_reel(self, limit: int = 50) -> DayReel:
         """Whole-day highlight reel from recorded highlights.

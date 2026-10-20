@@ -298,6 +298,12 @@ function ControlRoomInner() {
           >
             Observers →
           </Link>
+          <Link
+            href="/control/anti-cheat"
+            className="rounded border border-zinc-700 px-3 py-1.5 text-zinc-300 hover:border-cyan-500"
+          >
+            Anti-cheat review →
+          </Link>
         </nav>
 
         <StreamControl token={token} onSessionExpired={handleExpired} />

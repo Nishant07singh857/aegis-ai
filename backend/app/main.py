@@ -52,8 +52,13 @@ from app.api.v1.observers import router as observers_router
 from app.api.v1.audio.router import router as audio_router
 # Phase 19: AI storyteller (director-gated generation, broadcast trigger).
 from app.api.v1.stories.router import router as stories_router
+from app.api.v1.anti_cheat.router import router as anti_cheat_router
+from app.api.v1.vision_intelligence.router import (
+    router as vision_intelligence_router,
+)
 # Phase 20: Global Predictive — live WWCD% prediction cards.
 from app.api.v1.predictions.router import router as predictions_router
+from app.api.v1.analytics_extra.router import router as analytics_extra_router
 from app.api.v1.video.router import (
     router as video_router,
     multi_device_manager,
@@ -848,6 +853,29 @@ async def lifespan(app: FastAPI):
     replay_service.buffer.subscribe_to(event_bus)
     await feed_service.attach(event_bus)
 
+    # Phase 22: close the vision -> intelligence loop. The subscriber
+    # consumes the vision bus events (hp/utility/position/zone/healing/
+    # loot + alive/team status) and feeds the fight detector, team
+    # trackers, zone analytics, the story auto-flagger and the
+    # vision-derivable anti-cheat checks. Built only when the bus is
+    # actually running; a failure here never blocks startup — the
+    # status endpoint then honestly reports the loop as not running.
+    if event_bus._running:
+        try:
+            from app.services.vision_intelligence import (
+                build_vision_intelligence_service,
+            )
+
+            vision_intelligence = build_vision_intelligence_service(event_bus)
+            vision_intelligence.start()
+            app.state.vision_intelligence = vision_intelligence
+            logger.info("Vision intelligence subscriber started (Phase 22)")
+        except Exception as e:
+            app.state.vision_intelligence = None
+            logger.warning(f"Vision intelligence subscriber unavailable: {e}")
+    else:
+        app.state.vision_intelligence = None
+
     # Phase 14: register the vision-pipeline feed adapter so
     # GET /api/v1/feed/status lists "vision" as a source. It is NOT
     # started automatically -- capture begins only when an operator calls
@@ -863,6 +891,21 @@ async def lifespan(app: FastAPI):
     # Phase 7 / W3: register this process in the distributed cluster registry
     # (Redis-backed, standalone fallback when Redis is unreachable).
     await node_registry.start(agent_count_provider=_active_agent_count)
+
+    # Phase 22: warm the Piper voices in the background so the first live
+    # commentary line does not pay the cold model-load cost (measured in
+    # docs/AUDIO.md). Fire-and-forget: a slow/failed warm-up never blocks
+    # startup and never fakes readiness — synthesis reports honestly.
+    async def _warm_commentary_voices() -> None:
+        try:
+            from app.audio.commentary_feed import get_commentary_feed
+
+            warmed = await get_commentary_feed()._get_synth().warm_models()
+            logger.info("Commentary voice warm-up finished", warmed=warmed)
+        except Exception as e:
+            logger.warning(f"Commentary voice warm-up skipped: {e}")
+
+    asyncio.create_task(_warm_commentary_voices())
         
     global simulation_task, chatter_task, director_hold_task
     # Phase 18 (W3): background ticker enforcing the map-cam 30s maximum
@@ -898,6 +941,12 @@ async def lifespan(app: FastAPI):
     yield
     
     logger.info("AEGIS AI Shutting down...")
+    _vi = getattr(app.state, "vision_intelligence", None)
+    if _vi is not None:
+        try:
+            _vi.stop()
+        except Exception:
+            pass
     if simulation_task:
         simulation_task.cancel()
     if chatter_task:
@@ -976,8 +1025,16 @@ app.include_router(video_router, prefix="/api/v1", tags=["Video"])
 app.include_router(audio_router, prefix="/api/v1", tags=["Audio"])
 # Phase 19: AI storyteller — data stories for broadcast graphics.
 app.include_router(stories_router, prefix="/api/v1", tags=["Stories"])
+
+# Phase 22: anti-cheat review surface (admin/director) + vision
+# intelligence subscriber status.
+app.include_router(anti_cheat_router, prefix="/api/v1", tags=["Anti-Cheat"])
+app.include_router(
+    vision_intelligence_router, prefix="/api/v1", tags=["Vision Intelligence"]
+)
 # Phase 20: Global Predictive — live WWCD% prediction cards (30s cadence).
 app.include_router(predictions_router, prefix="/api/v1", tags=["Predictions"])
+app.include_router(analytics_extra_router, prefix="/api/v1", tags=["Analytics"])
 
 @app.get("/")
 async def root():
@@ -1100,25 +1157,46 @@ async def get_system_status():
 
 @app.get("/api/v1/players/mvp")
 async def get_mvp():
-    # Phase 13: serves the hardcoded demo dataset — gated behind DEMO_MODE.
+    # Phase 21 (W2): DEMO endpoint — gated behind DEMO_MODE and clearly
+    # labelled as demo. The score is the SINGLE canonical PRD formula
+    # (mvp_calculator.compute_mvp_score); the old competing demo formula
+    # and the kills-derived damage estimate were deleted. The demo
+    # dataset carries only team kills, so per-player damage / revives /
+    # survival / headshots / clutches are unknown: damage is reported
+    # as null (never estimated) and the missing stats contribute 0 to
+    # the canonical score. The production MVP path is the persisted one:
+    # MatchService.record_player_stats → GET
+    # /api/v1/matches/{id}/player-stats (rating / mvp_score).
     if not DEMO_MODE:
         return _demo_unavailable()
+    from app.agents.analytics_agents.mvp_calculator import compute_mvp_score
+
     players_data = []
     for team in MATCH_STATE["teams"]:
         for player in team["players"]:
+            per_player_kills = team["kills"] // 4
             players_data.append({
                 "id": f"{team['id']}_{player}",
                 "name": player,
                 "team": team["name"],
                 "role": "Assaulter",
-                "kills": team["kills"] // 4,
-                "damage": team["kills"] * 100,
-                "mvp_score": (team["kills"] * 10) + 50
+                "kills": per_player_kills,
+                "damage": None,
+                "mvp_score": compute_mvp_score(
+                    kills=per_player_kills,
+                    damage=None,
+                    revives=0,
+                    survival_seconds=0,
+                    clutches=0,
+                    headshots=0,
+                ),
+                "is_demo": True,
+                "source": "demo",
             })
     if not players_data:
         return JSONResponse({"error": "No players found"}, status_code=404)
     mvp = max(players_data, key=lambda x: x["mvp_score"])
-    return JSONResponse({"data": mvp})
+    return JSONResponse({"data": mvp, "demo": True})
 
 @app.get("/api/v1/matches")
 async def get_matches():
@@ -1178,10 +1256,27 @@ async def get_match_player_stats_endpoint(match_id: str):
                             (t.colors or {}).get("primary") if t else None
                         ),
                         "finishes": s.kills,
+                        # Honest damage (Phase 21): the persisted value
+                        # exactly as recorded from the agent/feed layer;
+                        # None (unknown) serialises as null → the board
+                        # renders "—". Never estimated from kills.
                         "damage": s.damage_dealt,
                         "survival_seconds": s.survived_time_seconds,
                         "knocks": None,  # not in the feed schema yet
+                        # Phase 21 (T5b): healing + grenade counters from
+                        # the agent utility trackers (record_player_stats).
+                        "healing": getattr(s, "healing", 0) or 0,
+                        "grenades_used": getattr(s, "grenades_used", 0) or 0,
+                        # Canonical MVP score (single producer:
+                        # mvp_calculator via MatchService). `rating`
+                        # is the long-standing alias the boards read;
+                        # `mvp_score` is the explicit field.
                         "rating": s.mvp_score,
+                        "mvp_score": s.mvp_score,
+                        "headshots": s.headshots,
+                        "revives": s.revives_performed,
+                        "clutches": getattr(s, "clutches", 0),
+                        "is_mvp": bool(getattr(s, "is_mvp", False)),
                         "igl_rating": None,  # needs a dedicated IGL feed
                         "finals_mvp_rating": None,
                         "is_igl": bool(p and (p.role or "").upper() == "IGL"),
@@ -1231,7 +1326,11 @@ async def get_kill_feed():
 
 @app.get("/api/v1/analytics/summary")
 async def get_analytics_summary():
-    # Phase 13: aggregates the hardcoded demo dataset — gated behind DEMO_MODE.
+    # Phase 13: aggregates the hardcoded demo dataset — gated behind
+    # DEMO_MODE and labelled demo. Phase 21 (W2): the kills-derived
+    # damage estimate was deleted — the demo dataset carries no real
+    # damage, so total_damage is honestly null (production damage
+    # flows only from persisted agent/feed stats, see player-stats).
     if not DEMO_MODE:
         return _demo_unavailable()
     total_kills = sum(t["kills"] for t in MATCH_STATE["teams"])
@@ -1239,13 +1338,16 @@ async def get_analytics_summary():
     return JSONResponse({
         "data": {
             "total_kills": total_kills,
-            "total_damage": total_kills * 120,
+            "total_damage": None,
             "avg_kills_per_team": round(total_kills / max(1, len(MATCH_STATE["teams"])), 1),
             "most_kills_team": max(MATCH_STATE["teams"], key=lambda x: x["kills"])["tag"],
             "zone_phase": 4,
             "teams_alive": teams_alive,
-            "match_time_seconds": 945
-        }
+            "match_time_seconds": 945,
+            "is_demo": True,
+            "source": "demo",
+        },
+        "demo": True,
     })
 
 @app.post("/api/v1/broadcast/switch")

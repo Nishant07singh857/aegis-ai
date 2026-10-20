@@ -69,6 +69,12 @@ class FightPattern:
     """Learned fight behavior"""
     engagement_distance: float = 0.0
     preferred_range: str = "medium"  # close, medium, long
+    # NOTE (Phase 22, M5): this 1-10 value is a LEARNED BEHAVIOUR
+    # display scale for strategy classification inside team memory
+    # only. The product's ONE canonical aggression score is the 0-1
+    # value computed by app.analytics.aggression and persisted to
+    # team_intelligence.aggression_score — dossiers/APIs read THAT,
+    # never this field.
     aggression_level: float = 5.0  # 1-10
     utility_usage: Dict[str, float] = field(default_factory=dict)
     win_rate: float = 0.0

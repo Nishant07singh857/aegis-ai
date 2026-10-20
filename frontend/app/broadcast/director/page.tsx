@@ -56,6 +56,7 @@ import {
   suggestionExpiresIn,
 } from "@/lib/director";
 import { AudioMixer } from "./components/AudioMixer";
+import { CommentaryModePanel } from "./components/CommentaryModePanel";
 import { StorytellingPanel } from "./components/StorytellingPanel";
 import type {
   DirectorGraphics,
@@ -736,6 +737,9 @@ function DirectorConsoleInner() {
 
           {/* audio mixer (W3): commentary TTS, game audio, volumes, mute */}
           <AudioMixer token={token} />
+
+          {/* commentary modes (Phase 22): 5 PRD modes with real behaviour */}
+          <CommentaryModePanel token={token} />
 
           {/* AI storytelling (Phase 19 W3): story graphics control.
               director|admin get full trigger control; operator sees a

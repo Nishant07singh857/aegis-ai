@@ -11,16 +11,25 @@ Auth model:
   * POST /replay/capture {label?}      — operator+ (bookmark "now")
   * POST /replay/play {mark_id|from,to}— operator+ (WS replay.play fan-out)
   * DELETE /replay/marks/{id}          — operator+
+  * POST /replay/highlights/{id}/render — operator+ (Phase 21/T4: cut real
+    video from a recorded match video with FFmpeg; "no_source" when no
+    recording exists — never fabricated)
+  * GET  /replay/highlights/{id}/render — any authenticated user (status)
+  * GET  /replay/renders               — any authenticated user (all statuses)
+  * GET  /replay/highlights/{id}/files/{kind} — any authenticated user
+    (download a rendered clip: landscape | portrait | gif)
 
 Timestamps on GET /replay/clip are ISO-8601 query params.
 """
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi.responses import FileResponse
 
 from app.api.deps import TokenPayload, get_current_user, require_operator
 from app.services.replay import replay_service
@@ -29,11 +38,15 @@ from app.services.replay.schemas import (
     Clip,
     DayReel,
     Highlight,
+    HighlightRender,
     Mark,
     PlayRequest,
+    RenderRequest,
 )
 
 router = APIRouter(prefix="/replay", tags=["Replay"])
+
+_RENDER_KINDS = ("landscape", "portrait", "gif")
 
 
 def _parse_iso(value: str, name: str) -> float:
@@ -146,3 +159,109 @@ async def get_day_reel(
     never synthesised.
     """
     return replay_service.get_day_reel(limit=limit)
+
+
+# ── Phase 21 (T4): highlight video rendering ─────────────────────
+
+
+def _render_to_schema(record, files: bool = True) -> HighlightRender:
+    moment_id = record.moment_id
+    file_urls = (
+        {
+            kind: f"/api/v1/replay/highlights/{moment_id}/files/{kind}"
+            for kind in _RENDER_KINDS
+            if kind in record.files
+        }
+        if files
+        else {}
+    )
+    return HighlightRender(
+        moment_id=moment_id,
+        match_id=record.match_id,
+        status=record.status,  # type: ignore[arg-type]
+        source_path=record.source_path,
+        files=dict(record.files),
+        file_urls=file_urls,
+        error=record.error,
+        window_start=record.window_start,
+        window_end=record.window_end,
+    )
+
+
+@router.post(
+    "/highlights/{moment_id}/render",
+    response_model=HighlightRender,
+    status_code=status.HTTP_201_CREATED,
+)
+async def render_highlight(
+    moment_id: str,
+    body: RenderRequest,
+    _user: TokenPayload = Depends(require_operator),
+) -> HighlightRender:
+    """Cut a highlight moment into real video files (operator+).
+
+    Cuts the window out of a recorded match video with FFmpeg
+    (16:9 MP4 + 9:16 MP4 + 3s GIF preview). ``status=no_source`` when no
+    recording exists for the match — no clip is ever fabricated. Unknown
+    moment ids are a 404: only real scored moments can be rendered.
+    """
+    try:
+        record = await asyncio.to_thread(
+            replay_service.request_render,
+            moment_id,
+            match_id=body.match_id,
+            source_path=body.source_path,
+            source_started_at=(
+                body.source_started_at.timestamp()
+                if body.source_started_at is not None
+                else None
+            ),
+        )
+    except KeyError:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"No highlight moment with id {moment_id!r}.",
+        )
+    return _render_to_schema(record)
+
+
+@router.get("/highlights/{moment_id}/render", response_model=HighlightRender)
+async def get_highlight_render(
+    moment_id: str,
+    _user: TokenPayload = Depends(get_current_user),
+) -> HighlightRender:
+    """Render status for one highlight moment."""
+    return _render_to_schema(replay_service.render_status(moment_id))
+
+
+@router.get("/renders", response_model=List[HighlightRender])
+async def list_renders(
+    _user: TokenPayload = Depends(get_current_user),
+) -> List[HighlightRender]:
+    """All highlight render records, newest first."""
+    return [_render_to_schema(r) for r in replay_service.list_renders()]
+
+
+@router.get("/highlights/{moment_id}/files/{kind}")
+async def download_render(
+    moment_id: str,
+    kind: str,
+    _user: TokenPayload = Depends(get_current_user),
+):
+    """Download one rendered file for a highlight moment."""
+    if kind not in _RENDER_KINDS:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"kind must be one of {', '.join(_RENDER_KINDS)}.",
+        )
+    path = replay_service.renderer.file_path(moment_id, kind)
+    if path is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=(
+                f"No rendered {kind} file for moment {moment_id!r}. "
+                "Request a render first (POST …/render)."
+            ),
+        )
+    media = "image/gif" if kind == "gif" else "video/mp4"
+    return FileResponse(path, media_type=media, filename=path.name)

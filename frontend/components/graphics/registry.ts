@@ -85,8 +85,14 @@ export interface LowerThirdProps {
  *                 game-stats feed), or the live kill feed for the
  *                 Eliminator board (killer names, this match only).
  *   - damage / survival_seconds / knocks: player-stats feed only.
- *   - rating:     feed-provided MVP/IGL rating only — NEVER derived from
- *                 team totals (see the honesty note in docs/GRAPHICS.md).
+ *   - rating / mvpScore: the SINGLE canonical MVP score persisted by
+ *                 MatchService.record_player_stats (kills*5 +
+ *                 damage*0.05 + revives*3 + survival*0.02 +
+ *                 clutches*10 + headshots*2, via mvp_calculator) —
+ *                 NEVER derived from team totals (see the honesty note
+ *                 in docs/GRAPHICS.md). `rating` is the long-standing
+ *                 alias the boards read; `mvpScore` is the explicit
+ *                 field.
  *   - is_igl:     from the roster (Player.role = "IGL").
  *   - wwcd:       joined from the team standings frames (team-level data).
  *   - avg_points / top_5s / avg_finishes: tournament feeds only.
@@ -103,8 +109,14 @@ export interface PlayerStat {
   damage?: number | null;
   survivalSeconds?: number | null;
   knocks?: number | null;
-  /** MVP rating (~1.0x scale) — feed-provided only. */
+  /** MVP rating — alias of the canonical MVP score (see mvpScore). */
   rating?: number | null;
+  /** Canonical MVP score (PRD formula, persisted server-side). */
+  mvpScore?: number | null;
+  headshots?: number | null;
+  revives?: number | null;
+  clutches?: number | null;
+  isMvp?: boolean;
   /** IGL rating — feed-provided only. */
   iglRating?: number | null;
   /** Finals MVP rating (higher scale) — feed-provided only. */

@@ -41,23 +41,33 @@ class TiebreakerMethod(str, Enum):
 
 @dataclass
 class PlacementPoints:
-    """Points awarded for each placement"""
-    first: int = 15
-    second: int = 12
-    third: int = 10
-    fourth: int = 8
-    fifth: int = 6
-    sixth: int = 5
-    seventh: int = 4
-    eighth: int = 3
-    ninth: int = 2
-    tenth: int = 2
-    eleventh: int = 1
-    twelfth: int = 1
-    thirteenth: int = 1
-    fourteenth: int = 1
-    fifteenth: int = 1
-    sixteenth: int = 1
+    """Points awarded for each placement.
+
+    Phase 22 (W3, M8): the defaults are the REAL Krafton BMSD values
+    (chicken dinner = 10, every other placement = 0) — the same values
+    ``PointsCalculator`` starts from. The old generic 15/12/10/…
+    defaults were an unused trap: any code constructing this dataclass
+    directly silently scored a different tournament than the configured
+    one. A tournament that genuinely uses a 15/12/10 table enters it
+    via ``tournaments.placement_points`` config (``from_placement_map``),
+    never via these defaults.
+    """
+    first: int = 10
+    second: int = 0
+    third: int = 0
+    fourth: int = 0
+    fifth: int = 0
+    sixth: int = 0
+    seventh: int = 0
+    eighth: int = 0
+    ninth: int = 0
+    tenth: int = 0
+    eleventh: int = 0
+    twelfth: int = 0
+    thirteenth: int = 0
+    fourteenth: int = 0
+    fifteenth: int = 0
+    sixteenth: int = 0
     
     def get_points(self, placement: int) -> int:
         """Get points for a placement"""
@@ -166,7 +176,51 @@ class PointsCalculator:
         # Match results storage
         self.match_results: Dict[str, Dict[str, Any]] = {}
 
+        # Phase 22 (W3, M12): optional event bus for the
+        # ``leaderboard.update`` emitter. Set via set_event_bus();
+        # emission is best-effort and scheduled when a loop is running
+        # (calculate_match_points itself stays synchronous).
+        self._event_bus: Any = None
+
         self._log = logger.bind(component="points_calculator")
+
+    def set_event_bus(self, bus: Any) -> None:
+        """Attach an event bus so standings changes emit leaderboard.update."""
+        self._event_bus = bus
+
+    def _emit_leaderboard_update(self, match_id: str) -> None:
+        """Best-effort leaderboard.update emission (never raises)."""
+        if self._event_bus is None:
+            return
+        try:
+            import asyncio
+
+            from app.core.event_names import emit_leaderboard_update
+
+            rankings = [
+                {
+                    "rank": t.current_rank,
+                    "team_id": t.team_id,
+                    "team_name": t.team_name,
+                    "total_points": t.grand_total,
+                    "total_kills": t.total_kills,
+                    "wwcd": t.wwcd_count,
+                    "rank_change": t.rank_change,
+                }
+                for t in self.get_rankings()
+            ]
+            coro = emit_leaderboard_update(
+                self._event_bus, rankings=rankings, match_id=match_id
+            )
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                # No running loop (sync caller): run the emit inline.
+                asyncio.run(coro)
+            else:
+                loop.create_task(coro)
+        except Exception as exc:  # emission must never break scoring
+            self._log.warning("leaderboard_update_emit_failed", error=str(exc)[:200])
 
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     # TOURNAMENT-CONFIG WIRING
@@ -345,7 +399,10 @@ class PointsCalculator:
         
         # Store match results
         self.match_results[match_id] = match_points
-        
+
+        # Phase 22 (W3, M12): standings changed -> leaderboard.update.
+        self._emit_leaderboard_update(match_id)
+
         return match_points
     
     def _update_team_totals(

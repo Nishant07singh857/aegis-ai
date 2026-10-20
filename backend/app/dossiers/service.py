@@ -480,6 +480,18 @@ class DossierService:
         if team is None:
             raise KeyError(f"team not found: {team_id}")
 
+        # Phase 22 (W3, M5): refresh the ONE canonical aggression
+        # score from real fight/kill rows before reading it — the DB
+        # field used to have no writer, so dossiers rendered
+        # insufficient_data even when fight data existed. Best-effort:
+        # a refresh failure leaves the last persisted value in place.
+        try:
+            from app.analytics.aggression import refresh_aggression_scores
+
+            await refresh_aggression_scores(self.db, team_ids=[team_id])
+        except Exception:
+            pass
+
         intel = await self._get_intel(team_id)
         aggression = intel.aggression_score if intel else None
 

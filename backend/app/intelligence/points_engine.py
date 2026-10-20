@@ -1,79 +1,82 @@
-import json
+# backend/app/intelligence/points_engine.py
+"""
+DEPRECATED — PointsEngine retired (Phase 22 / W3, M8).
+
+This module used to keep a SECOND standings source of truth: a Redis
+hash (``aegis:standings``) counting finishes only, with no placement
+points and no tournament configuration, beside the configured
+``PointsCalculator``. Two sources meant two different leaderboards.
+
+It is now a thin read-through adapter over the SINGLE source of truth,
+``app.analytics.points_calculator.PointsCalculator``:
+
+* Scoring configuration (placement table, points-per-kill) comes only
+  from the calculator (tournament config / BMSD defaults).
+* The old Redis hash is no longer read or written. Any data left in
+  ``aegis:standings`` from older runs is stale and must be ignored —
+  delete the key when convenient; nothing in the product reads it.
+* ``process_kill_event`` no longer mutates standings on its own: kill
+  events flow through match recording into the calculator. It remains
+  only as a compatibility shim returning the calculator's current
+  leaderboard, and logs a deprecation warning when called.
+
+New code must use ``PointsCalculator`` directly.
+"""
+
+from __future__ import annotations
+
+from typing import Any, List, Optional
+
 import structlog
-from typing import List
-import redis
 
 logger = structlog.get_logger("aegis.intelligence.points")
 
+
 class PointsEngine:
-    """
-    AEGIS AI - Real-time Points Aggregator
-    Fixes Issue #3: Calculates points math live and updates standings.
-    Fixes Issue #1: Uses Redis for Zero Data-Loss State Persistence.
-    """
-    def __init__(self):
-        # Fallback to in-memory dict if Redis is not installed
-        self.use_redis = False
-        self.memory_state = {}
-        try:
-            self.r = redis.Redis(host='localhost', port=6379, db=0, decode_responses=True)
-            self.r.ping()
-            self.use_redis = True
-            logger.info("Connected to Redis! Zero Data-Loss State Persistence Active.")
-        except redis.ConnectionError:
-            logger.warning("Redis not found. Falling back to RAM. (Install Redis to fix Issue #1)")
+    """Deprecated adapter — delegates to PointsCalculator (see docstring)."""
 
-    def _get_team(self, team_id: str) -> dict:
-        if self.use_redis:
-            data = self.r.hget("aegis:standings", team_id)
-            return json.loads(data) if data else {"id": team_id, "name": team_id, "finishes": 0, "alive": 4}
-        else:
-            return self.memory_state.get(team_id, {"id": team_id, "name": team_id, "finishes": 0, "alive": 4})
+    def __init__(self, calculator: Optional[Any] = None) -> None:
+        if calculator is None:
+            from app.analytics.points_calculator import PointsCalculator
 
-    def _save_team(self, team_id: str, data: dict):
-        if self.use_redis:
-            self.r.hset("aegis:standings", team_id, json.dumps(data))
-        else:
-            self.memory_state[team_id] = data
+            calculator = PointsCalculator()
+        self._calculator = calculator
+        logger.warning(
+            "PointsEngine is deprecated: standings flow through "
+            "PointsCalculator only (Phase 22 retirement of the Redis "
+            "aegis:standings second source of truth)."
+        )
 
-    def process_kill_event(self, killer_team: str, victim_team: str):
-        """Math logic: Killer gets +1 point, Victim loses 1 alive player."""
-        logger.info(f"Processing Live Math: {killer_team} kills {victim_team}")
-        
-        # Update Killer
-        killer = self._get_team(killer_team)
-        killer["finishes"] += 1
-        self._save_team(killer_team, killer)
-        
-        # Update Victim
-        victim = self._get_team(victim_team)
-        if victim["alive"] > 0:
-            victim["alive"] -= 1
-        self._save_team(victim_team, victim)
-        
+    @property
+    def calculator(self) -> Any:
+        return self._calculator
+
+    def process_kill_event(self, killer_team: str, victim_team: str) -> List[dict]:
+        """Compatibility shim — does NOT score anything itself.
+
+        Standings change only via match recording through
+        PointsCalculator.calculate_match_points. Returns the current
+        leaderboard so legacy callers keep rendering real standings.
+        """
+        logger.warning(
+            "PointsEngine.process_kill_event is a no-op shim; route kill "
+            "events through match recording + PointsCalculator instead.",
+            killer_team=killer_team,
+            victim_team=victim_team,
+        )
         return self.get_leaderboard()
 
     def get_leaderboard(self) -> List[dict]:
-        """Sorts the current state and returns the Top 16."""
-        teams = []
-        if self.use_redis:
-            all_teams = self.r.hgetall("aegis:standings")
-            for t_data in all_teams.values():
-                teams.append(json.loads(t_data))
-        else:
-            teams = list(self.memory_state.values())
-            
-        # Sort by finishes (highest first), then by alive players
-        teams.sort(key=lambda x: (x["finishes"], x["alive"]), reverse=True)
-        return teams[:16]
-
-# ── Usage Example ────────────────────────────────────────────────────────────
-# Dev-only demo (never executed in production — guarded by __name__).
-# The team tags below are ILLUSTRATIVE placeholders; the live engine only
-# ever sees team IDs from real kill events via process_kill_event().
-if __name__ == "__main__":
-    engine = PointsEngine()
-    engine.process_kill_event("GodL", "Soul")
-    engine.process_kill_event("GodL", "Soul")
-    engine.process_kill_event("TX", "GodL")
-    print("LIVE LEADERBOARD:", json.dumps(engine.get_leaderboard(), indent=2))
+        """Current standings from the single configured calculator."""
+        return [
+            {
+                "rank": t.current_rank,
+                "id": t.team_id,
+                "name": t.team_name,
+                "finishes": t.total_kills,
+                "points": t.grand_total,
+                "placement_points": t.total_placement_points,
+                "wwcd": t.wwcd_count,
+            }
+            for t in self._calculator.get_rankings()
+        ]

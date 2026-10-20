@@ -14,7 +14,24 @@ Scoring rules (all windows anchored on real event timestamps):
   * clutch      — a player scores >=2 kills within 10s while being the
                   ONLY scorer on their team in that window (their
                   teammates contributed nothing): a 1vN solo effort.
-                  Always 75.
+                  Always 75. Phase 22 (W3, M11): when kill events carry
+                  real alive counts (``killer_team_alive`` /
+                  ``opponents_alive`` payload fields, supplied by the
+                  alive-count reader chain), the clutch is VERIFIED:
+                  ``killer_team_alive == 1`` and the player eliminated
+                  every remaining opponent (``opponents_alive`` ==
+                  window kills) — a verified 1v4 scores 95 and says
+                  so. Without alive data the moment still fires but
+                  its reason is labelled "Unverified".
+  * final_kill  — Phase 22 (W3, M11): the last kill before a
+                  ``match_end`` event in the buffer. Score 80. No
+                  match-end state in the buffer -> no final kill is
+                  claimed (a merely-last kill is not a final kill).
+
+Plug-ready kinds (grenade_multi_kill / sniper_triple / vehicle_kill)
+live in ``highlight_triggers.py``: they fire only when kill events
+carry truthful weapon/vehicle attribution, which today's feed does
+not produce (weapon is honestly None) — see that module.
 
 Scores are 0-100 with a human-readable reason string, ordered
 score-descending for the reel.
@@ -103,6 +120,61 @@ class HighlightDetector:
         moments.extend(self._detect_multi_kills(kills))
         moments.extend(self._detect_squad_wipes(kills))
         moments.extend(self._detect_clutches(kills))
+        moments.extend(self._detect_final_kill(events, kills))
+        # Phase 22 (W3, M11): plug-ready weapon/vehicle triggers —
+        # inactive (fire nothing) until events carry truthful
+        # weapon/vehicle attribution; see highlight_triggers.py.
+        try:
+            from .highlight_triggers import trigger_registry
+
+            for trigger in trigger_registry(events):
+                moments.extend(trigger.run(events))
+        except Exception:  # pragma: no cover - triggers must not break scoring
+            pass
+        return moments
+
+    def _detect_final_kill(
+        self, events: List[BufferedEvent], kills: List[BufferedEvent]
+    ) -> List[ScoredMoment]:
+        """Final kill: the last kill at/before match-end state.
+
+        Truthful sources of match-end state in the buffer: an event of
+        type ``match_end`` or a kill explicitly flagged ``final_kill``
+        by a producer that knows the match ended. Anything else (e.g.
+        "the last kill we happen to hold") is NOT claimed as final.
+        """
+        moments: List[ScoredMoment] = []
+        end_ts: Optional[float] = None
+        for e in events:
+            if e.type == "match_end":
+                end_ts = e.ts if end_ts is None else max(end_ts, e.ts)
+        flagged = [k for k in kills if k.payload.get("final_kill")]
+        candidate: Optional[BufferedEvent] = None
+        if flagged:
+            candidate = flagged[-1]
+        elif end_ts is not None:
+            before = [k for k in kills if k.ts <= end_ts]
+            candidate = before[-1] if before else None
+        if candidate is None:
+            return moments
+        killer = candidate.payload.get("killer") or "Unknown"
+        moments.append(
+            ScoredMoment(
+                kind="final_kill",
+                score=80,
+                reason=(
+                    f"Final kill — {killer} "
+                    f"({candidate.payload.get('killerTeam') or 'Unknown'}) "
+                    "lands the match-ending elimination"
+                ),
+                player=killer,
+                team=candidate.payload.get("killerTeam"),
+                opponents=[candidate.payload.get("victim") or "Unknown"],
+                window_start=candidate.ts,
+                window_end=candidate.ts,
+                event_ids=[candidate.event_id],
+            )
+        )
         return moments
 
     def build_reel(self, events: List[BufferedEvent], limit: int = 10) -> List[Highlight]:
@@ -224,12 +296,52 @@ class HighlightDetector:
                 if teammates_scored:
                     continue  # not a solo effort
                 span = window[-1].ts - window[0].ts
+                # Phase 22 (W3, M11): alive-count verification. When
+                # the anchor kill carries real alive counts, verify:
+                # killer's team had exactly 1 alive (the killer) and
+                # the window's kills account for every remaining
+                # opponent. A failed verification demotes the moment
+                # to nothing — claiming 1v4 without the counts, or
+                # against the counts, would be fabrication.
+                team_alive = anchor.payload.get("killer_team_alive")
+                opponents_alive = anchor.payload.get("opponents_alive")
+                if team_alive is not None and opponents_alive is not None:
+                    try:
+                        verified = (
+                            int(team_alive) == 1
+                            and int(opponents_alive) == len(window)
+                        )
+                    except (TypeError, ValueError):
+                        verified = False
+                    if not verified:
+                        continue
+                    moments.append(
+                        ScoredMoment(
+                            kind="clutch",
+                            score=95,
+                            reason=(
+                                f"Verified 1v{len(window)} clutch — {killer} "
+                                f"({team or 'Unknown'}), sole survivor of the "
+                                f"team, eliminated all {len(window)} remaining "
+                                f"opponents in {span:.1f}s (alive counts verified)"
+                            ),
+                            player=killer,
+                            team=team,
+                            opponents=[k.payload.get("victim") or "Unknown" for k in window],
+                            window_start=window[0].ts,
+                            window_end=window[-1].ts,
+                            event_ids=[k.event_id for k in window],
+                        )
+                    )
+                    covered.update(k.event_id for k in window)
+                    continue
                 moments.append(
                     ScoredMoment(
                         kind="clutch",
                         score=75,
                         reason=(
-                            f"Clutch — {killer} ({team or 'Unknown'}) holds alone, "
+                            f"Unverified clutch (alive counts unavailable) — "
+                            f"{killer} ({team or 'Unknown'}) holds alone, "
                             f"{len(window)} eliminations in {span:.1f}s with no "
                             f"teammate scoring in the window"
                         ),

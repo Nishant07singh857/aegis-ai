@@ -49,6 +49,16 @@ Resilience:
                                never gives up and never crashes)
     AEGIS_FEED_TIMEOUT_S       seconds without a frame before state becomes
                                NO_FEED (default: 5.0)
+
+Per-detector frame-skip intervals (Phase 21 CV wiring):
+    AEGIS_DETECTOR_INTERVAL_<DETECTOR_NAME>  run this detector every Nth
+                               pipeline frame instead of every frame, e.g.
+                               AEGIS_DETECTOR_INTERVAL_minimap_reader=5.
+                               Detector names match BaseDetector.name and are
+                               lowercased. Unset = the built-in default for the
+                               Phase 21 CV detectors, 1 (every frame) for the
+                               four Phase 14 detectors. Any value < 1 is
+                               clamped to 1.
 """
 
 import os
@@ -125,9 +135,28 @@ class CaptureConfig:
         default_factory=dict
     )
 
+    # detector name -> run every Nth pipeline frame. The Phase 14
+    # detectors (kill feed, alive count, zone timer, team status) run
+    # every frame (1); the heavier Phase 21 CV detectors are staggered
+    # so the ~2.3 FPS CPU budget is not blown on every pass.
+    detector_intervals: Dict[str, int] = field(
+        default_factory=lambda: {
+            "hp_bar_detector": 2,
+            "utility_detector": 3,
+            "healing_detector": 3,
+            "minimap_reader": 5,
+            "zone_detector": 5,
+            "loot_detector": 5,
+        }
+    )
+
     def get_roi(self, detector_name: str) -> Optional[Tuple[float, float, float, float]]:
         """ROI override for a detector, or None when unset."""
         return self.detector_rois.get(detector_name)
+
+    def detector_interval(self, detector_name: str) -> int:
+        """Frame-skip interval for a detector (every Nth frame)."""
+        return max(1, int(self.detector_intervals.get(detector_name, 1) or 1))
 
     def roi_to_pixels(
         self,
@@ -182,15 +211,27 @@ def _load_from_os_environ() -> CaptureConfig:
 
     # Collect per-detector ROI overrides: AEGIS_ROI_<DETECTOR_NAME>
     rois: Dict[str, Tuple[float, float, float, float]] = {}
+    # Collect per-detector frame-skip interval overrides:
+    # AEGIS_DETECTOR_INTERVAL_<DETECTOR_NAME> (over the built-in defaults)
+    intervals: Dict[str, int] = dict(
+        CaptureConfig.__dataclass_fields__["detector_intervals"].default_factory()
+    )
     for key, value in os.environ.items():
-        if not key.startswith("AEGIS_ROI_"):
-            continue
-        detector_name = key[len("AEGIS_ROI_"):].strip().lower()
-        if not detector_name:
-            continue
-        roi = parse_roi(value)
-        if roi is not None:
-            rois[detector_name] = roi
+        if key.startswith("AEGIS_ROI_"):
+            detector_name = key[len("AEGIS_ROI_"):].strip().lower()
+            if not detector_name:
+                continue
+            roi = parse_roi(value)
+            if roi is not None:
+                rois[detector_name] = roi
+        elif key.startswith("AEGIS_DETECTOR_INTERVAL_"):
+            detector_name = key[len("AEGIS_DETECTOR_INTERVAL_"):].strip().lower()
+            if not detector_name:
+                continue
+            try:
+                intervals[detector_name] = max(1, int(value))
+            except (TypeError, ValueError):
+                continue
 
     return CaptureConfig(
         backend=backend,
@@ -208,4 +249,5 @@ def _load_from_os_environ() -> CaptureConfig:
         max_reconnect_attempts=max(1, _get_int("AEGIS_MAX_RECONNECT_ATTEMPTS", 5)),
         feed_timeout_s=max(1.0, _get_float("AEGIS_FEED_TIMEOUT_S", 5.0)),
         detector_rois=rois,
+        detector_intervals=intervals,
     )

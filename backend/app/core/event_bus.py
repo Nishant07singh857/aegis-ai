@@ -3,13 +3,18 @@
 AEGIS AI - Event Bus System
 Central nervous system - all inter-agent communication flows through here.
 Redis Streams + Pub/Sub implementation with:
-- Persistent event storage
+- Persistent event storage (Streams are an append-only log used for
+  persistence + replay; delivery does NOT use Redis consumer groups —
+  no xreadgroup/xack anywhere in this build. Real-time delivery is
+  Pub/Sub plus in-process dispatch to registered subscribers.)
 - Real-time broadcasting
 - Dead letter queues
 - Event replay capability
-- Consumer groups for reliability
 - Backpressure handling
 - Event versioning
+- Canonical event-name aliases (Phase 22: app.core.event_names) —
+  publishing under a legacy name reaches canonical subscribers and
+  vice versa.
 """
 
 import asyncio
@@ -114,14 +119,14 @@ class EventBus:
     Central Event Bus for AEGIS AI.
     
     Architecture:
-    - Redis Streams: Persistent event log with consumer groups
+    - Redis Streams: Persistent event log (persistence/replay only;
+      no consumer groups — delivery is the two mechanisms below)
     - Redis Pub/Sub: Real-time event broadcasting
     - In-memory subscribers: Low-latency local dispatch
     - Dead letter queue: Failed event storage
     - Event replay: Rewind and replay events
-    
+
     Features:
-    - Consumer groups for reliable processing
     - Event prioritization
     - Backpressure handling
     - Automatic retry with exponential backoff
@@ -559,12 +564,32 @@ class EventBus:
         """Dispatch event to all matching subscribers"""
         event = record.event
         event_type = event.event_type
-        
-        # Get subscribers for this event type
-        subscriber_ids = self._type_subscribers.get(event_type, [])
-        
+
+        # Get subscribers for this event type. Phase 22 (M12): also
+        # resolve canonical/alias equivalents (app.core.event_names)
+        # so a publisher using a legacy name (kill_event) reaches a
+        # subscriber registered under the canonical name
+        # (kill.occurred) and vice versa. Deduped, order-stable.
+        subscriber_ids: List[str] = []
+        seen_ids: Set[str] = set()
+        lookup_types = [event_type]
+        try:
+            from .event_names import equivalent_names
+
+            lookup_types = sorted(equivalent_names(event_type))
+        except Exception:  # pragma: no cover - alias table unavailable
+            lookup_types = [event_type]
+        for lookup in lookup_types:
+            for sid in self._type_subscribers.get(lookup, []):
+                if sid not in seen_ids:
+                    seen_ids.add(sid)
+                    subscriber_ids.append(sid)
+
         # Also dispatch to wildcard subscribers
-        subscriber_ids.extend(self._type_subscribers.get("*", []))
+        for sid in self._type_subscribers.get("*", []):
+            if sid not in seen_ids:
+                seen_ids.add(sid)
+                subscriber_ids.append(sid)
         
         for subscriber_id in subscriber_ids:
             if subscriber_id not in self._subscribers:

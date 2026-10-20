@@ -94,6 +94,13 @@ export interface DirectorOutputViewProps {
    * watermarked test pattern (output page ?video=sim).
    */
   video?: VideoLayerMode;
+  /**
+   * Captions overlay (Phase 22): when true, the currently-active
+   * commentary caption cue (GET /api/v1/audio/captions/current, from the
+   * WebVTT sidecar store) renders as a bottom-centre caption bar.
+   * Default off — the /watch page exposes the viewer toggle.
+   */
+  captions?: boolean;
 }
 
 /** TTL-filtered kill list, newest first; re-renders every second so
@@ -198,6 +205,44 @@ function CommentaryFocus({ api }: { api: string }) {
 
 /* ---------------------------------- view ----------------------------------- */
 
+/** Phase 22 captions bar: polls the active caption cue (1s) and renders
+ *  it while it is live. Renders nothing when no cue is active — captions
+ *  are never invented. */
+function CaptionsBar({ api, token }: { api: string; token?: string }) {
+  const [text, setText] = useState<string | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const res = await fetch(`${api}/api/v1/audio/captions/current`, {
+          headers: token ? { Authorization: `Bearer ${token}` } : {},
+        });
+        if (!res.ok) return;
+        const body = (await res.json()) as {
+          caption?: { text?: string } | null;
+        };
+        if (!cancelled) setText(body.caption?.text ?? null);
+      } catch {
+        /* captions endpoint unreachable — show nothing */
+      }
+    };
+    void poll();
+    const t = setInterval(poll, 1000);
+    return () => {
+      cancelled = true;
+      clearInterval(t);
+    };
+  }, [api, token]);
+  if (!text) return null;
+  return (
+    <div className="absolute bottom-[16%] left-1/2 z-30 w-[min(900px,80vw)] -translate-x-1/2 text-center">
+      <span className="inline-block rounded-md bg-black/80 px-4 py-2 text-2xl font-semibold leading-snug text-white max-sm:text-base">
+        {text}
+      </span>
+    </div>
+  );
+}
+
 export function DirectorOutputView({
   api,
   accent = '#00f0ff',
@@ -206,6 +251,7 @@ export function DirectorOutputView({
   hold = 6,
   brand = false,
   video = 'real',
+  captions = false,
 }: DirectorOutputViewProps) {
   const {
     status,
@@ -527,6 +573,8 @@ export function DirectorOutputView({
           )}
         </>
       )}
+
+      {captions && live && <CaptionsBar api={api} token={token ?? undefined} />}
 
       <ConnBadge status={status} retryCount={retryCount} onRetry={reconnect} />
     </OverlayRoot>

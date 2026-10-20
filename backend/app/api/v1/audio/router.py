@@ -25,6 +25,7 @@ from .schemas import (
     ClipInfo,
     CommentaryLineRequest,
     CommentaryLineResponse,
+    CommentaryModeRequest,
     FeedActionResponse,
     GameAudioActionResponse,
     MixerStateResponse,
@@ -63,7 +64,12 @@ async def queue_commentary_line(payload: CommentaryLineRequest):
     """Synthesize one commentary line (Piper, offline) and queue it to the feed."""
     feed = get_commentary_feed()
     result = await feed.enqueue_line(
-        text=payload.text, profile_id=payload.profile_id, style=payload.style
+        text=payload.text,
+        profile_id=payload.profile_id,
+        style=payload.style,
+        language=payload.language,
+        match_id=payload.match_id,
+        priority=payload.priority,
     )
     return CommentaryLineResponse(**result)
 
@@ -113,6 +119,95 @@ async def start_feed(_user=Depends(require_operator)):
 @router.post("/audio/feed/stop", response_model=FeedActionResponse)
 async def stop_feed(_user=Depends(require_operator)):
     return FeedActionResponse(**get_commentary_feed().stop())
+
+
+# ------------------------------------------------------------------ #
+# Phase 22: commentary modes / subtitles / suggestions / latency
+# ------------------------------------------------------------------ #
+@router.get("/audio/commentary-mode")
+async def get_commentary_mode(match_id: str | None = None, _user=Depends(get_current_user)):
+    from app.audio.commentary_modes import get_commentary_mode_service
+
+    return get_commentary_mode_service().describe(match_id)
+
+
+@router.post("/audio/commentary-mode", dependencies=[Depends(require_operator)])
+async def set_commentary_mode(payload: CommentaryModeRequest, user=Depends(require_operator)):
+    from app.audio.commentary_modes import CommentaryMode, get_commentary_mode_service
+
+    try:
+        mode = CommentaryMode(payload.mode)
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Unknown commentary mode '{payload.mode}'. Valid: "
+            + ", ".join(m.value for m in CommentaryMode),
+        )
+    service = get_commentary_mode_service()
+    service.set_mode(mode, match_id=payload.match_id, updated_by=user.username)
+    return service.describe(payload.match_id)
+
+
+@router.get("/audio/captions")
+async def list_captions(limit: int = 20, _user=Depends(get_current_user)):
+    from app.audio.subtitles import get_subtitle_store
+
+    return {"captions": get_subtitle_store().latest(limit=min(max(limit, 1), 100))}
+
+
+@router.get("/audio/captions/current")
+async def current_caption(language: str | None = None, _user=Depends(get_current_user)):
+    from app.audio.subtitles import get_subtitle_store
+
+    return {"caption": get_subtitle_store().current(language)}
+
+
+@router.get("/audio/subtitles/{language}.vtt")
+async def subtitle_webvtt(language: str, _user=Depends(get_current_user)):
+    from fastapi.responses import PlainTextResponse
+
+    from app.audio.subtitles import get_subtitle_store
+
+    if language not in ("hi", "en"):
+        raise HTTPException(status_code=404, detail="Subtitle track: hi or en only.")
+    return PlainTextResponse(
+        get_subtitle_store().webvtt(language), media_type="text/vtt"
+    )
+
+
+@router.get("/audio/suggestions")
+async def list_suggestions(limit: int = 20, _user=Depends(require_operator)):
+    """Human Assist text suggestions for the human caster (operator+)."""
+    return {"suggestions": get_commentary_feed().suggestions(limit=min(max(limit, 1), 50))}
+
+
+@router.get("/audio/latency")
+async def latency_stats(_user=Depends(get_current_user)):
+    return get_commentary_feed().latency_stats()
+
+
+@router.post("/audio/fallback-pack/build", dependencies=[Depends(require_operator)])
+async def build_fallback_pack():
+    """Pre-render the generic-line fallback pack with Piper (idempotent)."""
+    from app.audio.fallback_pack import build_fallback_pack as _build
+
+    return await _build()
+
+
+@router.post("/audio/presynth/warm", dependencies=[Depends(require_operator)])
+async def warm_presynth():
+    """Predictive pre-synthesis warm-up for the active mode's languages."""
+    from app.audio.commentary_modes import get_commentary_mode_service
+    from app.audio.fallback_pack import warm_presynthesis
+
+    behavior = get_commentary_mode_service().behavior()
+    langs = [behavior.primary_language]
+    if behavior.secondary_language:
+        langs.append(behavior.secondary_language)
+    feed = get_commentary_feed()
+    warmed = await feed._get_synth().warm_models()
+    pack = await warm_presynthesis(langs)
+    return {"voices_warmed": warmed, "presynthesis": pack}
 
 
 # ------------------------------------------------------------------ #

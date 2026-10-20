@@ -38,6 +38,9 @@ function streamIsRunning(raw: RawStreamStatus | null): boolean | null {
 function WatchInner() {
   const router = useRouter();
   const { token, logout } = useAuth();
+  // Phase 22: viewer captions toggle (WebVTT sidecar cues, rendered by
+  // DirectorOutputView from /api/v1/audio/captions/current).
+  const [captions, setCaptions] = useState(false);
   // null = not yet known; boolean = resolved.
   const [running, setRunning] = useState<boolean | null>(null);
   const [statusError, setStatusError] = useState<string | null>(null);
@@ -91,6 +94,18 @@ function WatchInner() {
           )}
           <button
             type="button"
+            onClick={() => setCaptions((c) => !c)}
+            aria-pressed={captions}
+            className={`pointer-events-auto rounded-lg border px-3 py-1.5 font-mono text-xs uppercase tracking-wider backdrop-blur transition-colors max-md:min-h-[44px] max-md:px-4 ${
+              captions
+                ? "border-[#00f0ff]/60 bg-[#00f0ff]/15 text-[#00f0ff]"
+                : "border-white/15 bg-black/50 text-zinc-300 hover:border-white/35"
+            }`}
+          >
+            CC {captions ? "On" : "Off"}
+          </button>
+          <button
+            type="button"
             onClick={handleLogout}
             className="pointer-events-auto rounded-lg border border-white/15 bg-black/50 px-3 py-1.5 font-mono text-xs uppercase tracking-wider text-zinc-300 backdrop-blur transition-colors hover:border-[#ff3366]/60 hover:text-[#ff3366] max-md:min-h-[44px] max-md:px-4"
           >
@@ -110,6 +125,7 @@ function WatchInner() {
           match="LIVE"
           ttl={12}
           hold={6}
+          captions={captions}
         />
       ) : (
         <div className="flex h-full flex-col items-center justify-center gap-4 px-6 text-center">

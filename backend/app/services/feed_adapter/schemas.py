@@ -32,6 +32,15 @@ class FeedEventType(str, Enum):
     # game-state observations (alive counter, team-bar status), not guesses.
     ALIVE_COUNT = "alive_count"
     TEAM_STATUS = "team_status"
+    # Phase 21 (CV wiring): the Gen-1 CV detectors (HP bars, utility,
+    # minimap, healing, loot) emit these through the same contract.
+    # Zone geometry from the minimap reuses ZONE_UPDATE above, with
+    # payload["phase_source"] == "minimap_geometry".
+    HP_UPDATE = "hp_update"
+    UTILITY = "utility"
+    POSITION_UPDATE = "position_update"
+    HEALING = "healing"
+    LOOT = "loot"
 
 
 #: Feed event type -> event-bus event type. kill/knock keep the bus
@@ -48,6 +57,11 @@ BUS_EVENT_TYPE_MAP: Dict[FeedEventType, str] = {
     FeedEventType.COMMENTARY: "commentary",
     FeedEventType.ALIVE_COUNT: "alive_count_update",
     FeedEventType.TEAM_STATUS: "team_status_update",
+    FeedEventType.HP_UPDATE: "hp_update",
+    FeedEventType.UTILITY: "utility_event",
+    FeedEventType.POSITION_UPDATE: "position_update",
+    FeedEventType.HEALING: "healing_event",
+    FeedEventType.LOOT: "loot_event",
 }
 
 

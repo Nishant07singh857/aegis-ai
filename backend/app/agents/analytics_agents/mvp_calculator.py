@@ -1,8 +1,28 @@
 # backend/app/agents/analytics_agents/mvp_calculator.py
 """
-AEGIS AI - MVP Calculator
-Multi-factor MVP scoring engine that determines the most valuable player.
-Considers kills, damage, survival, utility, clutch factor, and match impact.
+AEGIS AI - MVP Calculator — SINGLE canonical MVP producer (Phase 21, W2).
+
+Canonical PRD formula (the ONLY MVP definition in the codebase):
+
+    mvp_score = kills*5 + damage*0.05 + revives*3
+              + survival_seconds*0.02 + clutches*10 + headshots*2
+
+* :func:`compute_mvp_score` / :func:`compute_mvp_score_from_stats` are the
+  single implementation. ``MatchService.record_player_stats`` persists
+  their output to ``match_player_stats.mvp_score`` and the player-stats
+  API serves it (``rating`` / ``mvp_score``); the standings MVP board
+  sorts by it. No other module may define an MVP score.
+* Honesty rules: a stat the feed has not delivered contributes 0 and is
+  never estimated. In particular damage is taken exactly as recorded
+  (agent HP-drop accounting, see ``team_tracker.update_player_hp`` /
+  ``record_kill``); a missing/``None`` damage contributes 0 to the score
+  while the API still reports the damage itself as ``null`` ("—").
+* ``clutches`` means clutches WON. Sources: an explicit ``clutches`` key,
+  else ``clutch_wins``. ``clutch_attempts`` alone is NOT a clutch and is
+  never counted. Headshots come from ``match_player_stats.headshots``
+  (kill-feed / feed payloads); when absent they are 0.
+* Category awards (Best Fragger / Support / Clutch / …) are labels only:
+  they never feed back into ``mvp_score``.
 """
 
 from typing import Dict, List, Optional, Any
@@ -13,6 +33,91 @@ from ..base_agent import BaseAgent, AgentConfig
 from ...core.event_bus import EventBus, EventRecord
 
 logger = structlog.get_logger("aegis.agents.mvp")
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# CANONICAL MVP FORMULA (PRD) — the single producer
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+MVP_WEIGHT_KILLS = 5.0
+MVP_WEIGHT_DAMAGE = 0.05
+MVP_WEIGHT_REVIVES = 3.0
+MVP_WEIGHT_SURVIVAL_PER_SECOND = 0.02
+MVP_WEIGHT_CLUTCHES = 10.0
+MVP_WEIGHT_HEADSHOTS = 2.0
+
+
+def _num(value: Any) -> float:
+    """Coerce a possibly-missing stat to a number; missing/None → 0."""
+    if value is None:
+        return 0.0
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def compute_mvp_score(
+    *,
+    kills: Any = 0,
+    damage: Any = None,
+    revives: Any = 0,
+    survival_seconds: Any = 0,
+    clutches: Any = 0,
+    headshots: Any = 0,
+) -> float:
+    """Canonical PRD MVP score — the ONLY MVP formula in the codebase.
+
+    mvp_score = kills*5 + damage*0.05 + revives*3
+              + survival_seconds*0.02 + clutches*10 + headshots*2
+
+    Any argument may be ``None`` (feed has not delivered it) and then
+    contributes 0 — values are never estimated or invented.
+    """
+    return (
+        _num(kills) * MVP_WEIGHT_KILLS
+        + _num(damage) * MVP_WEIGHT_DAMAGE
+        + _num(revives) * MVP_WEIGHT_REVIVES
+        + _num(survival_seconds) * MVP_WEIGHT_SURVIVAL_PER_SECOND
+        + _num(clutches) * MVP_WEIGHT_CLUTCHES
+        + _num(headshots) * MVP_WEIGHT_HEADSHOTS
+    )
+
+
+def extract_clutches(stats: Dict[str, Any]) -> int:
+    """Clutches WON from a stat dict: ``clutches`` else ``clutch_wins`` else 0.
+
+    ``clutch_attempts`` is deliberately NOT used: an attempt is not a
+    clutch. When no won-clutch count exists the honest value is 0.
+    """
+    if stats.get("clutches") is not None:
+        return int(_num(stats.get("clutches")))
+    if stats.get("clutch_wins") is not None:
+        return int(_num(stats.get("clutch_wins")))
+    return 0
+
+
+def compute_mvp_score_from_stats(stats: Dict[str, Any]) -> float:
+    """Canonical score from a loose stat dict (feed / DB / agent shapes).
+
+    Accepted aliases: kills|finishes, damage|damage_dealt,
+    revives|revives_performed, survival_seconds|survived_time_seconds|
+    survival_time, clutches|clutch_wins, headshots.
+    """
+    damage = stats.get("damage", stats.get("damage_dealt"))
+    revives = stats.get("revives", stats.get("revives_performed"))
+    survival = stats.get(
+        "survival_seconds",
+        stats.get("survived_time_seconds", stats.get("survival_time")),
+    )
+    kills = stats.get("kills", stats.get("finishes"))
+    return compute_mvp_score(
+        kills=kills,
+        damage=damage,
+        revives=revives,
+        survival_seconds=survival,
+        clutches=extract_clutches(stats),
+        headshots=stats.get("headshots"),
+    )
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # ENUMS & DATA MODELS
@@ -44,13 +149,21 @@ class PerformanceWeight(str, Enum):
 
 @dataclass
 class MVPResult:
-    """Complete MVP calculation result"""
+    """Complete MVP calculation result.
+
+    ``overall_score`` IS the canonical PRD ``mvp_score`` (see
+    :func:`compute_mvp_score`) — an unbounded points total, NOT a
+    0–100 normalisation. The ``*_score`` breakdown fields hold the
+    canonical per-term contributions so they always sum to
+    ``overall_score`` (utility/impact/consistency carry no PRD term
+    and stay 0).
+    """
     player_id: str
     player_name: str
     team_id: str
     team_name: str
-    
-    # Scores (0-100)
+
+    # Canonical score + per-term contributions (sum == overall_score)
     overall_score: float = 0.0
     combat_score: float = 0.0
     survival_score: float = 0.0
@@ -58,12 +171,12 @@ class MVPResult:
     teamwork_score: float = 0.0
     clutch_score: float = 0.0
     impact_score: float = 0.0
-    
-    # Raw stats
+
+    # Raw stats (damage is None when the feed never delivered it)
     kills: int = 0
     knocks: int = 0
     assists: int = 0
-    damage: int = 0
+    damage: Optional[int] = None
     headshots: int = 0
     revives: int = 0
     healing: int = 0
@@ -73,6 +186,12 @@ class MVPResult:
     grenades_used: int = 0
     clutch_attempts: int = 0
     clutch_wins: int = 0
+    clutches: int = 0
+
+    @property
+    def mvp_score(self) -> float:
+        """Alias for ``overall_score`` — the canonical MVP score."""
+        return self.overall_score
     
     # Rankings
     rank: int = 0
@@ -93,68 +212,21 @@ class MVPResult:
 
 class MVPCalculator(BaseAgent):
     """
-    Multi-factor MVP scoring engine.
-    
-    Scoring Factors:
-    1. Combat (35%): Kills, damage, headshots, knocks
-    2. Survival (20%): Time alive, placement contribution
-    3. Utility (15%): Grenades, smokes, healing effectiveness
-    4. Teamwork (15%): Revives, assists, team coordination
-    5. Clutch (10%): Clutch situations won
-    6. Impact (5%): Match-defining moments
-    
-    Adjusts for:
-    - Match placement (higher placement = more weight)
-    - Zone phase (later deaths = more value)
-    - Team performance context
-    - Opponent strength
+    Canonical MVP scoring engine (single producer).
+
+    The score is EXACTLY the PRD formula implemented by
+    :func:`compute_mvp_score` — no weights, no placement multipliers,
+    no 0–100 normalisation. Category awards below are descriptive
+    labels derived from raw stats; they never alter the score.
     """
-    
+
     def __init__(self, config: AgentConfig, event_bus: EventBus):
         super().__init__(config, event_bus)
-        # Scoring weights (sum to 1.0)
-        self.weights = {
-            PerformanceWeight.KILLS: 0.20,
-            PerformanceWeight.DAMAGE: 0.15,
-            PerformanceWeight.SURVIVAL: 0.20,
-            PerformanceWeight.UTILITY: 0.15,
-            PerformanceWeight.CLUTCH: 0.10,
-            PerformanceWeight.TEAMWORK: 0.15,
-            PerformanceWeight.CONSISTENCY: 0.03,
-            PerformanceWeight.IMPACT: 0.02,
-        }
-        
-        # Base scores per category
-        self.base_scores = {
-            "kill": 10.0,        # Points per kill
-            "knock": 5.0,        # Points per knock
-            "assist": 3.0,       # Points per assist
-            "damage": 0.01,      # Points per damage point
-            "headshot_bonus": 5.0, # Bonus per headshot
-            "revive": 8.0,       # Points per revive
-            "healing": 0.005,    # Points per healing
-            "survival_per_minute": 2.0,  # Points per minute survived
-            "smoke": 2.0,        # Points per smoke used
-            "grenade": 3.0,      # Points per grenade used
-            "grenade_kill": 15.0, # Bonus for grenade kill
-            "clutch_attempt": 10.0, # Points per clutch attempt
-            "clutch_win": 30.0,  # Bonus for winning clutch
-            "first_blood": 5.0,  # First kill bonus
-            "last_kill": 10.0,   # Match-winning kill
-        }
-        
-        # Placement multiplier (higher placement = more points)
-        self.placement_multiplier = {
-            1: 1.5, 2: 1.4, 3: 1.3, 4: 1.2, 5: 1.15,
-            6: 1.1, 7: 1.05, 8: 1.0, 9: 0.95, 10: 0.9,
-            11: 0.85, 12: 0.8, 13: 0.75, 14: 0.7,
-            15: 0.65, 16: 0.6,
-        }
-        
+
         # Historical data
         self.player_averages: Dict[str, Dict[str, float]] = {}
         self.tournament_mvps: List[MVPResult] = []
-        
+
         self._log = logger.bind(component="mvp_calculator")
     
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -209,180 +281,75 @@ class MVPCalculator(BaseAgent):
         player: Dict[str, Any],
         context: Dict[str, Any],
     ) -> MVPResult:
-        """Calculate MVP score for a single player"""
-        
-        # Extract stats
-        kills = player.get("kills", 0)
-        knocks = player.get("knocks", 0)
-        assists = player.get("assists", 0)
-        damage = player.get("damage", 0)
-        headshots = player.get("headshots", 0)
-        revives = player.get("revives", 0)
-        healing = player.get("healing", 0)
-        survival_time = player.get("survival_time", 0)
-        smokes = player.get("smokes", 0)
-        grenades = player.get("grenades", 0)
-        clutch_attempts = player.get("clutch_attempts", 0)
-        clutch_wins = player.get("clutch_wins", 0)
-        
-        placement = context.get("team_placement", 16)
-        multiplier = self.placement_multiplier.get(placement, 1.0)
-        
-        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-        # Combat Score
-        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-        
-        combat_score = 0.0
-        
-        # Kill points
-        combat_score += kills * self.base_scores["kill"]
-        combat_score += knocks * self.base_scores["knock"]
-        combat_score += assists * self.base_scores["assist"]
-        
-        # Damage points
-        combat_score += damage * self.base_scores["damage"]
-        
-        # Headshot bonus
-        combat_score += headshots * self.base_scores["headshot_bonus"]
-        
-        # Apply multiplier
-        combat_score *= multiplier
-        
-        # Normalize to 0-100
-        combat_score = min(100, combat_score * self.weights[PerformanceWeight.KILLS] * 0.5)
-        
-        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-        # Survival Score
-        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-        
-        survival_minutes = survival_time / 60
-        survival_score = survival_minutes * self.base_scores["survival_per_minute"]
-        
-        # Bonus for surviving to late game
-        zone_phase = player.get("zone_phase_at_death", 0)
-        if zone_phase >= 6:
-            survival_score *= 1.5
-        elif zone_phase >= 4:
-            survival_score *= 1.2
-        
-        survival_score *= multiplier
-        survival_score = min(100, survival_score * self.weights[PerformanceWeight.SURVIVAL] * 0.5)
-        
-        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-        # Utility Score
-        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-        
-        utility_score = 0.0
-        utility_score += smokes * self.base_scores["smoke"]
-        utility_score += grenades * self.base_scores["grenade"]
-        utility_score += player.get("grenade_kills", 0) * self.base_scores["grenade_kill"]
-        utility_score += healing * self.base_scores["healing"]
-        
-        utility_score *= multiplier
-        utility_score = min(100, utility_score * self.weights[PerformanceWeight.UTILITY] * 0.5)
-        
-        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-        # Teamwork Score
-        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-        
-        teamwork_score = 0.0
-        teamwork_score += revives * self.base_scores["revive"]
-        teamwork_score += assists * self.base_scores["assist"] * 2  # Assists show teamwork
-        
-        # Bonus for team support actions
-        if revives >= 3:
-            teamwork_score += 10
-        if assists >= 5:
-            teamwork_score += 10
-        
-        teamwork_score *= multiplier
-        teamwork_score = min(100, teamwork_score * self.weights[PerformanceWeight.TEAMWORK] * 0.5)
-        
-        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-        # Clutch Score
-        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-        
-        clutch_score = 0.0
-        clutch_score += clutch_attempts * self.base_scores["clutch_attempt"]
-        clutch_score += clutch_wins * self.base_scores["clutch_win"]
-        
-        # Big bonus for multiple clutch wins
-        if clutch_wins >= 2:
-            clutch_score += 25
-        
-        clutch_score *= multiplier
-        clutch_score = min(100, clutch_score * self.weights[PerformanceWeight.CLUTCH] * 0.5)
-        
-        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-        # Impact Score
-        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-        
-        impact_score = 0.0
-        
-        # First blood bonus
-        if player.get("first_blood", False):
-            impact_score += self.base_scores["first_blood"]
-        
-        # Match-winning kill
-        if player.get("last_kill", False):
-            impact_score += self.base_scores["last_kill"]
-        
-        # High damage percentage of team
-        team_damage = context.get("team_total_damage", 1)
-        if team_damage > 0:
-            damage_share = damage / team_damage
-            if damage_share > 0.5:  # Did more than 50% of team damage
-                impact_score += 20
-            elif damage_share > 0.4:
-                impact_score += 10
-        
-        impact_score *= multiplier
-        impact_score = min(100, impact_score * self.weights[PerformanceWeight.IMPACT] * 0.5)
-        
-        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-        # Consistency Bonus
-        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-        
-        consistency_score = 0.0
-        
-        # Check if player performed above their average
-        player_id = player.get("player_id", "")
-        if player_id in self.player_averages:
-            avg = self.player_averages[player_id]
-            if kills > avg.get("avg_kills", 0) * 1.5:
-                consistency_score += 15
-            if damage > avg.get("avg_damage", 0) * 1.5:
-                consistency_score += 15
-        
-        consistency_score = min(100, consistency_score * self.weights[PerformanceWeight.CONSISTENCY] * 0.5)
-        
-        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-        # Calculate Overall
-        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-        
-        overall_score = (
-            combat_score +
-            survival_score +
-            utility_score +
-            teamwork_score +
-            clutch_score +
-            impact_score +
-            consistency_score
+        """Calculate the canonical MVP score for a single player.
+
+        Delegates to :func:`compute_mvp_score_from_stats` — the one
+        formula. Missing stats contribute 0 (never estimated); in
+        particular ``damage`` stays ``None`` on the result when the
+        feed never delivered it, so callers can render "—".
+        """
+
+        # Extract stats with the canonical alias handling.
+        kills = int(_num(player.get("kills", player.get("finishes"))))
+        knocks = int(_num(player.get("knocks")))
+        assists = int(_num(player.get("assists")))
+        raw_damage = player.get("damage", player.get("damage_dealt"))
+        damage: Optional[int] = (
+            int(_num(raw_damage)) if raw_damage is not None else None
         )
-        
-        # Create result
+        headshots = int(_num(player.get("headshots")))
+        revives = int(
+            _num(player.get("revives", player.get("revives_performed")))
+        )
+        healing = int(_num(player.get("healing")))
+        survival_time = _num(
+            player.get(
+                "survival_seconds",
+                player.get(
+                    "survived_time_seconds", player.get("survival_time")
+                ),
+            )
+        )
+        smokes = int(_num(player.get("smokes", player.get("smokes_used"))))
+        grenades = int(
+            _num(player.get("grenades", player.get("grenades_used")))
+        )
+        clutch_attempts = int(_num(player.get("clutch_attempts")))
+        clutch_wins = int(_num(player.get("clutch_wins")))
+        clutches = extract_clutches(player)
+
+        placement = context.get("team_placement", 16)
+
+        # Canonical per-term contributions (they sum to the score).
+        combat_score = (
+            kills * MVP_WEIGHT_KILLS
+            + _num(damage) * MVP_WEIGHT_DAMAGE
+            + headshots * MVP_WEIGHT_HEADSHOTS
+        )
+        survival_score = survival_time * MVP_WEIGHT_SURVIVAL_PER_SECOND
+        teamwork_score = revives * MVP_WEIGHT_REVIVES
+        clutch_score = clutches * MVP_WEIGHT_CLUTCHES
+        overall_score = compute_mvp_score(
+            kills=kills,
+            damage=damage,
+            revives=revives,
+            survival_seconds=survival_time,
+            clutches=clutches,
+            headshots=headshots,
+        )
+
         result = MVPResult(
             player_id=player.get("player_id", ""),
             player_name=player.get("player_name", "Unknown"),
             team_id=player.get("team_id", ""),
             team_name=player.get("team_name", "Unknown"),
-            overall_score=round(overall_score, 1),
-            combat_score=round(combat_score, 1),
-            survival_score=round(survival_score, 1),
-            utility_score=round(utility_score, 1),
-            teamwork_score=round(teamwork_score, 1),
-            clutch_score=round(clutch_score, 1),
-            impact_score=round(impact_score, 1),
+            overall_score=round(overall_score, 2),
+            combat_score=round(combat_score, 2),
+            survival_score=round(survival_score, 2),
+            utility_score=0.0,
+            teamwork_score=round(teamwork_score, 2),
+            clutch_score=round(clutch_score, 2),
+            impact_score=0.0,
             kills=kills,
             knocks=knocks,
             assists=assists,
@@ -395,10 +362,11 @@ class MVPCalculator(BaseAgent):
             grenades_used=grenades,
             clutch_attempts=clutch_attempts,
             clutch_wins=clutch_wins,
+            clutches=clutches,
             match_placement=placement,
             match_id=context.get("match_id", ""),
         )
-        
+
         return result
     
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -406,33 +374,42 @@ class MVPCalculator(BaseAgent):
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     
     def _assign_category_awards(self, results: List[MVPResult]) -> None:
-        """Assign category-specific awards"""
-        
+        """Assign descriptive category awards from RAW stats only.
+
+        Awards never influence ``overall_score`` (the canonical MVP
+        score). They are labels the broadcast layer may display.
+        """
+
         if not results:
             return
-        
-        # Best Fragger (highest combat score)
-        best_fragger = max(results, key=lambda r: r.combat_score)
+
+        # Best Fragger (most kills, then most damage)
+        best_fragger = max(
+            results, key=lambda r: (r.kills, r.damage or 0)
+        )
         best_fragger.awards.append(MVPCategory.BEST_FRAGGER)
         best_fragger.category_ranks[MVPCategory.BEST_FRAGGER] = 1
-        
-        # Best Support (highest teamwork + utility)
-        best_support = max(results, key=lambda r: r.teamwork_score + r.utility_score)
-        best_support.awards.append(MVPCategory.BEST_SUPPORT)
-        best_support.category_ranks[MVPCategory.BEST_SUPPORT] = 1
-        
-        # Best Clutch (highest clutch score)
-        best_clutch = max(results, key=lambda r: r.clutch_score)
-        if best_clutch.clutch_score > 0:
+
+        # Best Support (most revives)
+        best_support = max(results, key=lambda r: r.revives)
+        if best_support.revives > 0:
+            best_support.awards.append(MVPCategory.BEST_SUPPORT)
+            best_support.category_ranks[MVPCategory.BEST_SUPPORT] = 1
+
+        # Best Clutch (most clutches won)
+        best_clutch = max(results, key=lambda r: r.clutches)
+        if best_clutch.clutches > 0:
             best_clutch.awards.append(MVPCategory.BEST_CLUTCH)
             best_clutch.category_ranks[MVPCategory.BEST_CLUTCH] = 1
-        
-        # Best Utility
-        best_utility = max(results, key=lambda r: r.utility_score)
-        if best_utility.utility_score > 20:
+
+        # Best Utility (most utility thrown) — informational only
+        best_utility = max(
+            results, key=lambda r: r.smokes_used + r.grenades_used
+        )
+        if best_utility.smokes_used + best_utility.grenades_used > 0:
             best_utility.awards.append(MVPCategory.BEST_UTILITY)
-        
-        # Overall MVP (highest overall)
+
+        # Overall MVP (highest canonical score)
         if results:
             results[0].awards.append(MVPCategory.OVERALL_MVP)
             results[0].category_ranks[MVPCategory.OVERALL_MVP] = 1
@@ -483,13 +460,14 @@ class MVPCalculator(BaseAgent):
                 "player_name": m.player_name,
                 "team_name": m.team_name,
                 "score": m.overall_score,
+                "mvp_score": m.overall_score,
                 "kills": m.kills,
                 "damage": m.damage,
                 "awards": [a.value for a in m.awards],
             }
             for i, m in enumerate(sorted_mvps[:limit])
         ]
-    
+
     def get_match_mvp(self, match_id: str) -> Optional[Dict[str, Any]]:
         """Get MVP for a specific match"""
         for mvp in self.tournament_mvps:
@@ -498,6 +476,7 @@ class MVPCalculator(BaseAgent):
                     "player_name": mvp.player_name,
                     "team_name": mvp.team_name,
                     "score": mvp.overall_score,
+                    "mvp_score": mvp.overall_score,
                     "kills": mvp.kills,
                     "damage": mvp.damage,
                     "awards": [a.value for a in mvp.awards],

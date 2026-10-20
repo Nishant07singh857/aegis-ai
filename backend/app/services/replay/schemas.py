@@ -61,11 +61,22 @@ class Clip(BaseModel):
     )
 
 
+RenderStatus = Literal[
+    "not_requested", "pending", "rendered", "no_source", "failed"
+]
+
+
 class Highlight(BaseModel):
     """One scored highlight moment."""
 
     moment_id: str
-    kind: Literal["multi_kill", "squad_wipe", "clutch"]
+    # Phase 22 (W3, M11): final_kill is wired; grenade_multi_kill /
+    # sniper_triple / vehicle_kill are plug-ready kinds from
+    # highlight_triggers.py (fire only with truthful weapon data).
+    kind: Literal[
+        "multi_kill", "squad_wipe", "clutch", "final_kill",
+        "grenade_multi_kill", "sniper_triple", "vehicle_kill",
+    ]
     score: int = Field(ge=0, le=100)
     reason: str
     player: Optional[str] = None
@@ -76,6 +87,49 @@ class Highlight(BaseModel):
     window_start_iso: str
     window_end_iso: str
     event_ids: List[str] = Field(default_factory=list)
+    # Phase 21 (T4): video render state for this moment. ``not_requested``
+    # until an operator asks for a render; ``no_source`` is the honest
+    # state when no recorded match video exists (no clip is fabricated).
+    render_status: RenderStatus = "not_requested"
+    render_files: Dict[str, str] = Field(
+        default_factory=dict,
+        description="Rendered file names by kind: landscape | portrait | gif.",
+    )
+    render_error: Optional[str] = None
+
+
+class RenderRequest(BaseModel):
+    """Ask for a video render of one highlight moment."""
+
+    match_id: Optional[str] = Field(
+        default=None,
+        description="Match the moment belongs to; scopes source-video lookup.",
+    )
+    source_path: Optional[str] = Field(
+        default=None,
+        description="Explicit recorded-video path (operator override).",
+    )
+    source_started_at: Optional[datetime] = Field(
+        default=None,
+        description="When the source recording started (maps epoch windows).",
+    )
+
+
+class HighlightRender(BaseModel):
+    """Render status + outputs for one highlight moment."""
+
+    moment_id: str
+    match_id: Optional[str] = None
+    status: RenderStatus
+    source_path: Optional[str] = None
+    files: Dict[str, str] = Field(default_factory=dict)
+    file_urls: Dict[str, str] = Field(
+        default_factory=dict,
+        description="Download URLs by kind, present only when rendered.",
+    )
+    error: Optional[str] = None
+    window_start: Optional[float] = None
+    window_end: Optional[float] = None
 
 
 class DayReelSegment(BaseModel):

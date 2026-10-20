@@ -8,10 +8,14 @@ recording with points calculation, event logging, and stats queries.
 
 Model imports are defensive: Match/MatchEvent/Tournament/Team already exist
 in ``app.db.models``; MatchStatus/MatchMap/TournamentStatus/MatchTeamStats/
-MatchPlayerStats may still be landing in parallel, so each missing name gets
-a local fallback. When the real names land in the models package, the
-try-imports win and the fallbacks are skipped (coordinator dedups at
-integration).
+MatchPlayerStats do NOT exist in ``app.db.models``.
+
+Phase 22 (W3, Tech) truth-in-labelling: the local definitions below are
+therefore NOT dead fallbacks — they are the CANONICAL models/enums for
+match stats (the tables are created from these classes). The try-imports
+remain so that if canonical models are ever moved into ``app.db.models``,
+they win and these definitions are skipped; until then, anyone editing
+match-stats fields edits THEM HERE (and the alembic chain), nowhere else.
 """
 
 from __future__ import annotations
@@ -32,7 +36,8 @@ logger = structlog.get_logger("aegis.services.match")
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# OPTIONAL MODEL IMPORTS (with local fallbacks)
+# OPTIONAL MODEL IMPORTS — the local definitions below are CANONICAL
+# today (app.db.models has no equivalents; see module docstring).
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 try:
@@ -78,7 +83,7 @@ try:
 except ImportError:  # pragma: no cover - fallback until models land
 
     class MatchTeamStats(Base):
-        """Per-team results for one match (local fallback model)."""
+        """Per-team results for one match (CANONICAL model — see module docstring)."""
 
         __tablename__ = "match_team_stats"
 
@@ -89,7 +94,11 @@ except ImportError:  # pragma: no cover - fallback until models land
         team_id: Mapped[str] = mapped_column(String(64), nullable=False)
         placement: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
         total_kills: Mapped[int] = mapped_column(Integer, default=0)
-        total_damage: Mapped[int] = mapped_column(Integer, default=0)
+        # Nullable: None = the feed never delivered real damage. Never
+        # store an estimate (Phase 21 honesty rule) — see migration 013.
+        total_damage: Mapped[Optional[int]] = mapped_column(
+            Integer, nullable=True, default=None
+        )
         total_points: Mapped[int] = mapped_column(Integer, default=0)
 
 try:
@@ -97,7 +106,20 @@ try:
 except ImportError:  # pragma: no cover - fallback until models land
 
     class MatchPlayerStats(Base):
-        """Per-player stats for one match (local fallback model)."""
+        """Per-player stats for one match (CANONICAL model — see module docstring).
+
+        Phase 21 honesty/unification notes:
+        * ``damage_dealt`` is NULLABLE: ``None`` means the feed/agent
+          layer never delivered real damage for this player, and the
+          API must surface ``null`` ("—") — never 0, never an estimate
+          (see alembic 013).
+        * ``clutches`` counts clutches WON (mvp_calculator
+          ``extract_clutches``); attempts alone never count.
+        * ``mvp_score`` is always the canonical PRD formula computed
+          by ``mvp_calculator.compute_mvp_score_from_stats`` inside
+          :meth:`MatchService.record_player_stats` — callers never
+          supply it.
+        """
 
         __tablename__ = "match_player_stats"
 
@@ -108,10 +130,18 @@ except ImportError:  # pragma: no cover - fallback until models land
         player_id: Mapped[str] = mapped_column(String(64), nullable=False)
         team_id: Mapped[str] = mapped_column(String(64), nullable=False)
         kills: Mapped[int] = mapped_column(Integer, default=0)
-        damage_dealt: Mapped[int] = mapped_column(Integer, default=0)
+        damage_dealt: Mapped[Optional[int]] = mapped_column(
+            Integer, nullable=True, default=None
+        )
         headshots: Mapped[int] = mapped_column(Integer, default=0)
         revives_performed: Mapped[int] = mapped_column(Integer, default=0)
+        # Phase 21 (T5b): utility counters, populated from the agent
+        # counters (utility_tracker.PlayerUtilityStats.healing_done /
+        # .grenades_used, team_tracker player.grenades / .healing_done).
+        healing: Mapped[int] = mapped_column(Integer, default=0)
+        grenades_used: Mapped[int] = mapped_column(Integer, default=0)
         survived_time_seconds: Mapped[int] = mapped_column(Integer, default=0)
+        clutches: Mapped[int] = mapped_column(Integer, default=0)
         mvp_score: Mapped[float] = mapped_column(Float, default=0.0)
         is_mvp: Mapped[bool] = mapped_column(Boolean, default=False)
 
@@ -137,6 +167,44 @@ _STATUS_TRANSITIONS: Dict[str, set] = {
     "cancelled": set(),
     "abandoned": set(),
 }
+
+
+def player_stats_from_utility(
+    player_id: str,
+    team_id: str,
+    utility_stats: Any,
+    **extra: Any,
+) -> Dict[str, Any]:
+    """Build a ``record_player_stats`` line from agent utility counters.
+
+    Accepts the real counter shapes (Phase 21/T5b):
+      * ``utility_tracker.PlayerUtilityStats`` — ``healing_done``,
+        ``grenades_used`` attributes;
+      * ``team_tracker`` player records — ``healing_done`` / ``grenades``
+        attributes or dict keys;
+      * plain dicts with any of those keys.
+
+    Values are copied, never invented: a counter the source does not
+    carry stays 0. ``extra`` merges caller-known fields (kills, damage…).
+    """
+    def _read(*names: str) -> int:
+        for name in names:
+            if isinstance(utility_stats, dict):
+                value = utility_stats.get(name)
+            else:
+                value = getattr(utility_stats, name, None)
+            if value is not None:
+                return int(value)
+        return 0
+
+    line: Dict[str, Any] = {
+        "player_id": player_id,
+        "team_id": team_id,
+        "healing": _read("healing", "healing_done", "total_healing"),
+        "grenades_used": _read("grenades_used", "grenades"),
+    }
+    line.update(extra)
+    return line
 
 
 def _status_value(status: Any) -> str:
@@ -340,7 +408,10 @@ class MatchService:
             team_id = tr["team_id"]
             placement = int(tr.get("placement", 0))
             kills = int(tr.get("kills", 0))
-            damage = int(tr.get("damage", 0))
+            # Honest damage (Phase 21): a missing/None damage stays
+            # None (unknown) — it is never defaulted or estimated.
+            _raw_damage = tr.get("damage", tr.get("total_damage"))
+            damage = int(_raw_damage) if _raw_damage is not None else None
 
             # Defensive team lookup (keeps query count predictable)
             team_result = await self.session.execute(
@@ -380,25 +451,104 @@ class MatchService:
         match_id: str,
         player_stats: List[Dict[str, Any]],
     ) -> List[MatchPlayerStats]:
-        """Record per-player stat lines for a match."""
+        """Record per-player stat lines for a match.
+
+        Phase 21 (W2) unification + honesty:
+        * ``mvp_score`` is ALWAYS computed here with the single
+          canonical producer
+          (``mvp_calculator.compute_mvp_score_from_stats``:
+          kills*5 + damage*0.05 + revives*3 + survival*0.02
+          + clutches*10 + headshots*2). Any caller-supplied
+          ``mvp_score`` is ignored — this method is the wiring from
+          calculator → DB.
+        * ``damage_dealt`` is preserved exactly as delivered: the
+          agent layer's honest accounting (``TeamTracker.record_kill``
+          damage / HP-drop derived totals). A missing/``None`` damage
+          persists as ``None`` so the API returns ``null`` — never 0,
+          never an estimate.
+        * ``is_mvp``: an explicit caller flag wins; otherwise the
+          top canonical scorer is flagged.
+        """
         match = await self._get_match_or_raise(match_id)
 
+        from app.agents.analytics_agents.mvp_calculator import (
+            compute_mvp_score_from_stats,
+            extract_clutches,
+        )
+
         created: List[MatchPlayerStats] = []
+        # Phase 21 (T5b): pass healing/grenades only when the stats model
+        # actually carries those columns (the fallback model here does;
+        # this keeps the call safe if a real model lands without them).
+        _table = getattr(MatchPlayerStats, "__table__", None)
+        _columns = set(_table.columns.keys()) if _table is not None else set()
         for ps in player_stats:
+            extra: Dict[str, Any] = {}
+            if "healing" in _columns:
+                extra["healing"] = int(
+                    ps.get("healing", ps.get("healing_done", 0)) or 0
+                )
+            if "grenades_used" in _columns:
+                extra["grenades_used"] = int(
+                    ps.get("grenades_used", ps.get("grenades", 0)) or 0
+                )
+            if "clutches" in _columns:
+                extra["clutches"] = extract_clutches(ps)
+
+            # Damage aliases: damage_dealt (DB shape) or damage (feed
+            # shape). Absent/None → None (unknown), never fabricated.
+            _raw_damage = ps.get("damage_dealt", ps.get("damage"))
+            damage_dealt = (
+                int(_raw_damage) if _raw_damage is not None else None
+            )
+            # Revives / survival aliases mirror the calculator's.
+            revives = int(
+                ps.get(
+                    "revives_performed",
+                    ps.get("revives", 0),
+                )
+                or 0
+            )
+            survived = int(
+                ps.get(
+                    "survived_time_seconds",
+                    ps.get(
+                        "survival_seconds",
+                        ps.get("survival_time", 0),
+                    ),
+                )
+                or 0
+            )
+            kills = int(ps.get("kills", ps.get("finishes", 0)) or 0)
+            headshots = int(ps.get("headshots", 0) or 0)
+            canonical_input: Dict[str, Any] = {
+                "kills": kills,
+                "damage": damage_dealt,
+                "revives": revives,
+                "survival_seconds": survived,
+                "clutches": extract_clutches(ps),
+                "headshots": headshots,
+            }
             stats = MatchPlayerStats(
                 match_id=match.id,
                 player_id=ps.get("player_id", ""),
                 team_id=ps.get("team_id", ""),
-                kills=int(ps.get("kills", 0)),
-                damage_dealt=int(ps.get("damage_dealt", 0)),
-                headshots=int(ps.get("headshots", 0)),
-                revives_performed=int(ps.get("revives_performed", 0)),
-                survived_time_seconds=int(ps.get("survived_time_seconds", 0)),
-                mvp_score=float(ps.get("mvp_score", 0.0)),
+                kills=kills,
+                damage_dealt=damage_dealt,
+                headshots=headshots,
+                revives_performed=revives,
+                survived_time_seconds=survived,
+                mvp_score=compute_mvp_score_from_stats(canonical_input),
                 is_mvp=bool(ps.get("is_mvp", False)),
+                **extra,
             )
             self.session.add(stats)
             created.append(stats)
+
+        # Flag the MVP when the caller did not: highest canonical score.
+        if created and not any(s.is_mvp for s in created):
+            top = max(created, key=lambda s: s.mvp_score or 0.0)
+            top.is_mvp = True
 
         await self.session.commit()
         return created
