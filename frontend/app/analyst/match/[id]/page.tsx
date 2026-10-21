@@ -12,6 +12,7 @@
  *   GET /api/v1/analysis/rotations?match_id=
  *   GET /api/v1/analysis/drops?match_id=
  *   GET /api/v1/analysis/zones?match_id=
+ *   GET /api/v1/analysis/grenade-trajectories?match_id=  (ESTIMATED arcs)
  *   GET /api/v1/dossiers/fights?match_id=
  * Anything missing renders the honest coverage note from the API meta —
  * no data is ever invented.
@@ -31,6 +32,7 @@ import type {
   SchematicFight,
   SchematicZone,
   SchematicDrop,
+  SchematicTrajectory,
 } from "../../components/MapSchematic";
 import {
   unwrapEnvelope,
@@ -45,11 +47,13 @@ import {
   zoneRadius,
   fightOutcome,
   fightOpponent,
+  trajectorySchematic,
   type EnvelopeMeta,
   type RotationPoint,
   type ZonePhase,
   type DropPoint,
   type FightRow,
+  type GrenadeTrajectoryRecord,
 } from "../../components/types";
 
 interface EndpointState<T> {
@@ -88,6 +92,8 @@ function MatchTimelineInner() {
     useState<EndpointState<ZonePhase[]>>(emptyEndpoint([]));
   const [fights, setFights] =
     useState<EndpointState<FightRow[]>>(emptyEndpoint([]));
+  const [trajectories, setTrajectories] =
+    useState<EndpointState<GrenadeTrajectoryRecord[]>>(emptyEndpoint([]));
   const [selectedTeam, setSelectedTeam] = useState<string | null>(null);
 
   const loadEndpoint = useCallback(
@@ -114,16 +120,21 @@ function MatchTimelineInner() {
   const load = useCallback(async () => {
     setLoading(true);
     const q = `match_id=${encodeURIComponent(matchId)}`;
-    const [r, d, z, f] = await Promise.all([
+    const [r, d, z, f, t] = await Promise.all([
       loadEndpoint<RotationPoint[]>(`/api/v1/analysis/rotations?${q}`, []),
       loadEndpoint<DropPoint[]>(`/api/v1/analysis/drops?${q}`, []),
       loadEndpoint<ZonePhase[]>(`/api/v1/analysis/zones?${q}`, []),
       loadEndpoint<FightRow[]>(`/api/v1/dossiers/fights?${q}`, []),
+      loadEndpoint<GrenadeTrajectoryRecord[]>(
+        `/api/v1/analysis/grenade-trajectories?${q}`,
+        []
+      ),
     ]);
     setRotations(r);
     setDrops(d);
     setZones(z);
     setFights(f);
+    setTrajectories(t);
     setLoading(false);
   }, [matchId, loadEndpoint]);
 
@@ -282,11 +293,26 @@ function MatchTimelineInner() {
     ? schematicDrops.filter((d) => d.teamId === selectedTeam)
     : schematicDrops;
 
+  // ESTIMATED grenade arcs: only records whose coordinate space maps
+  // honestly onto the schematic are drawn (see trajectorySchematic);
+  // the rest are counted and reported, never force-fitted.
+  const schematicTrajectories: SchematicTrajectory[] = useMemo(
+    () =>
+      trajectories.data.flatMap((t, i) => {
+        const s = trajectorySchematic(t, i);
+        return s ? [{ id: s.id, points: s.points, apexRatio: s.apexRatio, label: s.label }] : [];
+      }),
+    [trajectories.data]
+  );
+  const unmappableTrajectories =
+    trajectories.data.length - schematicTrajectories.length;
+
   const coverageLines = [
     rotations,
     drops,
     zones,
     fights,
+    trajectories,
   ].map((e) =>
     e.ok
       ? coverageNote(e.meta, "loaded")
@@ -297,7 +323,8 @@ function MatchTimelineInner() {
     rotationTeams.length > 0 ||
     schematicZones.length > 0 ||
     schematicFights.length > 0 ||
-    schematicDrops.length > 0;
+    schematicDrops.length > 0 ||
+    schematicTrajectories.length > 0;
 
   const pdfUrl = `${API_BASE}/api/v1/dossiers/report/match/${encodeURIComponent(matchId)}.pdf`;
 
@@ -337,7 +364,7 @@ function MatchTimelineInner() {
             {/* coverage banner */}
             <Card title="Data coverage">
               <ul className="space-y-1 text-xs text-white/55">
-                {["Rotations", "Drops", "Zones", "Fights"].map((label, i) => (
+                {["Rotations", "Drops", "Zones", "Fights", "Grenade trajectories (ESTIMATED)"].map((label, i) => (
                   <li key={label} className="flex gap-2">
                     <Badge tone={coverageLines[i].includes("404") || coverageLines[i].includes("failed") ? "slate" : "green"}>
                       {label}
@@ -398,8 +425,16 @@ function MatchTimelineInner() {
                       fights={visibleFights}
                       zones={schematicZones}
                       drops={visibleDrops}
+                      trajectories={schematicTrajectories}
                       selectedTeamId={selectedTeam}
                     />
+                    {unmappableTrajectories > 0 ? (
+                      <p className="mt-2 text-center font-mono text-xs text-amber-300/70">
+                        {unmappableTrajectories} ESTIMATED grenade arc(s) not
+                        drawn: their coordinate space has no honest mapping
+                        onto this schematic map.
+                      </p>
+                    ) : null}
                     {selectedTeam ? (
                       <p className="mt-2 text-center font-mono text-xs text-white/40">
                         Showing {summaries.find((s) => s.id === selectedTeam)?.name ?? selectedTeam} — other teams dimmed

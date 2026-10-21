@@ -1,0 +1,183 @@
+{
+  "map": "sanhok",
+  "version": 1,
+  "coords_note": "approximate naming references in map-image space (origin top-left); for nearest-POI naming, not survey-grade",
+  "pois": [
+    {
+      "name": "Ha Tinh",
+      "map": "sanhok",
+      "x": 0.18,
+      "y": 0.16,
+      "type": "city",
+      "tier": 2
+    },
+    {
+      "name": "Mongnai",
+      "map": "sanhok",
+      "x": 0.78,
+      "y": 0.18,
+      "type": "city",
+      "tier": 3
+    },
+    {
+      "name": "Khao",
+      "map": "sanhok",
+      "x": 0.34,
+      "y": 0.22,
+      "type": "city",
+      "tier": 3
+    },
+    {
+      "name": "Paradise Resort",
+      "map": "sanhok",
+      "x": 0.68,
+      "y": 0.3,
+      "type": "landmark",
+      "tier": 1
+    },
+    {
+      "name": "Quarry",
+      "map": "sanhok",
+      "x": 0.26,
+      "y": 0.3,
+      "type": "landmark",
+      "tier": 3
+    },
+    {
+      "name": "Bhan",
+      "map": "sanhok",
+      "x": 0.48,
+      "y": 0.36,
+      "type": "city",
+      "tier": 2
+    },
+    {
+      "name": "Camp Alpha",
+      "map": "sanhok",
+      "x": 0.12,
+      "y": 0.38,
+      "type": "compound",
+      "tier": 2
+    },
+    {
+      "name": "Ruins",
+      "map": "sanhok",
+      "x": 0.28,
+      "y": 0.44,
+      "type": "landmark",
+      "tier": 1
+    },
+    {
+      "name": "Bootcamp",
+      "map": "sanhok",
+      "x": 0.5,
+      "y": 0.48,
+      "type": "landmark",
+      "tier": 1
+    },
+    {
+      "name": "Camp Bravo",
+      "map": "sanhok",
+      "x": 0.82,
+      "y": 0.46,
+      "type": "compound",
+      "tier": 2
+    },
+    {
+      "name": "Tambang",
+      "map": "sanhok",
+      "x": 0.22,
+      "y": 0.54,
+      "type": "city",
+      "tier": 3
+    },
+    {
+      "name": "Kampong",
+      "map": "sanhok",
+      "x": 0.74,
+      "y": 0.54,
+      "type": "city",
+      "tier": 3
+    },
+    {
+      "name": "Tat Mok",
+      "map": "sanhok",
+      "x": 0.56,
+      "y": 0.6,
+      "type": "city",
+      "tier": 2
+    },
+    {
+      "name": "Sahmee",
+      "map": "sanhok",
+      "x": 0.18,
+      "y": 0.62,
+      "type": "city",
+      "tier": 3
+    },
+    {
+      "name": "Getaway",
+      "map": "sanhok",
+      "x": 0.86,
+      "y": 0.62,
+      "type": "landmark",
+      "tier": 2
+    },
+    {
+      "name": "Na Kham",
+      "map": "sanhok",
+      "x": 0.44,
+      "y": 0.64,
+      "type": "city",
+      "tier": 3
+    },
+    {
+      "name": "Pai Nan",
+      "map": "sanhok",
+      "x": 0.3,
+      "y": 0.68,
+      "type": "city",
+      "tier": 2
+    },
+    {
+      "name": "Cave",
+      "map": "sanhok",
+      "x": 0.58,
+      "y": 0.72,
+      "type": "landmark",
+      "tier": 3
+    },
+    {
+      "name": "Lakawi",
+      "map": "sanhok",
+      "x": 0.72,
+      "y": 0.78,
+      "type": "island",
+      "tier": 3
+    },
+    {
+      "name": "Camp Charlie",
+      "map": "sanhok",
+      "x": 0.52,
+      "y": 0.8,
+      "type": "compound",
+      "tier": 2
+    },
+    {
+      "name": "Ban Tai",
+      "map": "sanhok",
+      "x": 0.36,
+      "y": 0.84,
+      "type": "city",
+      "tier": 3
+    },
+    {
+      "name": "Docks",
+      "map": "sanhok",
+      "x": 0.8,
+      "y": 0.86,
+      "type": "landmark",
+      "tier": 2
+    }
+  ]
+}

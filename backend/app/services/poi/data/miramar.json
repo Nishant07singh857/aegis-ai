@@ -1,0 +1,215 @@
+{
+  "map": "miramar",
+  "version": 1,
+  "coords_note": "approximate naming references in map-image space (origin top-left); for nearest-POI naming, not survey-grade",
+  "pois": [
+    {
+      "name": "La Cobrería",
+      "map": "miramar",
+      "x": 0.12,
+      "y": 0.18,
+      "type": "city",
+      "tier": 3
+    },
+    {
+      "name": "Oasis",
+      "map": "miramar",
+      "x": 0.55,
+      "y": 0.06,
+      "type": "landmark",
+      "tier": 3
+    },
+    {
+      "name": "Campo Militar",
+      "map": "miramar",
+      "x": 0.78,
+      "y": 0.1,
+      "type": "landmark",
+      "tier": 1
+    },
+    {
+      "name": "Torre Ahumada",
+      "map": "miramar",
+      "x": 0.38,
+      "y": 0.14,
+      "type": "city",
+      "tier": 3
+    },
+    {
+      "name": "Cruz del Valle",
+      "map": "miramar",
+      "x": 0.62,
+      "y": 0.18,
+      "type": "city",
+      "tier": 3
+    },
+    {
+      "name": "Water Treatment",
+      "map": "miramar",
+      "x": 0.8,
+      "y": 0.24,
+      "type": "landmark",
+      "tier": 2
+    },
+    {
+      "name": "El Pozo",
+      "map": "miramar",
+      "x": 0.18,
+      "y": 0.28,
+      "type": "city",
+      "tier": 1
+    },
+    {
+      "name": "Tierra Bronca",
+      "map": "miramar",
+      "x": 0.6,
+      "y": 0.3,
+      "type": "city",
+      "tier": 3
+    },
+    {
+      "name": "San Martín",
+      "map": "miramar",
+      "x": 0.44,
+      "y": 0.3,
+      "type": "city",
+      "tier": 1
+    },
+    {
+      "name": "Hacienda del Patrón",
+      "map": "miramar",
+      "x": 0.52,
+      "y": 0.38,
+      "type": "landmark",
+      "tier": 1
+    },
+    {
+      "name": "Monte Nuevo",
+      "map": "miramar",
+      "x": 0.2,
+      "y": 0.42,
+      "type": "city",
+      "tier": 2
+    },
+    {
+      "name": "Minas Generales",
+      "map": "miramar",
+      "x": 0.64,
+      "y": 0.42,
+      "type": "landmark",
+      "tier": 2
+    },
+    {
+      "name": "El Azahar",
+      "map": "miramar",
+      "x": 0.82,
+      "y": 0.44,
+      "type": "city",
+      "tier": 3
+    },
+    {
+      "name": "Graveyard",
+      "map": "miramar",
+      "x": 0.47,
+      "y": 0.44,
+      "type": "landmark",
+      "tier": 2
+    },
+    {
+      "name": "Pecado",
+      "map": "miramar",
+      "x": 0.5,
+      "y": 0.5,
+      "type": "city",
+      "tier": 1
+    },
+    {
+      "name": "Trailer Park",
+      "map": "miramar",
+      "x": 0.36,
+      "y": 0.52,
+      "type": "compound",
+      "tier": 3
+    },
+    {
+      "name": "Ladrillera",
+      "map": "miramar",
+      "x": 0.68,
+      "y": 0.52,
+      "type": "warehouse-area",
+      "tier": 2
+    },
+    {
+      "name": "Chumacera",
+      "map": "miramar",
+      "x": 0.48,
+      "y": 0.62,
+      "type": "city",
+      "tier": 2
+    },
+    {
+      "name": "Impala",
+      "map": "miramar",
+      "x": 0.84,
+      "y": 0.62,
+      "type": "city",
+      "tier": 2
+    },
+    {
+      "name": "Crater Fields",
+      "map": "miramar",
+      "x": 0.3,
+      "y": 0.66,
+      "type": "landmark",
+      "tier": 3
+    },
+    {
+      "name": "Los Leones",
+      "map": "miramar",
+      "x": 0.72,
+      "y": 0.66,
+      "type": "city",
+      "tier": 1
+    },
+    {
+      "name": "Valle del Mar",
+      "map": "miramar",
+      "x": 0.16,
+      "y": 0.72,
+      "type": "city",
+      "tier": 2
+    },
+    {
+      "name": "Minas del Sur",
+      "map": "miramar",
+      "x": 0.44,
+      "y": 0.74,
+      "type": "landmark",
+      "tier": 3
+    },
+    {
+      "name": "Los Higos",
+      "map": "miramar",
+      "x": 0.68,
+      "y": 0.8,
+      "type": "compound",
+      "tier": 3
+    },
+    {
+      "name": "Prison",
+      "map": "miramar",
+      "x": 0.06,
+      "y": 0.82,
+      "type": "island",
+      "tier": 2
+    },
+    {
+      "name": "Puerto Paraíso",
+      "map": "miramar",
+      "x": 0.38,
+      "y": 0.84,
+      "type": "city",
+      "tier": 2
+    }
+  ]
+}

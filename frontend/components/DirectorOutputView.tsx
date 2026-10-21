@@ -65,6 +65,7 @@ import {
   GameStandingsPanel,
   FacecamBox,
   PlayerPanel,
+  useObserved,
   useObservedTeam,
 } from '@/components/broadcast/game-overlays';
 import { TopCenterStats } from '@/components/broadcast/top-center-stats';
@@ -375,6 +376,10 @@ export function DirectorOutputView({
   // (falls back to "CAM n" when the mapping is unavailable — never a
   // guessed team or player).
   const observedTeam = useObservedTeam(api, slot, token ?? undefined);
+  // Phase 24 (W3): live observed-player values from the vision-
+  // intelligence status snapshot (GET /api/v1/vision-intelligence/status).
+  // All-null when unavailable — children render "—", never a guess.
+  const observed = useObserved(api, token ?? undefined);
   const observedColor = useMemo(
     () =>
       observedTeam?.teamId
@@ -456,6 +461,7 @@ export function DirectorOutputView({
               standings={standings}
               summary={summary}
               matchLabel={match}
+              aliveCount={observed.alive_count}
             />
           )}
 
@@ -516,6 +522,7 @@ export function DirectorOutputView({
             slot={slot}
             teamTag={observedTeam?.teamName ?? null}
             teamColor={observedColor}
+            observed={observed}
           />
 
           {/* manual scene centerpieces */}

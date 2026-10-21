@@ -40,6 +40,17 @@ export interface PreshowTeam {
   tag?: string;
 }
 
+/** Director-set flight path from GET /api/v1/flight/path (Phase 24). */
+export interface PreshowFlightPath {
+  is_set: boolean;
+  source?: string | null;
+  map_id?: string | null;
+  start?: { name: string; x: number | null; y: number | null } | null;
+  end?: { name: string; x: number | null; y: number | null } | null;
+  start_poi?: string | null;
+  end_poi?: string | null;
+}
+
 function useNow(intervalMs = 1000): number {
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
@@ -137,13 +148,31 @@ function DeskIntroView() {
   );
 }
 
-/** Schematic map with a stylised flight path — decorative, clearly abstract. */
-function FlightPathMap() {
+/**
+ * Flight-path map. When a REAL director-set path with coordinates is
+ * supplied (Phase 24, GET /api/v1/flight/path) the line is drawn between
+ * the actual POI coordinates and labelled "DIRECTOR-SET" with the POI
+ * names. Otherwise this is the pre-existing decorative schematic —
+ * clearly abstract, never presented as data.
+ */
+function FlightPathMap({ flightPath }: { flightPath?: PreshowFlightPath | null }) {
+  const real =
+    flightPath?.is_set &&
+    flightPath.start &&
+    flightPath.end &&
+    flightPath.start.x != null &&
+    flightPath.end.x != null
+      ? flightPath
+      : null;
+  const sx = real ? (real.start!.x as number) * 400 : 40;
+  const sy = real ? (real.start!.y as number) * 400 : 330;
+  const ex = real ? (real.end!.x as number) * 400 : 360;
+  const ey = real ? (real.end!.y as number) * 400 : 70;
   return (
     <svg
       viewBox="0 0 400 400"
       role="img"
-      aria-label="Schematic map with flight path"
+      aria-label={real ? `Flight path (director-set): ${real.start!.name} to ${real.end!.name}` : 'Schematic map with flight path'}
       style={{ width: 'min(46vw, 420px)', height: 'auto', opacity: 0.95 }}
     >
       <rect x="0" y="0" width="400" height="400" rx="18" fill="#0d1526" stroke="#22314f" />
@@ -156,21 +185,49 @@ function FlightPathMap() {
       <circle cx="120" cy="110" r="34" fill="#16233d" stroke="#2c3f66" />
       <circle cx="270" cy="290" r="48" fill="#16233d" stroke="#2c3f66" />
       <circle cx="300" cy="120" r="22" fill="#16233d" stroke="#2c3f66" />
-      <line x1="40" y1="330" x2="360" y2="70" stroke="#ffd166" strokeWidth="3" strokeDasharray="10 8" />
-      <polygon points="360,70 344,72 352,84" fill="#ffd166" />
-      <circle cx="40" cy="330" r="7" fill="#ffd166" />
-      <text x="40" y="356" fill="#8fa3c8" fontSize="13" textAnchor="middle">DROP START</text>
-      <text x="360" y="56" fill="#8fa3c8" fontSize="13" textAnchor="middle">PATH END</text>
+      <line x1={sx} y1={sy} x2={ex} y2={ey} stroke="#ffd166" strokeWidth="3" strokeDasharray="10 8" />
+      <polygon points={`${ex},${ey} ${ex - 16},${ey + 2} ${ex - 8},${ey + 14}`} fill="#ffd166" />
+      <circle cx={sx} cy={sy} r="7" fill="#ffd166" />
+      <circle cx={ex} cy={ey} r="5" fill="#ffd166" />
+      <text x={sx} y={sy + 26} fill="#8fa3c8" fontSize="13" textAnchor="middle">
+        {real ? real.start!.name : 'DROP START'}
+      </text>
+      <text x={ex} y={ey - 14} fill="#8fa3c8" fontSize="13" textAnchor="middle">
+        {real ? real.end!.name : 'PATH END'}
+      </text>
+      <text x="200" y="392" fill={real ? '#ffd166' : '#5b6b8c'} fontSize="12" textAnchor="middle" letterSpacing="2">
+        {real
+          ? `DIRECTOR-SET${real.map_id ? ` · ${real.map_id.toUpperCase()}` : ''}`
+          : 'SCHEMATIC — FLIGHT PATH NOT SET'}
+      </text>
     </svg>
   );
 }
 
-function MatchIntroView({ teams }: { teams: PreshowTeam[] }) {
+function MatchIntroView({
+  teams,
+  flightPath,
+}: {
+  teams: PreshowTeam[];
+  flightPath?: PreshowFlightPath | null;
+}) {
   return (
     <div style={{ ...SHELL, flexDirection: 'row', gap: '3rem', flexWrap: 'wrap' }}>
-      <FlightPathMap />
+      <FlightPathMap flightPath={flightPath} />
       <div style={{ textAlign: 'left', minWidth: 260, maxWidth: 420 }}>
         <div style={{ ...KICKER, marginBottom: '0.5rem' }}>Match intro · Flight path</div>
+        {flightPath?.is_set ? (
+          <p style={{ color: '#ffd166', margin: '0 0 0.75rem', fontSize: '0.95rem' }}>
+            Flight path (director-set): {flightPath.start_poi ?? flightPath.start?.name ?? '—'}
+            {' → '}
+            {flightPath.end_poi ?? flightPath.end?.name ?? '—'}
+            {flightPath.map_id ? ` · ${flightPath.map_id}` : ''}
+          </p>
+        ) : (
+          <p style={{ color: '#8fa3c8', margin: '0 0 0.75rem', fontSize: '0.95rem' }}>
+            Flight path not set yet — schematic shown.
+          </p>
+        )}
         <h2 style={{ fontSize: 'clamp(1.6rem, 3.5vw, 2.6rem)', margin: '0 0 1rem', letterSpacing: '0.06em' }}>
           THE LOBBY
         </h2>
@@ -232,9 +289,12 @@ function StartingView() {
 export default function PreshowView({
   state,
   teams = [],
+  flightPath = null,
 }: {
   state: PreshowSnapshot | null;
   teams?: PreshowTeam[];
+  /** Real director-set flight path (Phase 24); null -> schematic. */
+  flightPath?: PreshowFlightPath | null;
 }) {
   const step = state?.step ?? 'countdown';
   const target = state?.countdown_target ?? null;
@@ -243,7 +303,7 @@ export default function PreshowView({
       case 'desk_intro':
         return <DeskIntroView />;
       case 'match_intro':
-        return <MatchIntroView teams={teams} />;
+        return <MatchIntroView teams={teams} flightPath={flightPath} />;
       case 'starting':
         return <StartingView />;
       case 'countdown':
@@ -251,6 +311,6 @@ export default function PreshowView({
         return <CountdownView target={target} />;
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [step, target, teams]);
+  }, [step, target, teams, flightPath]);
   return content;
 }

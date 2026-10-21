@@ -25,6 +25,15 @@ from .attribution import (  # noqa: F401
     TeamAttribution,
     extract_slot_number,
 )
+from .derivations import (  # noqa: F401
+    AirdropTracker,
+    DirectorDerivations,
+    FightForecaster,
+    KnockSessionTracker,
+    RotationTracker,
+    ZoneClock,
+    compute_team_shape,
+)
 from .service import (  # noqa: F401
     VISION_EVENT_TYPES,
     VisionIntelligenceService,

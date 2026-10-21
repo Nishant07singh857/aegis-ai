@@ -1,0 +1,111 @@
+{
+  "map": "rondo",
+  "version": 1,
+  "coords_note": "approximate naming references in map-image space (origin top-left); for nearest-POI naming, not survey-grade",
+  "pois": [
+    {
+      "name": "Jadina City",
+      "map": "rondo",
+      "x": 0.72,
+      "y": 0.22,
+      "type": "city",
+      "tier": 1
+    },
+    {
+      "name": "Stadium",
+      "map": "rondo",
+      "x": 0.55,
+      "y": 0.35,
+      "type": "landmark",
+      "tier": 1
+    },
+    {
+      "name": "Mey Ran",
+      "map": "rondo",
+      "x": 0.3,
+      "y": 0.28,
+      "type": "city",
+      "tier": 2
+    },
+    {
+      "name": "Yu Lin",
+      "map": "rondo",
+      "x": 0.42,
+      "y": 0.48,
+      "type": "city",
+      "tier": 2
+    },
+    {
+      "name": "Rin Jiang",
+      "map": "rondo",
+      "x": 0.22,
+      "y": 0.55,
+      "type": "city",
+      "tier": 3
+    },
+    {
+      "name": "Fong Tun",
+      "map": "rondo",
+      "x": 0.62,
+      "y": 0.58,
+      "type": "city",
+      "tier": 2
+    },
+    {
+      "name": "Hemay Town",
+      "map": "rondo",
+      "x": 0.5,
+      "y": 0.68,
+      "type": "city",
+      "tier": 3
+    },
+    {
+      "name": "Kun Xia",
+      "map": "rondo",
+      "x": 0.35,
+      "y": 0.72,
+      "type": "compound",
+      "tier": 3
+    },
+    {
+      "name": "Tin Long Garden",
+      "map": "rondo",
+      "x": 0.68,
+      "y": 0.75,
+      "type": "landmark",
+      "tier": 3
+    },
+    {
+      "name": "Mu Ho Park",
+      "map": "rondo",
+      "x": 0.8,
+      "y": 0.48,
+      "type": "landmark",
+      "tier": 3
+    },
+    {
+      "name": "Long Ho",
+      "map": "rondo",
+      "x": 0.58,
+      "y": 0.82,
+      "type": "city",
+      "tier": 3
+    },
+    {
+      "name": "Test Track",
+      "map": "rondo",
+      "x": 0.25,
+      "y": 0.4,
+      "type": "landmark",
+      "tier": 3
+    },
+    {
+      "name": "Bamboo Grove",
+      "map": "rondo",
+      "x": 0.45,
+      "y": 0.3,
+      "type": "compound",
+      "tier": 3
+    }
+  ]
+}

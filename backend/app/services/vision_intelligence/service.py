@@ -44,6 +44,7 @@ from app.core.event_bus import EventBus, EventPriority, EventRecord
 
 from .anti_cheat import VisionAntiCheatAnalyzer
 from .attribution import SlotResolver, TeamAttribution, extract_slot_number
+from .derivations import DirectorDerivations, compute_team_shape
 from .story_flagger import StoryAutoFlagger
 from .zone_state import ZoneAnalyticsState
 
@@ -65,6 +66,9 @@ VISION_EVENT_TYPES = [
     "team_status_update",
     "kill_event",
     "knock_event",
+    # Phase 24: spotter airdrop tag (W3 adds the button concurrently;
+    # subscribed defensively by event-type string).
+    "airdrop_spotted",
 ]
 
 SUBSCRIBER_ID = "vision_intelligence"
@@ -183,6 +187,7 @@ class VisionIntelligenceService:
         default_slot: Optional[int] = None,
         px_per_meter: Optional[float] = None,
         clock: Callable[[], float] = time.time,
+        derivations: Optional[DirectorDerivations] = None,
     ):
         self._bus = bus
         self._slot_resolver = slot_resolver
@@ -222,9 +227,32 @@ class VisionIntelligenceService:
         #: Flags raised while no sink is wired (in-memory review buffer).
         self.unsaved_flags: List[Dict[str, Any]] = []
 
-        self.zone_state = ZoneAnalyticsState()
+        self.zone_state = ZoneAnalyticsState(px_per_meter=self.px_per_meter)
+        # Phase 24 director derivations (rotations, fight forecasting,
+        # airdrops, knock sessions) — spectator-observable inputs only.
+        self.derivations = derivations or DirectorDerivations(
+            px_per_meter=self.px_per_meter, clock=clock
+        )
         self.stats = SubscriberStats()
         self._started = False
+        # Phase 24 state: previous team-status slots per team (knock
+        # transition detection), last emitted zone-pull timestamp,
+        # per-team shape alert edge state, latest map label seen, and
+        # the observed-slot status snapshot (task 8).
+        self._team_status_prev: Dict[str, List[str]] = {}
+        self._last_zone_pull_ts: Optional[float] = None
+        self._shape_alert_state: Dict[str, Dict[str, Any]] = {}
+        self._map_id: Optional[str] = None
+        self._observed: Dict[str, Any] = {
+            "team_id": None,
+            "team_name": None,
+            "slot_number": None,
+            "hp": {},
+            "boost": {},
+            "alive_count": None,
+            "team_status": None,
+            "updated_at": None,
+        }
 
         # Per-team live state for delta derivation.
         self._team_alive: Dict[str, int] = {}
@@ -310,8 +338,9 @@ class VisionIntelligenceService:
             "loot_event": self._on_loot,
             "alive_count_update": self._on_alive_count,
             "team_status_update": self._on_team_status,
-            "kill_event": self._on_kill,
-            "knock_event": self._on_kill,
+            "kill_event": lambda d, m, t: self._on_kill(d, m, t, "kill"),
+            "knock_event": lambda d, m, t: self._on_kill(d, m, t, "knock"),
+            "airdrop_spotted": self._on_airdrop_spotted,
         }
 
     # ── attribution ──────────────────────────────────────────────
@@ -350,6 +379,98 @@ class VisionIntelligenceService:
 
     def _trackers(self, attribution: TeamAttribution) -> TeamTrackers:
         return self._tracker_provider(attribution.team_id, attribution.team_name)
+
+    # ── Phase 24 helpers ─────────────────────────────────────────
+
+    def _now(self, ts: Optional[float]) -> float:
+        return float(ts) if ts is not None else self._clock()
+
+    @staticmethod
+    def _clean_team(value: Any) -> Optional[str]:
+        if value is None:
+            return None
+        text = str(value).strip()
+        return text if text and text != "Unknown" else None
+
+    async def _emit_bus(
+        self, event_type: str, payload: Dict[str, Any], match_id: Optional[str]
+    ) -> None:
+        """Publish a derived event; never let bus failures propagate."""
+        try:
+            await self._bus.publish(
+                event_type=event_type,
+                data=payload,
+                priority=EventPriority.HIGH,
+                source=SUBSCRIBER_ID,
+                match_id=match_id,
+            )
+        except Exception:  # pragma: no cover - defensive
+            pass
+
+    async def _emit_intel_alert(
+        self, alert: Dict[str, Any], match_id: Optional[str]
+    ) -> None:
+        alert = {**alert, "match_id": match_id}
+        self.derivations.add_alert(alert)
+        await self._emit_bus("intel_alert", alert, match_id)
+
+    def _note_observed(
+        self,
+        attribution: TeamAttribution,
+        ts: Optional[float],
+        hp: Optional[Dict[str, Any]] = None,
+        boost: Optional[Dict[str, Any]] = None,
+        alive_count: Any = ...,
+        team_status: Optional[List[str]] = None,
+    ) -> None:
+        obs = self._observed
+        obs["team_id"] = attribution.team_id
+        obs["team_name"] = attribution.team_name
+        obs["slot_number"] = attribution.slot_number
+        if hp:
+            obs["hp"].update(hp)
+        if boost:
+            obs["boost"].update(boost)
+        if alive_count is not ...:
+            obs["alive_count"] = alive_count
+        if team_status is not None:
+            obs["team_status"] = list(team_status)
+        obs["updated_at"] = self._now(ts)
+
+    async def _check_bleed_alerts(
+        self, ts: Optional[float], match_id: Optional[str]
+    ) -> None:
+        for alert in self.derivations.knocks.urgency_alerts(self._now(ts)):
+            await self._emit_intel_alert(alert, match_id)
+
+    async def _evaluate_gatekeep(
+        self, ts: Optional[float], match_id: Optional[str]
+    ) -> None:
+        """Gatekeep: observed team on the zone edge + a fight team
+        with a labelled position outside. Missing legs -> no call."""
+        observed_id = self._observed.get("team_id")
+        if not observed_id:
+            return
+        recent_teams = {
+            t
+            for e in self.derivations.fights.events
+            for t in (e.get("killer_team"), e.get("victim_team"))
+            if t
+        }
+        if not recent_teams:
+            return
+        alert = self.derivations.fights.evaluate_gatekeep(
+            ts=self._now(ts),
+            observed_team_id=observed_id,
+            observed_distances=self.zone_state.team_zone_distances(observed_id),
+            fight_team_distances={
+                name: self.zone_state.team_zone_distances(name)
+                for name in recent_teams
+            },
+        )
+        if alert is not None:
+            alert["team_name"] = self._observed.get("team_name")
+            await self._emit_intel_alert(alert, match_id)
 
     def _counters(self, team_id: str) -> Dict[str, int]:
         return self._team_counters.setdefault(
@@ -409,6 +530,28 @@ class VisionIntelligenceService:
         # Down-count signal: a fresh knock transition on this slot.
         if data.get("is_knocked") and not data.get("was_knocked"):
             self.fight_detector.process_down_count(team_id, 1, timestamp=ts)
+        # Phase 24: observed-slot status snapshot (latest real values).
+        raw_player = str(data.get("player_id") or "")
+        if raw_player:
+            boost = data.get("boost")
+            self._note_observed(
+                attribution,
+                ts,
+                hp={raw_player: hp_pct},
+                boost={raw_player: boost} if boost is not None else None,
+            )
+        # Phase 24: an HP knock transition opens a knock session for
+        # this slot (closed by team-status transitions / kill events).
+        if data.get("is_knocked") and not data.get("was_knocked"):
+            self.derivations.knocks.start(
+                key=player_key,
+                ts=self._now(ts),
+                team_id=team_id,
+                team_name=attribution.team_name,
+                player_label=player_key,
+                source="hp_update",
+            )
+        await self._check_bleed_alerts(ts, match_id)
         # Anti-cheat: HP returning from exactly 0.
         await self._raise_flags(
             self.anti_cheat.on_hp_update(
@@ -531,6 +674,124 @@ class VisionIntelligenceService:
                     "feeding pixel distances as meters",
                 )
 
+        # ── Phase 24 derivations ─────────────────────────────────
+        now = self._now(ts)
+        self._note_observed(attribution, ts)
+        map_id = data.get("map_name") or data.get("map") or self._map_id
+        if data.get("map_name") or data.get("map"):
+            self._map_id = str(data.get("map_name") or data.get("map"))
+        coordinate_space = data.get("coordinate_space")
+
+        # Team-LABELLED positions, when a source stream supplies them
+        # (the label is the source's own claim — never derived from
+        # anonymous markers). MinimapReader declares team_positions
+        # but does not populate it today, so this is normally empty.
+        labelled = data.get("team_positions")
+        if isinstance(labelled, dict):
+            for label, pos in labelled.items():
+                try:
+                    lx, ly = float(pos[0]), float(pos[1])
+                except (TypeError, ValueError, IndexError):
+                    continue
+                team_label = str(label)
+                self.zone_state.update_labelled_position(
+                    team_label, lx, ly, ts=now, team_name=team_label,
+                    coordinate_space=coordinate_space,
+                )
+                self.derivations.rotations.add_position(
+                    team_label, lx, ly, now, source="team_labelled",
+                    team_name=team_label, map_id=map_id,
+                    coordinate_space=coordinate_space,
+                )
+                self.derivations.note_position_context(
+                    team_label, lx, ly, map_id, coordinate_space
+                )
+
+        # Observed team: own-marker centroid -> rotation history.
+        centroid = snapshot.get("centroid")
+        if centroid is not None:
+            started = self.derivations.rotations.add_position(
+                team_id,
+                float(centroid[0]),
+                float(centroid[1]),
+                now,
+                source="observed_minimap",
+                team_name=attribution.team_name,
+                map_id=map_id,
+                coordinate_space=coordinate_space,
+            )
+            if started is not None:
+                await self._emit_bus(
+                    "rotation_event", {**started, "match_id": match_id}, match_id
+                )
+            self.derivations.note_position_context(
+                team_id, float(centroid[0]), float(centroid[1]),
+                map_id, coordinate_space,
+            )
+        # Vehicle-marker count series (was ignored before Phase 24).
+        self.derivations.rotations.add_vehicle_markers(
+            team_id, data.get("vehicle_markers"), now
+        )
+
+        # Team shape from per-marker coordinates (own markers only).
+        own_markers = {}
+        for key, pos in positions.items():
+            if str(key).startswith("enemy"):
+                continue
+            try:
+                own_markers[str(key)] = (float(pos[0]), float(pos[1]))
+            except (TypeError, ValueError, IndexError):
+                continue
+        shape = compute_team_shape(own_markers, px_per_meter=self.px_per_meter)
+        if shape is not None:
+            if centroid is not None:
+                shape["area_poi"] = self.derivations.poi_name_for(
+                    map_id,
+                    float(centroid[0]),
+                    float(centroid[1]),
+                    coordinate_space,
+                )
+            shape["team_id"] = team_id
+            shape["team_name"] = attribution.team_name
+            self.derivations.rotations.set_shape(team_id, shape)
+            prev_shape_state = self._shape_alert_state.setdefault(
+                team_id, {"split": False, "isolated": None}
+            )
+            if shape["is_split"] and not prev_shape_state["split"]:
+                await self._emit_intel_alert(
+                    {
+                        "kind": "split",
+                        "team_id": team_id,
+                        "team_name": attribution.team_name,
+                        "spread_px": shape["spread_px"],
+                        "threshold_px": shape["split_threshold_px"],
+                        "inferred": False,
+                        "source": "minimap_marker_spread",
+                        "timestamp": now,
+                    },
+                    match_id,
+                )
+            prev_shape_state["split"] = bool(shape["is_split"])
+            iso = shape.get("isolated")
+            iso_marker = iso.get("marker") if iso else None
+            if iso_marker and iso_marker != prev_shape_state["isolated"]:
+                await self._emit_intel_alert(
+                    {
+                        "kind": "isolated",
+                        "team_id": team_id,
+                        "team_name": attribution.team_name,
+                        "marker": iso_marker,
+                        "distance_to_squad_px": iso["distance_to_squad_px"],
+                        "inferred": False,
+                        "source": "minimap_marker_positions",
+                        "timestamp": now,
+                    },
+                    match_id,
+                )
+            prev_shape_state["isolated"] = iso_marker
+
+        await self._evaluate_gatekeep(ts, match_id)
+
         if snapshot.get("zone_swing") and self.story_flagger is not None:
             await self.story_flagger.on_zone_swing(
                 match_id, snapshot.get("favoured_team_id")
@@ -544,6 +805,28 @@ class VisionIntelligenceService:
         # Zone state is match-global: it needs no team attribution and
         # is the one event type never dropped for a missing slot.
         changed = self.zone_state.update_zone(data, ts=ts)
+        # Phase 24: zone clock (phase timing + countdown) and the
+        # zone-pull winners/losers snapshot taken on a NEW reveal.
+        self.derivations.zone_clock.observe(data, self._now(ts))
+        pull = self.zone_state.last_zone_pull
+        if (
+            pull is not None
+            and pull.get("timestamp") != self._last_zone_pull_ts
+        ):
+            self._last_zone_pull_ts = pull.get("timestamp")
+            await self._emit_intel_alert(
+                {
+                    "kind": "zone_pull",
+                    "phase": pull.get("phase"),
+                    "winners": pull.get("winners"),
+                    "losers": pull.get("losers"),
+                    "teams": pull.get("teams"),
+                    "inferred": False,
+                    "source": "zone_geometry+team_positions",
+                    "timestamp": pull.get("timestamp"),
+                },
+                match_id,
+            )
         if changed and self.story_flagger is not None:
             await self.story_flagger.on_zone_swing(
                 match_id, self.zone_state.favoured_team_id
@@ -595,6 +878,60 @@ class VisionIntelligenceService:
         # a persistent crate on this team's screen). No per-player claim:
         # the detector cannot say who looted it.
         self._counters(attribution.team_id)["loot_events"] += 1
+        # Phase 24: air-drop crates go to the airdrop log with honest
+        # "spotted on this team's feed" semantics.
+        if str(data.get("loot_type") or "") == "air_drop":
+            self.derivations.airdrops.record_crate(
+                ts=self._now(ts),
+                slot_number=attribution.slot_number,
+                team_id=attribution.team_id,
+                team_name=attribution.team_name,
+                source="loot_detector",
+                loot_type="air_drop",
+                position=data.get("position"),
+            )
+
+    async def _on_airdrop_spotted(
+        self, data: Dict[str, Any], match_id: Optional[str], ts: Optional[float]
+    ) -> None:
+        """Spotter ``airdrop_spotted`` events (Phase 24, defensive).
+
+        W3 adds the spotter button concurrently; the payload shape is
+        not final, so every field is read defensively. A present slot
+        must resolve through the observer mapping (same hard rule as
+        vision events); a team label supplied by the spotter payload
+        itself is used as-is; with neither, the spotting is still a
+        real human log and is recorded without any team claim.
+        """
+        slot = extract_slot_number(data)
+        team_id = self._clean_team(data.get("team_id") or data.get("team"))
+        team_name = self._clean_team(
+            data.get("team_name") or data.get("team")
+        )
+        if slot is not None:
+            attribution = await self._slot_resolver.resolve(slot)
+            if attribution is None:
+                self.stats.dropped_unmapped += 1
+                logger.info(
+                    "airdrop_spotted_dropped_unmapped_slot", slot_number=slot
+                )
+                return
+            team_id = attribution.team_id
+            team_name = attribution.team_name
+        self.derivations.airdrops.record_crate(
+            ts=self._now(ts),
+            slot_number=slot,
+            team_id=team_id,
+            team_name=team_name,
+            source="spotter",
+            loot_type=str(data.get("loot_type") or "air_drop"),
+            position=data.get("position"),
+            location_name=(
+                data.get("location_name")
+                or data.get("location")
+                or data.get("poi")
+            ),
+        )
 
     # ── alive_count / team_status ────────────────────────────────
 
@@ -641,6 +978,85 @@ class VisionIntelligenceService:
                 self._ensure_player(trackers, player_key, None)
                 trackers.team_tracker.update_player_state(player_key, state)
 
+        # Phase 24: observed-slot status snapshot.
+        if slots:
+            self._note_observed(
+                attribution,
+                ts,
+                alive_count=int(alive_count),
+                team_status=[str(s) for s in slots],
+            )
+        # Phase 24: knock sessions from KNOCKED transitions (gap rows
+        # 16/17). Only real transitions count — a slot first SEEN
+        # knocked has no known start, so no session is invented.
+        now = self._now(ts)
+        prev_slots = self._team_status_prev.get(team_id)
+        if slots:
+            current_slots = [str(s) for s in slots]
+            if prev_slots is not None:
+                for idx, (prev_s, cur_s) in enumerate(
+                    zip(prev_slots, current_slots), start=1
+                ):
+                    player_key = f"{team_id}_player_{idx}"
+                    if cur_s == "knocked" and prev_s != "knocked":
+                        self.derivations.knocks.start(
+                            key=player_key,
+                            ts=now,
+                            team_id=team_id,
+                            team_name=attribution.team_name,
+                            player_label=player_key,
+                            source="team_status_transition",
+                        )
+                    elif prev_s == "knocked" and cur_s == "alive":
+                        closed = self.derivations.knocks.close(
+                            player_key, now, "revived",
+                            inferred=True, source="team_status_transition",
+                        )
+                        if closed is not None:
+                            await self._emit_bus(
+                                "revive_event",
+                                {
+                                    "inferred": True,
+                                    "source": "team_status_transition",
+                                    "team_id": team_id,
+                                    "team_name": attribution.team_name,
+                                    "player": player_key,
+                                    "slot_index": idx,
+                                    "knock_duration_s": closed.get("duration_s"),
+                                    "timestamp": now,
+                                    "match_id": match_id,
+                                },
+                                match_id,
+                            )
+                            # Wire the previously caller-less
+                            # record_revive. The reviver is NOT
+                            # observed, so no reviver is credited:
+                            # an unknown id resolves to no player in
+                            # the tracker and only the revived side
+                            # is recorded.
+                            tracker = trackers.team_tracker
+                            record_revive = getattr(
+                                tracker, "record_revive", None
+                            )
+                            if callable(record_revive):
+                                self._ensure_player(trackers, player_key, None)
+                                try:
+                                    record_revive("", player_key)
+                                except Exception as exc:
+                                    logger.debug(
+                                        "record_revive_failed",
+                                        error=str(exc)[:120],
+                                    )
+                    elif prev_s == "knocked" and cur_s == "dead":
+                        # KNOCKED -> DEAD with no kill event naming
+                        # this slot's player: bled out (inferred).
+                        self.derivations.knocks.close(
+                            player_key, now, "bled_out",
+                            inferred=True, source="team_status_transition",
+                        )
+            self._team_status_prev[team_id] = current_slots
+        await self._check_bleed_alerts(ts, match_id)
+
         if alive_count is not None:
             alive_count = int(alive_count)
             # Anti-cheat: a team's alive count cannot rise.
@@ -672,7 +1088,11 @@ class VisionIntelligenceService:
     # ── kill / knock (anti-cheat + milestone candidates) ─────────
 
     async def _on_kill(
-        self, data: Dict[str, Any], match_id: Optional[str], ts: Optional[float]
+        self,
+        data: Dict[str, Any],
+        match_id: Optional[str],
+        ts: Optional[float],
+        kind: str = "kill",
     ) -> None:
         killer = data.get("killer") or data.get("killer_id") or ""
         killer_team = data.get("killerTeam") or data.get("killer_team_id")
@@ -696,6 +1116,55 @@ class VisionIntelligenceService:
                 match_id, str(player_id) if player_id else None
             )
 
+        # ── Phase 24: fight forecasting inputs ───────────────────
+        now = self._now(ts)
+        killer_team = self._clean_team(
+            data.get("killerTeam") or data.get("killer_team_id")
+        )
+        victim_team = self._clean_team(
+            data.get("victimTeam") or data.get("victim_team_id")
+        )
+        victim = self._clean_team(data.get("victim"))
+        # Same-slot combat marks recent airdrop crates contested. The
+        # slot must be IN the payload — the configured default slot is
+        # never borrowed for a feed/spotter kill.
+        raw_slot = extract_slot_number(data)
+        if raw_slot is not None:
+            self.derivations.airdrops.note_combat(raw_slot, now)
+        # Fight-heat area: only when this event's own slot resolves to
+        # a team (the area is that team's vicinity / POI). Unresolvable
+        # -> no area is claimed and no heat is recorded.
+        area_label = None
+        if raw_slot is not None:
+            heat_attribution = await self._slot_resolver.resolve(raw_slot)
+            if heat_attribution is not None:
+                area_label = self.derivations.area_label_for(
+                    heat_attribution.team_id, heat_attribution.team_name
+                )
+        alert = self.derivations.fights.record_combat(
+            ts=now,
+            kind=kind,
+            killer_team=killer_team,
+            victim_team=victim_team,
+            area_label=area_label,
+        )
+        if alert is not None:
+            await self._emit_intel_alert(alert, match_id)
+        # Knock sessions for killfeed-named victims (real names from
+        # the killfeed — never mapped onto observer slots by guessing).
+        if kind == "knock" and victim:
+            self.derivations.knocks.start(
+                key=f"name:{victim}",
+                ts=now,
+                team_id=victim_team,
+                team_name=victim_team,
+                player_label=victim,
+                source="knock_event",
+            )
+        elif kind == "kill" and victim:
+            self.derivations.knocks.finish_by_kill(victim, now)
+        await self._evaluate_gatekeep(ts, match_id)
+
     # ── shared post-signal work ──────────────────────────────────
 
     async def _after_signals(self, match_id: Optional[str]) -> None:
@@ -704,11 +1173,18 @@ class VisionIntelligenceService:
             await self.fight_detector.tick()
         except Exception:  # pragma: no cover - defensive
             pass
-        if self.story_flagger is None:
-            return
         try:
             active = self.fight_detector.get_active_fights()
         except Exception:  # pragma: no cover - defensive
+            active = []
+        # Phase 24: a promoted fight already spanning >=3 real teams
+        # is a third-party situation, whatever signal promoted it.
+        tp_alert = self.derivations.fights.check_active_fights(
+            active, self._clock()
+        )
+        if tp_alert is not None:
+            await self._emit_intel_alert(tp_alert, match_id)
+        if self.story_flagger is None:
             return
         for fight in active:
             fight_id = fight.get("fight_id")
@@ -778,12 +1254,55 @@ class VisionIntelligenceService:
             "active_fights": fights,
             "team_alive": dict(self._team_alive),
             "team_counters": self._team_counters,
+            # Phase 24 (task 8): latest observed-slot status — real
+            # values from hp_update / team_status_update, null when
+            # unknown. W3's frontend consumes exactly this shape.
+            "observed": {
+                "team_id": self._observed["team_id"],
+                "team_name": self._observed["team_name"],
+                "slot_number": self._observed["slot_number"],
+                "hp": dict(self._observed["hp"]) or None,
+                "boost": dict(self._observed["boost"]) or None,
+                "alive_count": self._observed["alive_count"],
+                "team_status": self._observed["team_status"],
+                "updated_at": self._observed["updated_at"],
+            },
             "zone": self.zone_state.snapshot(),
             "story_flagger": (
                 self.story_flagger.snapshot() if self.story_flagger else None
             ),
             "anti_cheat_flags_buffered": len(self.unsaved_flags),
         }
+
+    # ── Phase 24 intel queries (API surface) ─────────────────────
+
+    def intel_rotations(self) -> Dict[str, Any]:
+        return self.derivations.rotations.snapshot(
+            self._clock(), self.zone_state.team_zone_distances
+        )
+
+    def intel_fights(self) -> Dict[str, Any]:
+        now = self._clock()
+        try:
+            active = self.fight_detector.get_active_fights()
+        except Exception:  # pragma: no cover - defensive
+            active = []
+        return {
+            "heat": self.derivations.fights.heat_snapshot(now),
+            "alerts": self.derivations.recent_alerts(
+                {"third_party", "gatekeep"}
+            ),
+            "active_fights": active,
+        }
+
+    def intel_airdrops(self) -> Dict[str, Any]:
+        return {"airdrops": self.derivations.airdrops.snapshot()}
+
+    def intel_knocks(self) -> Dict[str, Any]:
+        return self.derivations.knocks.snapshot(self._clock())
+
+    def intel_zones(self) -> Dict[str, Any]:
+        return self.zone_state.zone_pull_snapshot()
 
 
 # ── production wiring ────────────────────────────────────────────

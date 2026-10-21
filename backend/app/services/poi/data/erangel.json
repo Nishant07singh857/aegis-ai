@@ -1,0 +1,431 @@
+{
+  "map": "erangel",
+  "version": 1,
+  "coords_note": "approximate naming references in map-image space (origin top-left); for nearest-POI naming, not survey-grade",
+  "pois": [
+    {
+      "name": "Zharki",
+      "map": "erangel",
+      "x": 0.09,
+      "y": 0.13,
+      "type": "city",
+      "tier": 3
+    },
+    {
+      "name": "Severny",
+      "map": "erangel",
+      "x": 0.47,
+      "y": 0.09,
+      "type": "city",
+      "tier": 2
+    },
+    {
+      "name": "Stalber",
+      "map": "erangel",
+      "x": 0.79,
+      "y": 0.1,
+      "type": "hill",
+      "tier": 3
+    },
+    {
+      "name": "Kameshki",
+      "map": "erangel",
+      "x": 0.88,
+      "y": 0.15,
+      "type": "city",
+      "tier": 3
+    },
+    {
+      "name": "Shooting Range",
+      "map": "erangel",
+      "x": 0.33,
+      "y": 0.16,
+      "type": "landmark",
+      "tier": 3
+    },
+    {
+      "name": "Yasnaya Polyana",
+      "map": "erangel",
+      "x": 0.67,
+      "y": 0.23,
+      "type": "city",
+      "tier": 1
+    },
+    {
+      "name": "Hospital",
+      "map": "erangel",
+      "x": 0.11,
+      "y": 0.3,
+      "type": "landmark",
+      "tier": 2
+    },
+    {
+      "name": "Georgopol Hill",
+      "map": "erangel",
+      "x": 0.19,
+      "y": 0.29,
+      "type": "hill",
+      "tier": 3
+    },
+    {
+      "name": "Georgopol",
+      "map": "erangel",
+      "x": 0.16,
+      "y": 0.35,
+      "type": "city",
+      "tier": 1
+    },
+    {
+      "name": "Georgopol Containers",
+      "map": "erangel",
+      "x": 0.14,
+      "y": 0.42,
+      "type": "compound",
+      "tier": 1
+    },
+    {
+      "name": "Rozhok",
+      "map": "erangel",
+      "x": 0.46,
+      "y": 0.37,
+      "type": "city",
+      "tier": 2
+    },
+    {
+      "name": "Rozhok Hill",
+      "map": "erangel",
+      "x": 0.48,
+      "y": 0.33,
+      "type": "hill",
+      "tier": 3
+    },
+    {
+      "name": "Lipovka",
+      "map": "erangel",
+      "x": 0.84,
+      "y": 0.37,
+      "type": "city",
+      "tier": 2
+    },
+    {
+      "name": "School",
+      "map": "erangel",
+      "x": 0.38,
+      "y": 0.41,
+      "type": "landmark",
+      "tier": 1
+    },
+    {
+      "name": "School Apartments",
+      "map": "erangel",
+      "x": 0.41,
+      "y": 0.43,
+      "type": "compound",
+      "tier": 1
+    },
+    {
+      "name": "Ruins",
+      "map": "erangel",
+      "x": 0.21,
+      "y": 0.46,
+      "type": "landmark",
+      "tier": 2
+    },
+    {
+      "name": "Mansion",
+      "map": "erangel",
+      "x": 0.71,
+      "y": 0.44,
+      "type": "landmark",
+      "tier": 2
+    },
+    {
+      "name": "Shelter",
+      "map": "erangel",
+      "x": 0.63,
+      "y": 0.49,
+      "type": "landmark",
+      "tier": 2
+    },
+    {
+      "name": "Water Town",
+      "map": "erangel",
+      "x": 0.23,
+      "y": 0.52,
+      "type": "city",
+      "tier": 3
+    },
+    {
+      "name": "Pochinki",
+      "map": "erangel",
+      "x": 0.44,
+      "y": 0.53,
+      "type": "city",
+      "tier": 1
+    },
+    {
+      "name": "Pochinki Church",
+      "map": "erangel",
+      "x": 0.45,
+      "y": 0.49,
+      "type": "landmark",
+      "tier": 2
+    },
+    {
+      "name": "Gatka",
+      "map": "erangel",
+      "x": 0.15,
+      "y": 0.55,
+      "type": "city",
+      "tier": 2
+    },
+    {
+      "name": "Gatka Compound",
+      "map": "erangel",
+      "x": 0.19,
+      "y": 0.6,
+      "type": "compound",
+      "tier": 3
+    },
+    {
+      "name": "Pochinki South Compound",
+      "map": "erangel",
+      "x": 0.46,
+      "y": 0.59,
+      "type": "compound",
+      "tier": 2
+    },
+    {
+      "name": "Spa",
+      "map": "erangel",
+      "x": 0.4,
+      "y": 0.57,
+      "type": "compound",
+      "tier": 3
+    },
+    {
+      "name": "Farm",
+      "map": "erangel",
+      "x": 0.67,
+      "y": 0.59,
+      "type": "compound",
+      "tier": 3
+    },
+    {
+      "name": "Mylta Power",
+      "map": "erangel",
+      "x": 0.89,
+      "y": 0.61,
+      "type": "landmark",
+      "tier": 1
+    },
+    {
+      "name": "Quarry",
+      "map": "erangel",
+      "x": 0.17,
+      "y": 0.67,
+      "type": "landmark",
+      "tier": 3
+    },
+    {
+      "name": "Mylta",
+      "map": "erangel",
+      "x": 0.77,
+      "y": 0.67,
+      "type": "city",
+      "tier": 2
+    },
+    {
+      "name": "Prison",
+      "map": "erangel",
+      "x": 0.08,
+      "y": 0.72,
+      "type": "landmark",
+      "tier": 2
+    },
+    {
+      "name": "Ferry Pier",
+      "map": "erangel",
+      "x": 0.23,
+      "y": 0.75,
+      "type": "landmark",
+      "tier": 3
+    },
+    {
+      "name": "Military Base Bridge West",
+      "map": "erangel",
+      "x": 0.36,
+      "y": 0.79,
+      "type": "bridge",
+      "tier": 2
+    },
+    {
+      "name": "Military Base Bridge East",
+      "map": "erangel",
+      "x": 0.64,
+      "y": 0.81,
+      "type": "bridge",
+      "tier": 2
+    },
+    {
+      "name": "Primorsk",
+      "map": "erangel",
+      "x": 0.27,
+      "y": 0.83,
+      "type": "city",
+      "tier": 2
+    },
+    {
+      "name": "Sosnovka Island",
+      "map": "erangel",
+      "x": 0.53,
+      "y": 0.84,
+      "type": "island",
+      "tier": 2
+    },
+    {
+      "name": "Novorepnoye",
+      "map": "erangel",
+      "x": 0.75,
+      "y": 0.87,
+      "type": "city",
+      "tier": 1
+    },
+    {
+      "name": "Sosnovka Military Base",
+      "map": "erangel",
+      "x": 0.48,
+      "y": 0.89,
+      "type": "landmark",
+      "tier": 1
+    },
+    {
+      "name": "Severny Compound",
+      "map": "erangel",
+      "x": 0.51,
+      "y": 0.15,
+      "type": "compound",
+      "tier": 3
+    },
+    {
+      "name": "Yasnaya Compound",
+      "map": "erangel",
+      "x": 0.63,
+      "y": 0.29,
+      "type": "compound",
+      "tier": 2
+    },
+    {
+      "name": "Georgopol South Compound",
+      "map": "erangel",
+      "x": 0.18,
+      "y": 0.48,
+      "type": "compound",
+      "tier": 3
+    },
+    {
+      "name": "Pochinki Warehouse Area",
+      "map": "erangel",
+      "x": 0.42,
+      "y": 0.47,
+      "type": "warehouse-area",
+      "tier": 2
+    },
+    {
+      "name": "Farm Warehouse Area",
+      "map": "erangel",
+      "x": 0.7,
+      "y": 0.54,
+      "type": "warehouse-area",
+      "tier": 3
+    },
+    {
+      "name": "Mylta Warehouse Area",
+      "map": "erangel",
+      "x": 0.8,
+      "y": 0.62,
+      "type": "warehouse-area",
+      "tier": 3
+    },
+    {
+      "name": "Rozhok Compound",
+      "map": "erangel",
+      "x": 0.43,
+      "y": 0.33,
+      "type": "compound",
+      "tier": 3
+    },
+    {
+      "name": "School Hill",
+      "map": "erangel",
+      "x": 0.35,
+      "y": 0.37,
+      "type": "hill",
+      "tier": 3
+    },
+    {
+      "name": "Prison Hill",
+      "map": "erangel",
+      "x": 0.11,
+      "y": 0.68,
+      "type": "hill",
+      "tier": 3
+    },
+    {
+      "name": "Quarry Compound",
+      "map": "erangel",
+      "x": 0.2,
+      "y": 0.63,
+      "type": "compound",
+      "tier": 3
+    },
+    {
+      "name": "Novorepnoye Compound",
+      "map": "erangel",
+      "x": 0.71,
+      "y": 0.83,
+      "type": "compound",
+      "tier": 2
+    },
+    {
+      "name": "Military Base Warehouse Area",
+      "map": "erangel",
+      "x": 0.52,
+      "y": 0.92,
+      "type": "warehouse-area",
+      "tier": 1
+    },
+    {
+      "name": "Lipovka Compound",
+      "map": "erangel",
+      "x": 0.81,
+      "y": 0.42,
+      "type": "compound",
+      "tier": 3
+    },
+    {
+      "name": "Zharki Compound",
+      "map": "erangel",
+      "x": 0.12,
+      "y": 0.17,
+      "type": "compound",
+      "tier": 3
+    },
+    {
+      "name": "Kameshki Compound",
+      "map": "erangel",
+      "x": 0.85,
+      "y": 0.19,
+      "type": "compound",
+      "tier": 3
+    },
+    {
+      "name": "Gatka Hill",
+      "map": "erangel",
+      "x": 0.13,
+      "y": 0.5,
+      "type": "hill",
+      "tier": 3
+    }
+  ]
+}

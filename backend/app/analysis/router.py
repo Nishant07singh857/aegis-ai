@@ -95,6 +95,63 @@ async def ingest_rotation(
     )
 
 
+# ── grenade trajectories (Phase 23, W4) ───────────────────────────────
+
+
+@router.get("/grenade-trajectories", response_model=AnalysisEnvelope)
+async def get_grenade_trajectories(
+    match_id: Optional[str] = None,
+    _user: TokenPayload = Depends(get_current_user),
+):
+    """ESTIMATED grenade arcs for a match — endpoint-based, never measured.
+
+    Records come from the grenade-trajectory bus consumer
+    (app/services/grenade_trajectory), which creates a record ONLY when
+    a grenade kill/knock or grenade utility event carried BOTH the
+    thrower position and an explosion position in the same declared
+    coordinate space. Every record carries ``estimated: true``,
+    ``method: "endpoint_arc_estimate"`` and
+    ``confidence_basis: "endpoints_only"``; when the explosion endpoint
+    is the victim's position, ``explosion.position_basis`` says
+    ``victim_position_proxy...``. An empty list is the honest state for
+    any match whose feed reported no paired endpoints — the current
+    production vision feed never does (utility flashes have no thrower;
+    minimap markers are anonymous), so in production this fills only
+    when a feed reports named, paired endpoints. See
+    docs/GRENADE_TRAJECTORY.md.
+    """
+    from app.services.grenade_trajectory import (
+        get_grenade_trajectory_service,
+        trajectory_store,
+    )
+
+    records = trajectory_store.list(match_id=match_id)
+    service = get_grenade_trajectory_service()
+    skipped = (
+        service.stats.skipped_missing_endpoint if service is not None else 0
+    )
+    if records:
+        coverage = (
+            f"{len(records)} ESTIMATED grenade arc(s) — every one is an "
+            "endpoint-based estimate (method endpoint_arc_estimate), not a "
+            "tracked projectile path."
+        )
+        source = "feed"
+    else:
+        coverage = (
+            "No estimated grenade arcs for these filters. An arc is only "
+            "produced when a grenade event reports BOTH the thrower "
+            "position and an explosion position in the same coordinate "
+            f"space; {skipped} grenade observation(s) so far lacked a "
+            "paired endpoint and produced no arc."
+        )
+        source = "none"
+    return AnalysisEnvelope(
+        data=records,
+        meta=AnalysisMeta(source=source, coverage=coverage),
+    )
+
+
 # ── drops ─────────────────────────────────────────────────────────────
 
 

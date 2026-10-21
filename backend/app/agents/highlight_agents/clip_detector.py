@@ -121,6 +121,20 @@ class ClipDetector(BaseAgent):
         # Detection buffers
         self.recent_kills: deque = deque(maxlen=20)
         self.recent_damage: deque = deque(maxlen=50)
+
+        # Phase 23 (W2): live weapon-based triggers. Kill-feed events
+        # now carry a truthful CLASS-level weapon (icon template
+        # matching; None when unconfident — never guessed), so sniper
+        # streaks and frag plays can be counted per player as they
+        # happen. Windows mirror the replay-service triggers
+        # (services/replay/highlight_triggers.py): sniper triple =
+        # 3 sniper-class KILLS (knocks don't count) in 60s here (the
+        # replay service uses 30s on buffered kill_event only; this
+        # agent sees the live stream, so a slightly wider window is
+        # used and documented); frag = any frag_grenade kill OR knock.
+        self._sniper_kill_times: Dict[str, deque] = {}
+        self.SNIPER_WINDOW_SEC = 60.0
+        self.SNIPER_TRIPLE_COUNT = 3
         
         # Scoring weights
         self.quality_thresholds = {
@@ -493,6 +507,102 @@ class ClipDetector(BaseAgent):
         )
     
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    # PHASE 23: LIVE WEAPON TRIGGERS
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+    @staticmethod
+    def _norm_weapon(raw: Any) -> str:
+        """Normalise a bus-payload weapon value for comparison."""
+        return str(raw or "").strip().lower().replace(" ", "_")
+
+    def check_weapon_highlight(
+        self,
+        event_data: Dict[str, Any],
+        match_context: Optional[Dict[str, Any]] = None,
+        now: Optional[float] = None,
+    ) -> Optional[HighlightClip]:
+        """Live weapon-gated highlight check for one kill/knock event.
+
+        ``event_data`` uses the canonical bus payload shape (killer,
+        victim, weapon, isKnock, killerTeam). Returns a processed
+        HighlightClip when the event completes a weapon highlight:
+
+        * weapon == "frag_grenade" (kill or knock) -> grenade clip.
+        * weapon == "sniper" KILLS: counted per player; the 3rd kill
+          inside SNIPER_WINDOW_SEC -> sniper-triple clip.
+
+        Events without a truthful weapon (None / "Unknown") NEVER
+        fire — the weapon field is confidence-gated upstream.
+        """
+        weapon = self._norm_weapon(event_data.get("weapon"))
+        if weapon in ("", "unknown", "none"):
+            return None
+        now = time.time() if now is None else now
+        player = str(
+            event_data.get("killer")
+            or event_data.get("player_name")
+            or "Unknown"
+        )
+        team = str(event_data.get("killerTeam") or event_data.get("team_name") or "")
+        is_knock = bool(event_data.get("isKnock"))
+        context = match_context or {}
+
+        if weapon == "frag_grenade":
+            clip = self._create_grenade_clip(
+                {
+                    "player_name": player,
+                    "team_name": team,
+                    "victims": 1,
+                    "distance": 0,
+                    "timestamp_ms": int(now * 1000),
+                },
+                context,
+            )
+            clip.title = f"FRAG OUT! {player} with the frag grenade!"
+            clip.description = (
+                f"{player} lands a frag-grenade "
+                f"{'knock' if is_knock else 'elimination'} on "
+                f"{event_data.get('victim') or 'Unknown'} (kill-feed icon verified)."
+            )
+            self._process_clip(clip)
+            return clip
+
+        if weapon == "sniper" and not is_knock:
+            times = self._sniper_kill_times.setdefault(player, deque(maxlen=10))
+            times.append(now)
+            while times and now - times[0] > self.SNIPER_WINDOW_SEC:
+                times.popleft()
+            if len(times) >= self.SNIPER_TRIPLE_COUNT:
+                span = times[-1] - times[0]
+                times.clear()
+                clip = HighlightClip(
+                    clip_id=f"clip_snipertriple_{int(now * 1000)}",
+                    category=HighlightCategory.LONG_RANGE,
+                    quality=self._determine_quality(85),
+                    title=f"SNIPER TRIPLE! {player} — 3 sniper kills in {span:.0f}s!",
+                    description=(
+                        f"{player} lands 3 sniper-class eliminations within "
+                        f"{span:.1f}s (kill-feed icon verified per kill)."
+                    ),
+                    start_timestamp_ms=int((now - span) * 1000) - 4000,
+                    end_timestamp_ms=int(now * 1000) + 3000,
+                    duration_seconds=span + 7,
+                    primary_player=player,
+                    primary_team=team,
+                    excitement_score=85,
+                    viral_potential=90,
+                    replay_value=85,
+                    match_id=context.get("match_id", ""),
+                    suggested_angles=["player_scope_view", "bullet_trajectory", "victim_pov"],
+                    needs_slow_motion=True,
+                    needs_zoom=True,
+                    hashtags=["#SniperTriple", "#LongRange", "#BGMI"],
+                )
+                self._process_clip(clip)
+                return clip
+        return None
+
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     # CLIP PROCESSING
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     
@@ -651,6 +761,11 @@ class ClipDetector(BaseAgent):
         self.subscribe_to_event("fight_detected")
         # Chain: script generator -> clip detector -> highlight pipeline
         self.subscribe_to_event("commentary.line")
+        # Phase 23: live kill/knock stream for the weapon triggers
+        # (check_weapon_highlight) — the bus names every feed adapter
+        # publishes via NormalizedEvent.to_bus_payload().
+        self.subscribe_to_event("kill_event")
+        self.subscribe_to_event("knock_event")
 
     async def tick(self) -> None:
         """Periodic maintenance tick."""
@@ -673,6 +788,34 @@ class ClipDetector(BaseAgent):
 
             if data.get("match_id"):
                 self.config.match_id = data["match_id"]
+
+            # Phase 23: weapon-gated live triggers on the kill stream.
+            if event_type in ("kill_event", "knock_event"):
+                clip = self.check_weapon_highlight(
+                    data, {"match_id": data.get("match_id") or self.config.match_id}
+                )
+                if clip is not None:
+                    try:
+                        await self.event_bus.publish(
+                            event_type="highlight.clip_ready",
+                            data={
+                                "clip_id": clip.clip_id,
+                                "category": clip.category.value,
+                                "quality": clip.quality.value,
+                                "title": clip.title,
+                                "excitement_score": round(clip.excitement_score, 1),
+                                "fight_id": data.get("fight_id"),
+                                "match_id": data.get("match_id") or self.config.match_id,
+                                "weapon": data.get("weapon"),
+                                "trigger": "weapon_icon",
+                            },
+                            priority=EventPriority.LOW,
+                            source=self.config.agent_id,
+                            match_id=data.get("match_id") or self.config.match_id,
+                        )
+                    except Exception as e:
+                        self._log.warning(f"Failed to publish highlight.clip_ready: {e}")
+                return
 
             if event_type != "commentary.line":
                 return

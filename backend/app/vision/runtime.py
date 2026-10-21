@@ -245,6 +245,31 @@ class VisionCaptureService:
         self._grabber = FrameGrabber()
         self._pipeline = FramePipeline(config=self.config)
         self._killfeed = killfeed or _default_killfeed_detector()
+        # Phase 23 (W2) region plumbing: the FramePipeline pre-crops a
+        # detector's image when a CaptureConfig ROI is set for its name
+        # (AEGIS_ROI_killfeed). The KillFeedDetector ALSO crops by its
+        # own kill_feed_region fractions — both together would double-
+        # crop into a wrong sub-band. The detector's region is the
+        # single source of truth: translate any configured ROI into it
+        # (x, y, w, h) -> (x1, y1, x2, y2) and drop the ROI from the
+        # pipeline's config copy so the detector gets the full frame.
+        _kf_roi = self.config.get_roi(self._killfeed.name)
+        if _kf_roi is not None:
+            _rx, _ry, _rw, _rh = _kf_roi
+            self._killfeed.set_config(
+                kill_feed_region=(_rx, _ry, _rx + _rw, _ry + _rh)
+            )
+            _rois = {
+                k: v
+                for k, v in self.config.detector_rois.items()
+                if k != self._killfeed.name
+            }
+            self.config = dataclasses.replace(self.config, detector_rois=_rois)
+            self._pipeline.config = self.config
+            log.info(
+                "killfeed_region_from_capture_roi",
+                region=(_rx, _ry, _rx + _rw, _ry + _rh),
+            )
         self._alive = alive or AliveCountReader()
         self._zone = zone or ZoneTimerReader()
         self._team = team or TeamStatusReader()
@@ -616,7 +641,7 @@ class VisionCaptureService:
         """
         events: List[Any] = []
         now = time.time()
-        dedup_window = {"grenade": 3.0, "molotov": 8.0, "smoke": 10.0}
+        dedup_window = {"grenade": 3.0, "molotov": 8.0, "smoke": 10.0, "stun": 5.0}
         needs_confirmation = {"smoke", "molotov"}
         for det_event in self._extra_of(result, self._utility.name).get("events", []):
             utype = str(det_event.get("type") or "")
@@ -648,6 +673,10 @@ class VisionCaptureService:
                         "position_space": "frame_pixels",
                         "confidence": det_event.get("confidence"),
                         "detector": self._utility.name,
+                        # Phase 23 (W3): event-contract source tag —
+                        # these are world-side CV observations, not
+                        # killfeed/agent reports.
+                        "source": "world_detector",
                     },
                 )
             )

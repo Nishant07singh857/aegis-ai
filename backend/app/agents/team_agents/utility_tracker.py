@@ -22,6 +22,9 @@ class UtilityType(str, Enum):
     GRENADE = "grenade"
     MOLOTOV = "molotov"
     FLASH = "flash"
+    # Phase 23 (W3): world-side stun/flashbang observations arrive from
+    # the vision pipeline as utility_type="stun" (see vision runtime).
+    STUN = "stun"
     FIRST_AID = "first_aid"
     BANDAGE = "bandage"
     BOOST = "boost"
@@ -66,6 +69,7 @@ class PlayerUtilityStats:
     grenades_used: int = 0
     molotovs_used: int = 0
     flashes_used: int = 0
+    stuns_used: int = 0
     healing_done: int = 0
     boosts_used: int = 0
     
@@ -93,6 +97,7 @@ class TeamUtilityStats:
     total_grenades: int = 0
     total_molotovs: int = 0
     total_flashes: int = 0
+    total_stuns: int = 0
     total_healing: int = 0
     total_boosts: int = 0
     
@@ -381,6 +386,8 @@ class UtilityTracker(BaseAgent):
             stats.flashes_used += 1
             if event.result == UtilityResult.HIT:
                 stats.flash_hits += 1
+        elif utype == UtilityType.STUN:
+            stats.stuns_used += 1
         elif utype in [UtilityType.FIRST_AID, UtilityType.MEDKIT, UtilityType.BANDAGE]:
             stats.healing_done += event.healing_amount
         elif utype == UtilityType.BOOST:
@@ -407,6 +414,8 @@ class UtilityTracker(BaseAgent):
             self.team_stats.total_molotovs += 1
         elif utype == UtilityType.FLASH:
             self.team_stats.total_flashes += 1
+        elif utype == UtilityType.STUN:
+            self.team_stats.total_stuns += 1
         elif utype in [UtilityType.FIRST_AID, UtilityType.MEDKIT, UtilityType.BANDAGE]:
             self.team_stats.total_healing += event.healing_amount
         elif utype == UtilityType.BOOST:
@@ -439,6 +448,7 @@ class UtilityTracker(BaseAgent):
                 "total_grenades": self.team_stats.total_grenades,
                 "total_molotovs": self.team_stats.total_molotovs,
                 "total_flashes": self.team_stats.total_flashes,
+                "total_stuns": self.team_stats.total_stuns,
                 "total_healing": self.team_stats.total_healing,
                 "total_boosts": self.team_stats.total_boosts,
                 "grenade_accuracy": round(self.team_stats.grenade_accuracy, 1),
@@ -455,6 +465,7 @@ class UtilityTracker(BaseAgent):
                     "grenade_kills": s.grenade_kills,
                     "molotovs": s.molotovs_used,
                     "flashes": s.flashes_used,
+                    "stuns": s.stuns_used,
                     "healing": s.healing_done,
                     "boosts": s.boosts_used,
                     "avg_per_minute": round(s.avg_utility_use_per_minute, 2),

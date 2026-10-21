@@ -1,24 +1,29 @@
 # backend/app/services/replay/highlight_triggers.py
 """
-Plug-ready highlight triggers (Phase 22 / W3, M11).
+Plug-ready highlight triggers (Phase 22 / W3, M11; weapon data Phase 23).
 
-Three PRD highlight kinds cannot fire truthfully today because the
-kill events they depend on do not carry the required attribution:
+Three PRD highlight kinds depend on kill-event attribution:
 
-* grenade multi-kill — needs ``weapon == "grenade"`` (or a utility
-  attribution) on >=2 kills by one player in a window. Kill-feed
-  weapon is honestly ``None`` today (weapon icons are never guessed;
-  the trained icon detector has not landed).
-* sniper triple — needs a sniper/DMR weapon class on 3 kills.
+* grenade multi-kill — needs a grenade weapon on >=2 kills by one
+  player in a window. Phase 23 (W2): the kill-feed icon matcher now
+  produces the class-level weapon ``"Frag Grenade"`` from real icon
+  template matching, so this trigger fires on real feed data (the
+  legacy ``"grenade"`` spelling is also accepted).
+* sniper triple — needs a sniper/DMR weapon class on 3 kills. The
+  Phase 23 matcher emits class-level ``"Sniper"`` / ``"DMR"``, both
+  in ``SNIPER_CLASSES`` below, so this trigger is live on real data.
 * vehicle kill — needs a kill↔vehicle linkage; the vehicle detector
-  needs the trained model.
+  needs the trained model. Still inactive: spectator kill-feed glyphs
+  for vehicle kills were never confirmed in the W1 harvest (the
+  side-view vehicle family has no library template), so no producer
+  emits a truthful vehicle weapon today.
 
-This module registers all three triggers behind ONE interface so the
-day truthful weapon/vehicle data lands, they activate by flipping
-``active`` (fed by real payloads) — until then each trigger is
-INACTIVE, inspects nothing, and fires nothing. The registry is the
-published contract: ``trigger_registry()`` tells the UI/docs exactly
-which triggers are live and why the others are not.
+This module registers all three triggers behind ONE interface:
+activation is data-driven (``trigger_registry(events)`` activates a
+trigger only when the event set actually carries the attribution it
+needs) — never a config lie. The registry is the published contract:
+it tells the UI/docs exactly which triggers are live and why the
+others are not.
 """
 
 from __future__ import annotations
@@ -29,6 +34,16 @@ from typing import Any, Callable, Dict, List, Optional
 from .buffer import BufferedEvent
 
 SNIPER_CLASSES = {"sniper", "sr", "dmr", "kar98k", "m24", "awm", "mini14", "sks", "mk14"}
+
+#: Grenade weapon spellings accepted by the grenade trigger: the
+#: Phase 23 kill-feed class string ("Frag Grenade") plus the legacy /
+#: simulator spelling ("grenade"). Compared after normalisation
+#: (lowercase, underscores -> spaces).
+GRENADE_WEAPONS = {"grenade", "frag grenade", "frag"}
+
+
+def _is_grenade(weapon: str) -> bool:
+    return weapon.strip().lower().replace("_", " ") in GRENADE_WEAPONS
 
 
 @dataclass
@@ -55,7 +70,7 @@ def _grenade_multi_kill(events: List[BufferedEvent]) -> List[Any]:
     from .highlights import ScoredMoment
 
     kills = sorted(
-        (e for e in events if e.type == "kill_event" and _weapon_of(e) == "grenade"),
+        (e for e in events if e.type == "kill_event" and _is_grenade(_weapon_of(e))),
         key=lambda e: e.ts,
     )
     moments: List[Any] = []
@@ -140,9 +155,10 @@ def _vehicle_kill(events: List[BufferedEvent]) -> List[Any]:
 
 
 _WEAPON_BLOCKER = (
-    "kill events carry no truthful weapon attribution today "
-    "(kill-feed weapon is None by design — icons are never guessed); "
-    "activates when the trained weapon-icon detector lands"
+    "this event set carries no kill with a truthful weapon "
+    "attribution (weapon is None/'Unknown' — the Phase 23 icon "
+    "matcher emits a class-level weapon only above its confidence "
+    "threshold, never a guess)"
 )
 _VEHICLE_BLOCKER = (
     "no kill↔vehicle linkage exists; vehicle detection needs the "

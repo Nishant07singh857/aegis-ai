@@ -38,6 +38,20 @@ export interface SchematicDrop {
   color: string;
 }
 
+/**
+ * An ESTIMATED grenade arc (Phase 23, W4). Points are the ground track
+ * in schematic space with a modelled height `h` per sample; the arc is
+ * drawn bowed upward by apexRatio so the estimate reads as a throw arc.
+ * It is ALWAYS rendered dashed and labelled ESTIMATED — the projectile
+ * was never tracked (see docs/GRENADE_TRAJECTORY.md).
+ */
+export interface SchematicTrajectory {
+  id: string;
+  points: { x: number; y: number; h: number }[];
+  apexRatio: number;
+  label?: string;
+}
+
 const ISLAND_MAIN =
   "M120,310 C150,190 300,120 450,140 C600,160 720,120 800,220 " +
   "C870,300 845,420 900,520 C940,610 880,700 780,730 C700,760 640,860 " +
@@ -58,24 +72,59 @@ function outcomeFill(outcome: string | undefined): string {
   return "#f59e0b";
 }
 
+/** Bow one trajectory's ground track into an arc polyline (screen pts). */
+function trajectoryArcPoints(
+  t: SchematicTrajectory
+): { pts: { x: number; y: number }[]; apexPt: { x: number; y: number } } {
+  const pts = t.points;
+  const start = pts[0];
+  const end = pts[pts.length - 1];
+  const dx = end.x - start.x;
+  const dy = end.y - start.y;
+  const d = Math.hypot(dx, dy) || 1;
+  // Perpendicular, flipped to bow toward the top of the screen.
+  let px = -dy / d;
+  let py = dx / d;
+  if (py > 0) {
+    px = -px;
+    py = -py;
+  }
+  const maxH = Math.max(...pts.map((p) => p.h), 0);
+  const bow = Math.min(150, Math.max(6, d * t.apexRatio));
+  const out = pts.map((p, i) => {
+    const f = pts.length > 1 ? i / (pts.length - 1) : 0;
+    const shape = maxH > 0 ? p.h / maxH : 4 * f * (1 - f);
+    return { x: p.x + px * bow * shape, y: p.y + py * bow * shape };
+  });
+  const mid = out[Math.floor(out.length / 2)] ?? out[0];
+  return { pts: out, apexPt: mid };
+}
+
 export function MapSchematic({
   rotations,
   fights,
   zones,
   drops = [],
+  trajectories = [],
   selectedTeamId = null,
 }: {
   rotations: SchematicRotationTeam[];
   fights: SchematicFight[];
   zones: SchematicZone[];
   drops?: SchematicDrop[];
+  trajectories?: SchematicTrajectory[];
   selectedTeamId?: string | null;
 }) {
   const dimmed = (teamId: string) =>
     selectedTeamId !== null && selectedTeamId !== teamId ? 0.18 : 1;
 
   return (
-    <div className="overflow-hidden rounded-xl border border-white/10 bg-[#0a0a0f]">
+    <div className="relative overflow-hidden rounded-xl border border-white/10 bg-[#0a0a0f]">
+      {trajectories.length > 0 ? (
+        <div className="absolute left-3 top-3 z-10 rounded-md border border-amber-300/50 bg-black/70 px-2.5 py-1.5 font-mono text-[11px] font-bold uppercase tracking-widest text-amber-300">
+          Grenade arc — ESTIMATED · endpoint-based, not tracked
+        </div>
+      ) : null}
       <svg
         viewBox="0 0 1000 1000"
         className="block h-auto w-full"
@@ -230,6 +279,73 @@ export function MapSchematic({
           </g>
         ))}
 
+        {/* grenade trajectories — ESTIMATED arcs (endpoint-based only) */}
+        {trajectories.map((t) => {
+          const { pts, apexPt } = trajectoryArcPoints(t);
+          const start = t.points[0];
+          const end = t.points[t.points.length - 1];
+          return (
+            <g key={`traj-${t.id}`}>
+              <title>
+                {`ESTIMATED grenade arc${t.label ? ` · ${t.label}` : ""} — endpoint-based estimate, projectile not tracked`}
+              </title>
+              <polyline
+                points={pts.map((p) => `${p.x},${p.y}`).join(" ")}
+                fill="none"
+                stroke="#f59e0b"
+                strokeWidth="3.5"
+                strokeDasharray="9 7"
+                strokeLinecap="round"
+                opacity="0.9"
+              />
+              {/* thrower endpoint */}
+              <circle
+                cx={start.x}
+                cy={start.y}
+                r="8"
+                fill="none"
+                stroke="#f59e0b"
+                strokeWidth="3"
+              />
+              {/* explosion endpoint */}
+              <circle cx={end.x} cy={end.y} r="7" fill="#f59e0b" />
+              <circle
+                cx={end.x}
+                cy={end.y}
+                r="14"
+                fill="none"
+                stroke="#f59e0b"
+                strokeWidth="2"
+                opacity="0.6"
+              />
+              {/* the ESTIMATED label is visible text, never just a tooltip */}
+              <text
+                x={apexPt.x}
+                y={apexPt.y - 14}
+                textAnchor="middle"
+                fill="#fbbf24"
+                fontSize="21"
+                fontWeight="800"
+                fontFamily="ui-monospace, monospace"
+              >
+                ESTIMATED
+              </text>
+              {t.label ? (
+                <text
+                  x={apexPt.x}
+                  y={apexPt.y + 14}
+                  textAnchor="middle"
+                  fill="rgba(251,191,36,0.7)"
+                  fontSize="16"
+                  fontFamily="ui-monospace, monospace"
+                >
+                  {t.label.length > 26 ? `${t.label.slice(0, 25)}…` : t.label}
+                </text>
+              ) : null}
+            </g>
+          );
+        })}
+
         {/* fight pins */}
         {fights.map((f, i) => (
           <g key={`fight-${i}`}>
@@ -290,6 +406,10 @@ export function MapSchematic({
         <span className="flex items-center gap-1.5">
           <span className="inline-block h-3 w-3 rounded-full bg-amber-400" />
           fight unknown
+        </span>
+        <span className="flex items-center gap-1.5">
+          <span className="inline-block h-0 w-6 border-t-[3px] border-dashed border-amber-400" />
+          grenade arc — ESTIMATED (endpoints only)
         </span>
       </div>
     </div>

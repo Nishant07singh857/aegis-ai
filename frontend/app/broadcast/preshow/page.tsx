@@ -18,6 +18,7 @@ import { apiFetch } from '@/lib/api';
 import { useAuth } from '@/lib/auth';
 import { useRole } from '@/lib/useRole';
 import PreshowView, {
+  type PreshowFlightPath,
   type PreshowSnapshot,
   type PreshowTeam,
 } from '@/components/graphics-staging/preshow-view';
@@ -28,11 +29,16 @@ interface TeamListResponse {
   data: Array<{ id: string; name: string; tag?: string | null }>;
 }
 
+interface FlightPathResponse {
+  flight_path: PreshowFlightPath;
+}
+
 export default function PreshowPage() {
   const { token } = useAuth();
   const { isOperator } = useRole();
   const [state, setState] = useState<PreshowSnapshot | null>(null);
   const [teams, setTeams] = useState<PreshowTeam[]>([]);
+  const [flightPath, setFlightPath] = useState<PreshowFlightPath | null>(null);
   const { latest } = useBroadcastSocket(['preshow.state']);
   const frame = latest['preshow.state'] as PreshowSnapshot | undefined;
 
@@ -60,10 +66,23 @@ export default function PreshowPage() {
     }
   }, [token]);
 
+  const fetchFlightPath = useCallback(async () => {
+    try {
+      const res = await apiFetch<FlightPathResponse>('/api/v1/flight/path', { token });
+      // Null when nothing came back — PreshowView then renders its
+      // labelled schematic fallback; a path is never invented here.
+      // An unset snapshot (is_set: false) also falls back in the view.
+      setFlightPath(res.flight_path ?? null);
+    } catch {
+      /* backend unreachable — keep null so the schematic fallback renders */
+    }
+  }, [token]);
+
   useEffect(() => {
     fetchState();
     fetchTeams();
-  }, [fetchState, fetchTeams]);
+    fetchFlightPath();
+  }, [fetchState, fetchTeams, fetchFlightPath]);
 
   useEffect(() => {
     if (frame) setState(frame);
@@ -71,7 +90,7 @@ export default function PreshowPage() {
 
   return (
     <div style={{ background: '#05070d', minHeight: '100vh' }}>
-      <PreshowView state={state} teams={teams} />
+      <PreshowView state={state} teams={teams} flightPath={flightPath} />
       {isOperator && <PreshowControls onChanged={fetchState} />}
     </div>
   );

@@ -246,6 +246,86 @@ export function zoneRadius(z: ZonePhase): number | null {
   return typeof v === "number" && Number.isFinite(v) && v > 0 ? v : null;
 }
 
+// ---------------------------------------------------------------------------
+// Grenade trajectories (Phase 23, W4) — ESTIMATED arcs, endpoint-based only.
+// GET /api/v1/analysis/grenade-trajectories?match_id=
+// ---------------------------------------------------------------------------
+
+export interface GrenadeTrajectoryRecord {
+  id?: string;
+  match_id?: string;
+  ts?: number;
+  /** Always true — the backend refuses to store unlabelled records. */
+  estimated?: boolean;
+  method?: string;
+  confidence_basis?: string;
+  source?: string;
+  weapon?: string | null;
+  coordinate_space?: string;
+  distance?: number;
+  distance_units?: string;
+  apex_height?: number;
+  thrower?: {
+    player?: string | null;
+    team?: string | null;
+    position?: [number, number];
+    position_basis?: string;
+  };
+  explosion?: {
+    position?: [number, number];
+    position_basis?: string;
+  };
+  victim?: { player?: string | null; team?: string | null } | null;
+  arc_points?: { x: number; y: number; h?: number }[];
+}
+
+export interface SchematicTrajectoryData {
+  id: string;
+  points: { x: number; y: number; h: number }[];
+  /** apex_height / distance (unitless, same-space ratio). */
+  apexRatio: number;
+  label: string;
+}
+
+/**
+ * Convert a trajectory record to schematic (0–1000) points, or null when
+ * that would require inventing a coordinate conversion.
+ *
+ * Only two spaces map honestly onto the analyst schematic:
+ *   "normalized_0_1"    — the backend's normalized map space (x1000);
+ *   "schematic_0_1000"  — already schematic.
+ * Anything else (minimap_region_pixels — a zoomed viewport, NOT the whole
+ * map; frame_pixels — screen space) has no honest whole-map mapping, so
+ * the arc is NOT drawn rather than drawn in the wrong place.
+ */
+export function trajectorySchematic(
+  t: GrenadeTrajectoryRecord,
+  index: number
+): SchematicTrajectoryData | null {
+  const space = String(t.coordinate_space ?? "");
+  if (space !== "normalized_0_1" && space !== "schematic_0_1000") return null;
+  const raw = Array.isArray(t.arc_points) ? t.arc_points : [];
+  const points: { x: number; y: number; h: number }[] = [];
+  for (const p of raw) {
+    const x = normCoord(p?.x);
+    const y = normCoord(p?.y);
+    if (x === null || y === null) return null;
+    points.push({ x, y, h: typeof p.h === "number" ? p.h : 0 });
+  }
+  if (points.length < 2) return null;
+  const distance = typeof t.distance === "number" ? t.distance : 0;
+  const apex = typeof t.apex_height === "number" ? t.apex_height : 0;
+  const apexRatio = distance > 0 && apex > 0 ? apex / distance : 0.25;
+  const thrower = t.thrower?.player || "thrower";
+  const victim = t.victim?.player || "explosion";
+  return {
+    id: String(t.id ?? `traj-${index}`),
+    points,
+    apexRatio,
+    label: `${thrower} → ${victim}`,
+  };
+}
+
 export function fightOutcome(f: FightRow): string {
   return String(f.outcome ?? f.result ?? "").toLowerCase();
 }

@@ -87,23 +87,136 @@ export function useObservedTeam(
   return team;
 }
 
+/* --------------------- observed-player live state (P24) -------------------- */
+
+/**
+ * Latest slot-attributed observed values from the vision-intelligence
+ * status snapshot (Phase 24, W2's landed shape):
+ *   observed: { team_id, team_name, slot_number,
+ *               hp: {<screen slot>: pct} | null,
+ *               boost: {<screen slot>: value} | null,
+ *               alive_count, team_status, updated_at }
+ * hp/boost arrive as per-screen-slot dicts; the panel scalar is the
+ * first slot's value (the vision rig analyses one observer feed, whose
+ * primary slot is the observed player). The raw dicts are kept on
+ * hp_by_slot / boost_by_slot for per-slot rendering. Every field is
+ * null when unknown — callers render "—", never a guess. WEAPON and
+ * AMMO have no truthful source yet and stay "—" by design.
+ */
+export interface ObservedState {
+  hp: number | null;
+  boost: number | null;
+  alive_count: number | null;
+  team_status: string[] | null;
+  hp_by_slot: Record<string, number> | null;
+  boost_by_slot: Record<string, number> | null;
+}
+
+interface VisionStatusBody {
+  observed?: {
+    hp?: Record<string, number> | number | null;
+    boost?: Record<string, number> | number | null;
+    alive_count?: number | null;
+    team_status?: string[] | null;
+  } | null;
+}
+
+const numOrNull = (v: unknown): number | null =>
+  typeof v === 'number' && Number.isFinite(v) ? v : null;
+
+/** Collapse a per-slot dict to {scalar (first slot), raw dict}. */
+function slotValue(
+  v: Record<string, number> | number | null | undefined
+): { scalar: number | null; bySlot: Record<string, number> | null } {
+  if (typeof v === 'number') return { scalar: numOrNull(v), bySlot: null };
+  if (v && typeof v === 'object') {
+    const keys = Object.keys(v).sort();
+    if (keys.length === 0) return { scalar: null, bySlot: null };
+    return { scalar: numOrNull(v[keys[0]]), bySlot: v };
+  }
+  return { scalar: null, bySlot: null };
+}
+
+/**
+ * Poll GET /api/v1/vision-intelligence/status and expose its `observed`
+ * block. Degrades to all-null (honest "—") when the endpoint or the
+ * block is unavailable — the capture page may be unauthenticated.
+ */
+export function useObserved(
+  api: string,
+  token?: string
+): ObservedState {
+  const [observed, setObserved] = useState<ObservedState>({
+    hp: null,
+    boost: null,
+    alive_count: null,
+    team_status: null,
+    hp_by_slot: null,
+    boost_by_slot: null,
+  });
+
+  useEffect(() => {
+    let cancelled = false;
+    const load = async () => {
+      try {
+        const res = await fetch(
+          `${api.replace(/\/+$/, '')}/api/v1/vision-intelligence/status`,
+          { headers: token ? { Authorization: `Bearer ${token}` } : {} }
+        );
+        if (!res.ok) return;
+        const body = (await res.json()) as VisionStatusBody;
+        const o = body.observed ?? null;
+        if (!cancelled) {
+          const hp = slotValue(o?.hp);
+          const boost = slotValue(o?.boost);
+          setObserved({
+            hp: hp.scalar,
+            boost: boost.scalar,
+            alive_count: numOrNull(o?.alive_count),
+            team_status: Array.isArray(o?.team_status)
+              ? (o.team_status as string[])
+              : null,
+            hp_by_slot: hp.bySlot,
+            boost_by_slot: boost.bySlot,
+          });
+        }
+      } catch {
+        /* status unavailable — keep last known / nulls ("—") */
+      }
+    };
+    load();
+    const t = setInterval(load, 5_000);
+    return () => {
+      cancelled = true;
+      clearInterval(t);
+    };
+  }, [api, token]);
+
+  return observed;
+}
+
 /* --------------------------------- top bar --------------------------------- */
 
 /**
  * Bible §1: thin dark strip, full width, y 0-4%.
  * "Remaining N" | "Teams N" | "Elim N" | Map name | Timer | LIVE badge.
  *
- * Remaining (players) and map name have no live feed today → "—", never
- * guessed. Teams/Elim counts come from the team frames (alive flag).
+ * Remaining (players) renders the live alive count when the caller
+ * passes it (useObserved, Phase 24); otherwise "—", never guessed.
+ * Map name has no live feed today → "—". Teams/Elim counts come from
+ * the team frames (alive flag).
  */
 export function GameTopBar({
   standings,
   summary,
   matchLabel,
+  aliveCount = null,
 }: {
   standings: Team[];
   summary: ScorebugSummary | null;
   matchLabel: string;
+  /** Live alive count from useObserved (vision HUD reader). Null -> "—". */
+  aliveCount?: number | null;
 }) {
   const teamsTotal = standings.length;
   const teamsElim = standings.filter((t) => t.alive === false).length;
@@ -117,7 +230,10 @@ export function GameTopBar({
     <div className="absolute inset-x-0 top-0 z-20 flex h-[4%] items-center justify-between bg-black/60 px-5 backdrop-blur-sm">
       <div className="flex items-center gap-6 font-mono text-[13px] font-bold tracking-[0.2em] text-white max-sm:gap-3 max-sm:text-[10px]">
         <span>
-          REMAINING <span className="text-white/45">—</span>
+          REMAINING{' '}
+          <span className={aliveCount != null ? 'text-white' : 'text-white/45'}>
+            {aliveCount != null ? aliveCount : '—'}
+          </span>
         </span>
         <span>
           TEAMS{' '}
@@ -392,20 +508,27 @@ export function FacecamBox({
  * Bible §1: x 35-65%, y 86-100%. Observed player name, health bar,
  * weapon + ammo, boost levels, stats row.
  *
- * No observed-player identity / health / weapon feed exists today, so
- * the panel is anchored on the observed TEAM (resolved from the camera
- * slot — real data) and every player-level field renders "—" per the
- * Phase 9 honest-data rule.
+ * Phase 24: HP and BOOST render real values when the caller passes the
+ * vision-intelligence `observed` snapshot (useObserved); without it
+ * they render "—" per the Phase 9 honest-data rule. WEAPON and AMMO
+ * stay "—" — no truthful source exists yet (weapon icons are Phase 23).
+ * The panel stays anchored on the observed TEAM (resolved from the
+ * camera slot — real data); the individual player is never identified.
  */
 export function PlayerPanel({
   slot,
   teamTag,
   teamColor,
+  observed = null,
 }: {
   slot: number;
   teamTag: string | null;
   teamColor?: string;
+  /** Live observed values (useObserved). Null fields render "—". */
+  observed?: ObservedState | null;
 }) {
+  const hp = observed?.hp ?? null;
+  const boost = observed?.boost ?? null;
   return (
     <div className="absolute bottom-0 left-[35%] z-20 flex h-[14%] w-[30%] flex-col justify-between border-t border-white/10 bg-black/65 px-5 py-2.5 backdrop-blur-sm max-sm:left-[12%] max-sm:w-[76%]">
       <div className="flex items-center justify-between">
@@ -430,9 +553,16 @@ export function PlayerPanel({
         <span className="shrink-0 font-mono text-[10px] font-bold tracking-[0.25em] text-white/55">
           HP
         </span>
-        <div className="h-2 flex-1 rounded-full bg-white/10" aria-hidden />
+        <div className="h-2 flex-1 rounded-full bg-white/10" aria-hidden>
+          {hp != null && (
+            <div
+              className="h-full rounded-full bg-emerald-400"
+              style={{ width: `${Math.max(0, Math.min(100, hp))}%` }}
+            />
+          )}
+        </div>
         <span className="shrink-0 font-mono text-[10px] tabular-nums text-white/45">
-          —
+          {hp != null ? Math.round(hp) : '—'}
         </span>
       </div>
 
@@ -445,9 +575,17 @@ export function PlayerPanel({
         </span>
         <span className="flex items-center gap-1.5">
           BOOST
-          <span className="h-1.5 w-10 rounded-sm bg-white/10" aria-hidden />
-          <span className="h-1.5 w-10 rounded-sm bg-white/10" aria-hidden />
-          <span className="text-white/35">—</span>
+          <span className="relative h-1.5 w-20 overflow-hidden rounded-sm bg-white/10" aria-hidden>
+            {boost != null && (
+              <span
+                className="absolute inset-y-0 left-0 bg-sky-400"
+                style={{ width: `${Math.max(0, Math.min(100, boost))}%` }}
+              />
+            )}
+          </span>
+          <span className="text-white/35">
+            {boost != null ? Math.round(boost) : '—'}
+          </span>
         </span>
       </div>
 

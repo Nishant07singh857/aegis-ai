@@ -1,39 +1,61 @@
 # backend/app/vision/detectors/killfeed.py
 """
-AEGIS AI - Kill Feed Detector (production module, Phase 14 W2).
+AEGIS AI - Kill Feed Detector (production module, Phase 14 W2; Phase 23 W2).
 
-Detects kill-feed entries in BGMI spectator frames using Tesseract OCR on
-the top-right kill-feed region, parses killer/victim names, deduplicates
-across frames, and emits ``NormalizedEvent`` objects (kill/knock) matching
+Detects kill-feed entries in BGMI spectator frames and emits
+``NormalizedEvent`` objects (kill/knock) matching
 ``backend/app/services/feed_adapter/schemas.py``.
 
+LAYOUT (measured on real frames, Phase 23 W1 — LAYOUT_REPORT.md):
+    The killfeed renders TOP-LEFT, stacked below the spectated team's
+    roster block — the old top-right region held the minimap/standings
+    and never contained a single entry. Scan band: x in [0, 0.34] W,
+    y in [0.24, 0.52] H; first row top y ~0.26-0.29 H; bar height
+    ~19-21 px and row pitch ~21 px at 360p; new entries append BELOW.
+
+    A real entry has NO action words. Its structure is:
+        [killer logo] killer_name [weapon icon] [marker slot]
+        [victim logo] victim_name
+    Knock = crawling-player glyph in the marker slot; headshot = white
+    ring/crosshair glyph in the marker slot; no marker = plain kill.
+
+PARSING PATHS (both live, in order):
+    1. Layout parser (Phase 23): bar/row segmentation in the scan band
+       (resolution-adaptive port of the W1 harvester's structural bar
+       detector), per-row OCR WITH word bounding boxes, weapon/marker
+       classification by template matching (``icon_matcher.py`` against
+       the real W1 icon library). Killer = name tokens left of the icon
+       slot, victim = tokens right of the marker/victim-logo side.
+    2. Legacy text parser (``parse_text``): action-word anchored OCR
+       parse, kept for text/demo feeds, the Phase-15 hybrid's per-entry
+       fallback, and the existing test-suite. Real broadcast entries
+       never match it (no action words) — that is expected, not a bug.
+
 OCR ENGINE CHOICE (documented, honest):
-    * Tesseract (via ``pytesseract``) is the primary engine.
-      - Free, fully offline, ~5 MB, CPU-light, no model download.
-      - Reads clean high-contrast kill-feed text (white on dark translucent
-        background) well when pre-processed (upscale + threshold + PSM 6).
-    * EasyOCR was NOT chosen: it requires a ~100 MB model download on first
-      use plus a torch dependency, is much slower on CPU, and is not
-      installed in this environment. The previous ``kill_feed_ocr.py``
-      claimed an EasyOCR backend that cannot even be imported here.
+    * Tesseract (via ``pytesseract``) is the primary engine: free, fully
+      offline, CPU-light. EasyOCR was NOT chosen (100 MB model download,
+      torch dependency, not installed here).
     * Neither engine is bundled: Tesseract is imported lazily and every
       code path degrades gracefully (``ocr_available() == False``,
-      ``parse_frame`` returns ``[]``) if the ``tesseract`` binary or
-      ``pytesseract`` is missing. We NEVER emit a fake detection.
+      ``parse_frame`` returns ``[]``) if the binary is missing. We NEVER
+      emit a fake detection.
 
-WEAPON ICONS:
-    Kill-feed weapons are icons, not text. Template matching them would
-    require real captured templates that do not exist in this VM, so per
-    the "never guess" rule the weapon is always left as ``None``
-    ("unknown") — icons are never matched or guessed.
+WEAPON ICONS (Phase 23):
+    Weapons are icons, not text. They are now classified by REAL
+    template matching against the W1 library of crops harvested from
+    real VOD frames — at CLASS level only ("ar"/"smg"/"sniper"/"dmr"/
+    "frag_grenade"/"pistol"); specific models are indistinguishable at
+    360p and are never emitted. Below the confidence threshold — or when
+    an unresolved ``unknown_*`` glyph wins — the weapon stays ``None``
+    (honest unknown). See ``icon_matcher.py``.
 
 DEDUP (critical):
     The same kill-feed line is visible for several seconds, i.e. across
     hundreds of frames. Each parsed entry is keyed by
     ``(killer.lower(), victim.lower(), event_type)`` and remembered for
     ``dedup_ttl_sec`` (default 30 s). Only the first sighting of a key
-    within the TTL is emitted. The table is bounded (default 512 keys) and
-    purged on every insertion so memory cannot grow unboundedly.
+    within the TTL is emitted. The table is bounded (default 512 keys)
+    and purged on every insertion so memory cannot grow unboundedly.
 """
 
 from __future__ import annotations
@@ -87,10 +109,12 @@ def _normalized_event_cls():
 # Region / OCR constants
 # --------------------------------------------------------------------------
 
-# Kill-feed region in BGMI spectator UI: top-right corner, expressed as
-# fractions of frame width/height so it works on any capture resolution.
+# Kill-feed region in BGMI spectator UI: TOP-LEFT band below the roster
+# block, expressed as fractions of frame width/height so it works on any
+# capture resolution. Measured by Phase 23 W1 on real frames
+# (LAYOUT_REPORT.md §2): x in [0, 0.34] W, y in [0.24, 0.52] H.
 # (x1, y1, x2, y2) — override per device via set_config(kill_feed_region=...).
-DEFAULT_KILL_FEED_REGION: Tuple[float, float, float, float] = (0.62, 0.02, 0.99, 0.30)
+DEFAULT_KILL_FEED_REGION: Tuple[float, float, float, float] = (0.0, 0.24, 0.34, 0.52)
 
 # Per-line band: when we cannot rely on Tesseract line numbers we re-run
 # PSM-8 per horizontal band. Kept for documentation; current pipeline uses
@@ -98,8 +122,8 @@ DEFAULT_KILL_FEED_REGION: Tuple[float, float, float, float] = (0.62, 0.02, 0.99,
 _TESSERACT_CONFIG_LINE = "--oem 3 --psm 6"
 _TESSERACT_CONFIG_WORD = "--oem 3 --psm 8"
 
-#: Weapon names reference list (kept for documentation; the detector does
-#: NOT template-match weapon icons — see module docstring).
+#: Weapon names reference list (kept for documentation; text feeds only —
+#: the broadcast weapon is an icon, classified by icon_matcher.py).
 KNOWN_WEAPON_TEXT = {
     "m416", "akm", "m762", "beryl", "groza", "aug", "qbz",
     "ump45", "uzi", "vector", "pp19", "pp-19", "mp5k",
@@ -130,6 +154,12 @@ class KillFeedEntry:
     raw_text: str = ""
     is_valid: bool = False
     seen_at: float = field(default_factory=time.time)
+    # Phase 23: icon-matcher provenance (class-level weapon only).
+    weapon_family: Optional[str] = None     # e.g. "ar_a", "frag_grenade"
+    weapon_confidence: float = 0.0         # matcher NCC score 0..1
+    # Best-matching template family even when it did NOT yield a
+    # weapon (unknown_* glyph or below threshold) — diagnostics only.
+    icon_family: Optional[str] = None
 
     def dedup_key(self) -> str:
         """Stable identity for cross-frame deduplication."""
@@ -161,11 +191,78 @@ class KillFeedDetector(BaseDetector):
             "blank_std_threshold": 4.0,
             # Minimum mean word-confidence to accept a parsed entry.
             "min_word_confidence": 30.0,
+            # --- Phase 23 layout parser / icon matcher ---
+            "layout_parse": True,
+            # Dull-icon preprocessing for the matcher:
+            # "bin" | "clahe" | "histeq" | "none" (W5 A/B switch;
+            # default "bin" chosen on harvest-VOD validation — family
+            # top-1 54% vs 41% raw / 43% histeq / 36% clahe; see the
+            # Phase 23 W2 report).
+            "icon_preprocess": "none",
+            "icon_threshold": 0.55,
+            "marker_threshold": 0.50,
+            "icon_upscale": 4,
+            # Layout-row OCR: 4x cubic upscale + Otsu (measured on real
+            # rows: name fragments land at conf ~30-55, junk at <10;
+            # the legacy 2x pipeline reads real rows at conf 0-25).
+            "layout_upscale": 4.0,
+            "layout_min_word_confidence": 25.0,
         }
         self.config.update(config)
         self._seen: Dict[str, float] = {}  # dedup_key -> first seen epoch
         self._tesseract_ok: Optional[bool] = None
+        self._matcher = None
+        self._matcher_key: Optional[tuple] = None
+        # Band-parse cache: killfeed bands are static for seconds at a
+        # time; re-running segmentation+matching+OCR on identical pixels
+        # every frame would waste the ~2.3 FPS CPU budget. Keyed by a
+        # hash of the region bytes; stores PRE-dedup entries. A band
+        # that produced NOTHING from either path is negative-cached:
+        # identical pixels parse identically (the pipeline is
+        # deterministic), so re-parsing them can only waste CPU.
+        self._band_cache_key: Optional[str] = None
+        self._band_cache_entries: List[KillFeedEntry] = []
+        self._band_negative_key: Optional[str] = None
+        self._band_negative_at: float = 0.0
         self._log = log.bind(detector=name)
+
+    # ------------------------------------------------------------------
+    # Icon matcher (lazy, config-aware)
+    # ------------------------------------------------------------------
+
+    def _get_matcher(self):
+        """IconMatcher built from current config (rebuilt on change)."""
+        key = (
+            str(self.config.get("icon_preprocess", "none")),
+            float(self.config.get("icon_threshold", 0.55)),
+            float(self.config.get("marker_threshold", 0.50)),
+            int(self.config.get("icon_upscale", 4)),
+        )
+        if self._matcher is not None and self._matcher_key == key:
+            return self._matcher
+        try:
+            from .icon_matcher import IconMatcher
+
+            self._matcher = IconMatcher(
+                preprocess=key[0],
+                threshold=key[1],
+                marker_threshold=key[2],
+                upscale=key[3],
+            )
+            self._matcher_key = key
+        except Exception as exc:  # pragma: no cover - defensive
+            self._log.warning("icon_matcher_unavailable", error=str(exc))
+            self._matcher = None
+            self._matcher_key = key
+        return self._matcher
+
+    def set_config(self, **kwargs) -> None:
+        super().set_config(**kwargs)
+        # Invalidate the band cache: geometry/preprocess may have changed.
+        self._band_cache_key = None
+        self._band_cache_entries = []
+        self._band_negative_key = None
+        self._band_negative_at = 0.0
 
     # ------------------------------------------------------------------
     # BaseDetector contract
@@ -329,8 +426,74 @@ class KillFeedDetector(BaseDetector):
                 out.append((text, mean_conf))
         return out
 
+    def _preprocess_row(self, strip: np.ndarray):
+        """Row strip -> PIL image for layout OCR (4x cubic + Otsu).
+
+        Separate from ``_preprocess`` (legacy 2x line pipeline): real
+        360p kill-feed glyphs are 8-12 px tall, and Tesseract only
+        segments them into words at ~4x. Returns None for blank strips.
+        """
+        import cv2
+        from PIL import Image
+
+        if strip is None or strip.size == 0:
+            return None
+        if strip.ndim == 3:
+            gray = cv2.cvtColor(strip, cv2.COLOR_BGR2GRAY)
+        else:
+            gray = strip.astype(np.uint8)
+        if float(gray.std()) < float(self.config["blank_std_threshold"]):
+            return None
+        scale = float(self.config.get("layout_upscale", 4.0)) or 1.0
+        big = cv2.resize(
+            gray,
+            (max(1, int(gray.shape[1] * scale)), max(1, int(gray.shape[0] * scale))),
+            interpolation=cv2.INTER_CUBIC,
+        )
+        _, binary = cv2.threshold(big, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        if float(binary.mean()) > 127.0:
+            binary = 255 - binary
+        return Image.fromarray(binary, mode="L")
+
+    def _ocr_words(self, image, scale: Optional[float] = None) -> List[Dict]:
+        """Tesseract word boxes for one row image.
+
+        Returns [{text, conf, x, y, w, h}] in ORIGINAL row-image pixels
+        (the preprocessing upscale is divided back out), so callers can
+        split killer/victim tokens around the icon slot.
+        """
+        import pytesseract
+
+        if scale is None:
+            scale = float(self.config["upscale"]) or 1.0
+        data = pytesseract.image_to_data(
+            image, config=_TESSERACT_CONFIG_LINE, output_type=pytesseract.Output.DICT
+        )
+        words: List[Dict] = []
+        n = len(data.get("text", []))
+        for i in range(n):
+            text = str(data["text"][i] or "").strip()
+            if not text:
+                continue
+            try:
+                conf = float(data["conf"][i])
+            except (TypeError, ValueError):
+                conf = -1.0
+            words.append(
+                {
+                    "text": text,
+                    "conf": conf,
+                    "x": float(data["left"][i]) / scale,
+                    "y": float(data["top"][i]) / scale,
+                    "w": float(data["width"][i]) / scale,
+                    "h": float(data["height"][i]) / scale,
+                }
+            )
+        words.sort(key=lambda wd: wd["x"])
+        return words
+
     # ------------------------------------------------------------------
-    # Parsing
+    # Legacy text parsing (kept: text/demo feeds + existing tests)
     # ------------------------------------------------------------------
 
     @staticmethod
@@ -381,6 +544,279 @@ class KillFeedDetector(BaseDetector):
         return entry
 
     # ------------------------------------------------------------------
+    # Phase 23 layout parser
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _detect_bars(region: np.ndarray, frame_h: int) -> List[Dict]:
+        """Structural bar detection inside the scan band.
+
+        Resolution-adaptive port of the W1 harvester's ``detect_bars``
+        (data/dataset_work/w2_lib.py, proven on real VOD frames): dark
+        translucent bars are found against a median-blurred background,
+        then tightened to the row-aligned bright-glyph row inside them.
+        All pixel constants scale with ``k = frame_h / 360`` so the same
+        geometry works above 360p. Bars are returned in REGION pixels,
+        sorted top-to-bottom (feed order: oldest first).
+        """
+        try:
+            import cv2
+        except Exception:
+            return []
+        if region is None or region.size == 0 or region.ndim < 3:
+            return []
+        k = max(0.5, float(frame_h) / 360.0)
+        crop = region
+        gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+        med = int(31 * k) | 1  # odd kernel
+        bg = cv2.medianBlur(gray, max(3, med))
+        dark = (gray.astype(np.int16) < bg.astype(np.int16) - 28).astype(np.uint8) * 255
+        close_k = (max(3, int(7 * k)), max(5, int(25 * k)))
+        closed = cv2.morphologyEx(
+            dark, cv2.MORPH_CLOSE, np.ones(close_k, np.uint8)
+        )
+        n, _, stats, _ = cv2.connectedComponentsWithStats(closed, 8)
+        out: List[Dict] = []
+        for i in range(1, n):
+            x, y, ww, hh, area = (int(v) for v in stats[i])
+            if ww < 50 * k or ww > crop.shape[1]:
+                continue
+            if hh < 9 * k or hh > 34 * k:
+                continue
+            if ww / max(hh, 1) < 2.6:
+                continue
+            if area / max(ww * hh, 1) < 0.40:
+                continue
+            roi = gray[y:y + hh, x:x + ww]
+            bright = int((roi > 150).sum())
+            if bright < 15 * k:
+                continue
+            sub = dark[y:y + hh, x:x + ww]
+            ys, xs = np.nonzero(sub)
+            if xs.size < 20:
+                continue
+            tx1, ty1, tx2, ty2 = int(xs.min()), int(ys.min()), int(xs.max()), int(ys.max())
+            broi = (roi > 150).astype(np.uint8) * 255
+            ng, _, gstats, gcents = cv2.connectedComponentsWithStats(broi, 8)
+            glyphs = []
+            for gi in range(1, ng):
+                if int(gstats[gi, cv2.CC_STAT_AREA]) < 3:
+                    continue
+                glyphs.append(
+                    (
+                        int(gstats[gi, cv2.CC_STAT_LEFT]),
+                        int(gstats[gi, cv2.CC_STAT_TOP]),
+                        int(gstats[gi, cv2.CC_STAT_WIDTH]),
+                        int(gstats[gi, cv2.CC_STAT_HEIGHT]),
+                        float(gcents[gi][1]),
+                    )
+                )
+            if len(glyphs) < 6:
+                continue
+            medy = float(np.median([g[4] for g in glyphs]))
+            row = [g for g in glyphs if abs(g[4] - medy) <= 4.0 * k]
+            if len(row) < 6:
+                continue
+            rx1 = max(x + min(g[0] for g in row) - int(3 * k), x + tx1)
+            ry1 = max(y + min(g[1] for g in row) - int(3 * k), y + ty1)
+            rx2 = min(x + max(g[0] + g[2] for g in row) + int(3 * k), x + tx2)
+            ry2 = min(y + max(g[1] + g[3] for g in row) + int(3 * k), y + ty2)
+            if rx2 <= rx1 or ry2 <= ry1:
+                continue
+            out.append({"x": int(rx1), "y": int(ry1),
+                        "w": int(rx2 - rx1), "h": int(ry2 - ry1)})
+        out.sort(key=lambda b: b["y"])
+        return out
+
+    def _parse_entry_strip(
+        self, strip: np.ndarray, frame_h: int
+    ) -> Optional[KillFeedEntry]:
+        """Parse ONE kill-feed row strip (BGR) via layout + icons + OCR.
+
+        Returns a valid KillFeedEntry or None. Never guesses: any
+        missing piece (no confident icon slot, unclear names) -> None.
+        Public-ish for tests and the Phase-15 hybrid's entry crops.
+        """
+        matcher = self._get_matcher()
+        if matcher is None or not matcher.available:
+            return None
+        if strip is None or strip.size == 0 or strip.ndim < 3:
+            return None
+        # Scale from the strip itself: a full entry strip (bar + margins)
+        # is ~24 px tall at 360p, whatever the source frame size was.
+        # This keeps the hybrid's per-entry crops (which carry no frame
+        # context) on the same geometry as band-segmented rows.
+        k = min(4.0, max(0.5, float(strip.shape[0]) / 24.0))
+        threshold = float(self.config.get("icon_threshold", 0.55))
+
+        # 1) OCR word boxes for the row (needed to vet icon candidates).
+        image = self._preprocess_row(strip)
+        if image is None:
+            return None
+        try:
+            words = self._ocr_words(
+                image, scale=float(self.config.get("layout_upscale", 4.0))
+            )
+        except Exception as exc:
+            self._log.warning("layout_ocr_failed", error=str(exc))
+            return None
+        if len(words) < 2:
+            return None
+
+        def _join(tokens) -> Tuple[str, List[float]]:
+            parts: List[str] = []
+            confs: List[float] = []
+            for wd in tokens:
+                cleaned = self._clean_name(wd["text"])
+                if cleaned:
+                    parts.append(cleaned)
+                    if wd["conf"] >= 0:
+                        confs.append(wd["conf"])
+            return " ".join(parts).strip(), confs
+
+        # 2) Weapon icon candidates, best first. A candidate's LOCATION
+        #    defines the icon slot even when the winner is an unknown_*
+        #    glyph (weapon stays None, names still split). Candidates
+        #    are vetted structurally; the first one passing every guard
+        #    wins — a logo mimicking a glyph (GodLike's gold ring vs the
+        #    wheel/headshot shapes) must not fail the whole row.
+        for match in matcher.match_candidates(strip, top_n=4):
+            if match.location is None or match.score < threshold:
+                continue
+            ix, iy, iw, ih = match.location
+            if iw <= 0:
+                continue
+
+            # 3) Marker slot: strip area right of the icon, before the
+            #    victim side. Knock/headshot glyphs live there. The
+            #    slot is BOUNDED by the victim side: the first OCR word
+            #    at/right of the slot start is the victim's name, and
+            #    its team logo (~10k px) sits between the markers and
+            #    the name. Unbounded, the crop swallows victim text and
+            #    the marker templates match letter strokes — false
+            #    knock/headshot on marker-less entries (measured on
+            #    synthetic strips, Phase 23 W2).
+            marker_x1 = ix + iw + int(1 * k)
+            marker_x2 = min(strip.shape[1], marker_x1 + int(36 * k))
+            for wd in words:
+                if wd["x"] < marker_x1:
+                    continue
+                # Only a NAME-LIKE word bounds the slot: OCR also
+                # boxes the marker glyphs themselves as symbol words
+                # ("=!", "-»") inside the slot — those must not shrink
+                # it. The first real name to the right is the victim.
+                if not self._clean_name(wd["text"]):
+                    continue
+                bound = int(wd["x"]) - int(10 * k)
+                if bound >= marker_x1 + int(6 * k):
+                    marker_x2 = min(marker_x2, bound)
+                break
+            knock = False
+            headshot = False
+            if marker_x2 - marker_x1 >= int(6 * k):
+                marker_crop = strip[:, marker_x1:marker_x2]
+                mm = matcher.match_markers(marker_crop)
+                knock = bool(mm.knock)
+                headshot = bool(mm.headshot)
+
+            # 4) Split names around the slots, STRICTLY: a killer
+            #    token must END at/before the icon, a victim token must
+            #    START at/after the marker slot. Words straddling the
+            #    slots are dropped — OCR hallucinates letter fragments
+            #    on top of the glyphs themselves, and a straddling
+            #    fragment belongs to neither name. (The marker slot
+            #    also covers the victim team logo just right of it.)
+            victim_min_x = marker_x1 + int(6 * k)
+            killer_tokens = [
+                wd for wd in words if wd["x"] + wd["w"] <= ix + int(2 * k)
+            ]
+            victim_tokens = [
+                wd for wd in words if wd["x"] >= victim_min_x
+            ]
+            # The icon-to-victim gap must be wide enough to hold icon +
+            # markers + logo — a single-space word gap is a text feed.
+            if victim_tokens and killer_tokens:
+                gap = victim_tokens[0]["x"] - (
+                    killer_tokens[-1]["x"] + killer_tokens[-1]["w"]
+                )
+                if gap < iw * 0.8:
+                    continue
+
+            killer, k_confs = _join(killer_tokens)
+            victim, v_confs = _join(victim_tokens)
+            if not killer or not victim or killer.lower() == victim.lower():
+                continue
+            confs = k_confs + v_confs
+            mean_conf = sum(confs) / len(confs) if confs else 0.0
+            return self._finish_layout_entry(
+                killer, victim, knock, headshot, match, mean_conf
+            )
+        return None
+
+    def _finish_layout_entry(
+        self, killer, victim, knock, headshot, match, mean_conf
+    ) -> Optional[KillFeedEntry]:
+        """Confidence gate + KillFeedEntry build for the layout path."""
+        if mean_conf < float(
+            self.config.get(
+                "layout_min_word_confidence",
+                self.config.get("min_word_confidence", 30.0),
+            )
+        ):
+            return None  # unclear names -> skip, never guess
+
+        entry = KillFeedEntry(
+            killer=killer,
+            victim=victim,
+            event_type="knock" if knock else "kill",
+            weapon=match.weapon,
+            headshot=headshot,
+            confidence=mean_conf,
+            raw_text=f"{killer} [{match.family or 'unknown'}] {victim}",
+            is_valid=True,
+            weapon_family=match.weapon_family,
+            weapon_confidence=round(float(match.score), 3) if match.weapon else 0.0,
+            icon_family=match.family,
+        )
+        return entry
+
+    def parse_layout_region(
+        self, region: np.ndarray, frame_h: int
+    ) -> List[KillFeedEntry]:
+        """Segment + parse every entry row in a scan-band region crop.
+
+        Returns PRE-dedup entries (possibly empty). ``frame_h`` is the
+        FULL frame height (geometry scale reference).
+        """
+        if not bool(self.config.get("layout_parse", True)):
+            return []
+        matcher = self._get_matcher()
+        if matcher is None or not matcher.available:
+            return []
+        bars = self._detect_bars(region, frame_h)
+        k = max(0.5, float(frame_h) / 360.0)
+        entries: List[KillFeedEntry] = []
+        rh, rw = region.shape[:2]
+        for bar in bars:
+            # Harvester margins: the bar box is text-tight; the real
+            # entry extends a little beyond it on every side.
+            x1 = max(0, bar["x"] - int(8 * k))
+            x2 = min(rw, bar["x"] + bar["w"] + int(30 * k))
+            y1 = max(0, bar["y"] - int(5 * k))
+            y2 = min(rh, bar["y"] + bar["h"] + int(5 * k))
+            if x2 - x1 < int(40 * k) or y2 - y1 < int(8 * k):
+                continue
+            strip = region[y1:y2, x1:x2]
+            try:
+                entry = self._parse_entry_strip(strip, frame_h)
+            except Exception as exc:  # one bad row never kills the feed
+                self._log.warning("layout_row_failed", error=str(exc))
+                entry = None
+            if entry is not None and entry.is_valid:
+                entries.append(entry)
+        return entries
+
+    # ------------------------------------------------------------------
     # Dedup
     # ------------------------------------------------------------------
 
@@ -409,6 +845,55 @@ class KillFeedDetector(BaseDetector):
         return True
 
     # ------------------------------------------------------------------
+    # Event construction (shared by layout + legacy paths)
+    # ------------------------------------------------------------------
+
+    def _entry_to_event(self, entry: KillFeedEntry, match_id, now: float):
+        feed_cls, event_cls = _normalized_event_cls()
+        payload = {
+            "detector": self.name,
+            "raw_text": entry.raw_text,
+            "ocr_confidence": round(entry.confidence, 1),
+            "headshot": entry.headshot,
+            "dedup_key": entry.dedup_key(),
+        }
+        if entry.weapon is not None:
+            # Phase 23: class-level weapon from real icon matching.
+            payload["weapon_confidence"] = round(float(entry.weapon_confidence), 3)
+            payload["weapon_family"] = entry.weapon_family
+            payload["weapon_source"] = "icon_template"
+            payload["weapon_granularity"] = "class"
+        elif entry.icon_family and entry.icon_family.startswith("unknown_"):
+            # An unresolved glyph won the icon slot: the weapon stays
+            # null (never guessed), but the payload says so honestly
+            # so downstream can count icon coverage.
+            payload["icon_glyph"] = "unknown"
+            payload["icon_family"] = entry.icon_family
+        return event_cls(
+            event_type=(
+                feed_cls.KILL if entry.event_type == "kill" else feed_cls.KNOCK
+            ),
+            ts=now,
+            match_id=match_id,
+            player=entry.killer,
+            victim=entry.victim,
+            weapon=entry.weapon,
+            payload=payload,
+        )
+
+    def _entries_to_events(
+        self, entries: List[KillFeedEntry], match_id, now: float
+    ) -> List:
+        events = []
+        for entry in entries:
+            if entry is None or not entry.is_valid:
+                continue
+            if not self._remember(entry, now):
+                continue  # already emitted within TTL
+            events.append(self._entry_to_event(entry, match_id, now))
+        return events
+
+    # ------------------------------------------------------------------
     # Public frame API
     # ------------------------------------------------------------------
 
@@ -433,7 +918,41 @@ class KillFeedDetector(BaseDetector):
         if region is None or region.size == 0:
             return []
 
-        return self._ocr_region_to_events(region, match_id, now)
+        # Phase 23 layout path first (real broadcast geometry). The
+        # band-hash cache keeps static bands from being re-parsed.
+        frame_h = int(frame.shape[0])
+        cache_key = None
+        try:
+            cache_key = hashlib.sha1(
+                region.tobytes() + str(region.shape).encode()
+            ).hexdigest()
+        except Exception:
+            cache_key = None
+        if (
+            cache_key is not None
+            and cache_key == self._band_negative_key
+            and now - self._band_negative_at < float(self.config["dedup_ttl_sec"])
+        ):
+            return []
+        if cache_key is not None and cache_key == self._band_cache_key:
+            layout_entries = self._band_cache_entries
+        else:
+            try:
+                layout_entries = self.parse_layout_region(region, frame_h)
+            except Exception as exc:
+                self._log.warning("layout_parse_failed", error=str(exc))
+                layout_entries = []
+            if cache_key is not None:
+                self._band_cache_key = cache_key
+                self._band_cache_entries = layout_entries
+        if layout_entries:
+            return self._entries_to_events(layout_entries, match_id, now)
+
+        events = self._legacy_region_to_events(region, match_id, now)
+        if not events and cache_key is not None:
+            self._band_negative_key = cache_key
+            self._band_negative_at = now
+        return events
 
     def _ocr_region_to_events(
         self,
@@ -444,11 +963,31 @@ class KillFeedDetector(BaseDetector):
         """
         OCR one BGR crop -> list of NEW (deduplicated) NormalizedEvents.
 
-        The shared reading step used by :meth:`parse_frame` (whole
-        kill-feed region) and by the Phase-15 hybrid detector
-        (per-entry crops proposed by the trained model). Never guesses:
-        unclear text is skipped, not emitted.
+        The shared reading step used by the Phase-15 hybrid detector
+        (per-entry crops proposed by the trained model). The layout
+        parser gets first try on the crop (a hybrid entry crop IS one
+        real entry row); the legacy action-word parse runs when the
+        layout path cannot read it. Never guesses: unclear text is
+        skipped, not emitted.
         """
+        # Layout attempt: single/multi-row real-entry parse.
+        if bool(self.config.get("layout_parse", True)):
+            try:
+                entries = self._layout_entries_for_crop(region)
+                if entries:
+                    return self._entries_to_events(entries, match_id, now)
+            except Exception as exc:
+                self._log.warning("layout_crop_failed", error=str(exc))
+
+        return self._legacy_region_to_events(region, match_id, now)
+
+    def _legacy_region_to_events(
+        self,
+        region: np.ndarray,
+        match_id: Optional[str],
+        now: float,
+    ) -> List:
+        """Legacy action-word OCR parse of one crop (text/demo feeds)."""
         image = self._preprocess(region)
         if image is None:  # blank / uniform region — nothing to read
             return []
@@ -460,7 +999,6 @@ class KillFeedDetector(BaseDetector):
             self._log.warning("ocr failed", error=str(exc))
             return []
 
-        feed_cls, event_cls = _normalized_event_cls()
         for text, conf in lines:
             entry = self.parse_text(text, confidence=conf)
             if entry is None or not entry.is_valid:
@@ -469,26 +1007,30 @@ class KillFeedDetector(BaseDetector):
                 continue  # unclear OCR -> do not guess, skip
             if not self._remember(entry, now):
                 continue  # already emitted within TTL
-            events.append(
-                event_cls(
-                    event_type=(
-                        feed_cls.KILL if entry.event_type == "kill" else feed_cls.KNOCK
-                    ),
-                    ts=now,
-                    match_id=match_id,
-                    player=entry.killer,
-                    victim=entry.victim,
-                    weapon=entry.weapon,
-                    payload={
-                        "detector": self.name,
-                        "raw_text": entry.raw_text,
-                        "ocr_confidence": round(entry.confidence, 1),
-                        "headshot": entry.headshot,
-                        "dedup_key": entry.dedup_key(),
-                    },
-                )
-            )
+            events.append(self._entry_to_event(entry, match_id, now))
         return events
+
+    def _layout_entries_for_crop(
+        self, crop: np.ndarray
+    ) -> List[KillFeedEntry]:
+        """Layout-parse an arbitrary crop (whole band OR one entry row).
+
+        A wide, short crop (an entry strip: aspect >= 2.5) is parsed
+        directly as one row. A taller crop is treated as a scan band
+        whose height is the configured region fraction of the frame,
+        and goes through bar segmentation.
+        """
+        if crop is None or crop.size == 0 or crop.ndim < 3:
+            return []
+        ch, cw = int(crop.shape[0]), int(crop.shape[1])
+        if cw >= ch * 2.5 and ch <= 64:
+            entry = self._parse_entry_strip(crop, 360)
+            return [entry] if entry is not None else []
+        frac = float(self.config["kill_feed_region"][3]) - float(
+            self.config["kill_feed_region"][1]
+        )
+        frame_h = int(ch / frac) if frac > 1e-6 else 360
+        return self.parse_layout_region(crop, frame_h)
 
     def clear_dedup(self) -> None:
         """Forget all seen entries (e.g. between matches)."""

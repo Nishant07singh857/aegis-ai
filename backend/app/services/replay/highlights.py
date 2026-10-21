@@ -30,8 +30,11 @@ Scoring rules (all windows anchored on real event timestamps):
 
 Plug-ready kinds (grenade_multi_kill / sniper_triple / vehicle_kill)
 live in ``highlight_triggers.py``: they fire only when kill events
-carry truthful weapon/vehicle attribution, which today's feed does
-not produce (weapon is honestly None) — see that module.
+carry truthful weapon/vehicle attribution. Since Phase 23 the
+kill-feed icon matcher produces class-level weapons ("Frag Grenade",
+"Sniper", "DMR", ...) on real feed events, so the two weapon kinds
+fire on real data; vehicle_kill still has no truthful producer —
+see that module.
 
 Scores are 0-100 with a human-readable reason string, ordered
 score-descending for the reel.
@@ -121,9 +124,10 @@ class HighlightDetector:
         moments.extend(self._detect_squad_wipes(kills))
         moments.extend(self._detect_clutches(kills))
         moments.extend(self._detect_final_kill(events, kills))
-        # Phase 22 (W3, M11): plug-ready weapon/vehicle triggers —
-        # inactive (fire nothing) until events carry truthful
-        # weapon/vehicle attribution; see highlight_triggers.py.
+        # Phase 22 (W3, M11) + Phase 23: weapon/vehicle triggers —
+        # data-driven activation; the weapon kinds now fire on real
+        # class-level weapon attribution from the kill-feed matcher;
+        # see highlight_triggers.py.
         try:
             from .highlight_triggers import trigger_registry
 

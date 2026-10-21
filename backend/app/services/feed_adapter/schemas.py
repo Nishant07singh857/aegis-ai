@@ -41,6 +41,11 @@ class FeedEventType(str, Enum):
     POSITION_UPDATE = "position_update"
     HEALING = "healing"
     LOOT = "loot"
+    # Phase 24 (spotter completions, discrepancies D1/D5): human spotter
+    # tags for events no vision detector truthfully produces. Additive —
+    # every pre-existing type keeps its value.
+    AIRDROP_SPOTTED = "airdrop_spotted"
+    FLARE_USED = "flare_used"
 
 
 #: Feed event type -> event-bus event type. kill/knock keep the bus
@@ -62,6 +67,8 @@ BUS_EVENT_TYPE_MAP: Dict[FeedEventType, str] = {
     FeedEventType.POSITION_UPDATE: "position_update",
     FeedEventType.HEALING: "healing_event",
     FeedEventType.LOOT: "loot_event",
+    FeedEventType.AIRDROP_SPOTTED: "airdrop_spotted",
+    FeedEventType.FLARE_USED: "flare_used",
 }
 
 
@@ -103,6 +110,10 @@ class NormalizedEvent(BaseModel):
                     "victimTeam": self.victim_team or "Unknown",
                     "weapon": self.weapon or "Unknown",
                     "isKnock": self.event_type == FeedEventType.KNOCK,
+                    # Phase 24: optional spotter headshot flag
+                    # (payload["headshot"]=True). Icon-based in the real
+                    # killfeed, so a human tag is the truthful producer.
+                    "headshot": bool(self.payload.get("headshot", False)),
                 }
             )
         elif self.event_type == FeedEventType.TEAM_WIPE:

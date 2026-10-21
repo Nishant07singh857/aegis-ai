@@ -664,6 +664,140 @@ class DirectorService:
         await self._broadcast({"type": WS_SUGGESTION_TYPE, "data": outgoing})
         return outgoing
 
+    # ── phase-aware suggestions (Phase 24, W3) ─────────────────
+    # Pre-existing director suggestion sources: the match simulator's
+    # fight path in app/main.py (kill/knock -> killfeed_focus) — that
+    # fight logic is UNCHANGED and keeps owning mid-game. Added here:
+    # suggestions keyed by the live match phase (PhaseTracker), each
+    # stating its phase reason. In FULL_AUTO the director acts via
+    # system_publish elsewhere; these proposals only land in SEMI_AUTO
+    # (propose_suggestion's own gate), exactly like the fight source.
+
+    @staticmethod
+    def phase_suggestion_plan(phase: str) -> List[Dict[str, Any]]:
+        """Pure plan: suggestion dicts for a match phase (no I/O).
+
+        Each entry: {type, payload, reason, confidence}; every reason
+        names its phase. Final circle NEVER proposes map_cam (the
+        final-zone HARD lock already lives in the zone/director stack —
+        this plan aligns with it by preferring killfeed_focus, it does
+        not duplicate the lock).
+        """
+        phase = (phase or "").strip().lower()
+        if phase in ("plane", "parachute"):
+            return [
+                {
+                    "type": "scene",
+                    "payload": {"scene": "map_cam"},
+                    "reason": (
+                        f"[phase: {phase}] Drop phase — map-cam shows the "
+                        "flight path and where teams land."
+                    ),
+                    "confidence": 0.8,
+                },
+                {
+                    "type": "lower_third",
+                    "payload": {
+                        "visible": True,
+                        "title": "DROP WATCH",
+                        "subtitle": "Teams landing — contested drops incoming",
+                    },
+                    "reason": (
+                        f"[phase: {phase}] Drop phase — drop-watch graphic "
+                        "while teams land."
+                    ),
+                    "confidence": 0.7,
+                },
+            ]
+        if phase in ("loot", "early"):
+            return [
+                {
+                    "type": "scene",
+                    "payload": {"scene": "map_cam"},
+                    "reason": (
+                        f"[phase: {phase}] Loot/early phase — rotation-watch "
+                        "on map-cam: who rotates first, who holds centre."
+                    ),
+                    "confidence": 0.65,
+                }
+            ]
+        if phase == "mid_game":
+            # Existing fight logic owns mid-game suggestions; the phase
+            # layer deliberately adds nothing here (no duplication).
+            return []
+        if phase == "late_game":
+            return [
+                {
+                    "type": "scene",
+                    "payload": {"scene": "standings"},
+                    "reason": (
+                        "[phase: late_game] Late game (zone >=5 or alive <=16) "
+                        "— standings tell the points story now."
+                    ),
+                    "confidence": 0.75,
+                },
+                {
+                    "type": "lower_third",
+                    "payload": {
+                        "visible": True,
+                        "title": "WIN PROBABILITY",
+                        "subtitle": "Late game — WWCD race is live",
+                    },
+                    "reason": (
+                        "[phase: late_game] Late game — win-probability "
+                        "story graphic is relevant now."
+                    ),
+                    "confidence": 0.7,
+                },
+            ]
+        if phase == "final_circle":
+            return [
+                {
+                    "type": "scene",
+                    "payload": {"scene": "killfeed_focus"},
+                    "reason": (
+                        "[phase: final_circle] Final circle (alive <=8 or "
+                        "zone >=7) — killfeed focus lock; map-cam "
+                        "suggestions suppressed in the final circle."
+                    ),
+                    "confidence": 0.9,
+                }
+            ]
+        return []
+
+    async def propose_phase_suggestions(
+        self, phase_snapshot: Optional[Dict[str, Any]] = None
+    ) -> List[Dict[str, Any]]:
+        """Propose the phase-aware suggestions for the current phase.
+
+        ``phase_snapshot`` may carry {"phase": ...}; when omitted the
+        PhaseTracker singleton is queried. Returns the suggestions that
+        were actually created (empty outside SEMI_AUTO / for phases with
+        no plan — propose_suggestion enforces both honestly).
+        """
+        phase = None
+        if isinstance(phase_snapshot, dict):
+            phase = phase_snapshot.get("phase")
+        if not phase:
+            try:
+                from app.services.phase_tracker import phase_tracker
+
+                phase = phase_tracker.current_phase()
+            except Exception:  # pragma: no cover - defensive
+                phase = None
+        created: List[Dict[str, Any]] = []
+        for item in self.phase_suggestion_plan(str(phase or "")):
+            suggestion = await self.propose_suggestion(
+                suggestion_type=item["type"],
+                payload=item["payload"],
+                reason=item["reason"],
+                confidence=item["confidence"],
+                created_by="phase_tracker",
+            )
+            if suggestion is not None:
+                created.append(suggestion)
+        return created
+
     # ── scene hold enforcement (Phase 18, W3) ────────────────────
 
     async def enforce_scene_holds(self) -> bool:

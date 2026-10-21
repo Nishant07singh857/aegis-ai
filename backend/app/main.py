@@ -59,6 +59,14 @@ from app.api.v1.vision_intelligence.router import (
 # Phase 20: Global Predictive — live WWCD% prediction cards.
 from app.api.v1.predictions.router import router as predictions_router
 from app.api.v1.analytics_extra.router import router as analytics_extra_router
+# Phase 24 (W3): flight path / match clock / phase + POI read APIs.
+from app.api.v1.flight import router as flight_router
+from app.api.v1.poi import router as poi_router
+# Phase 24 (W6): live standings from the real event stream.
+from app.api.v1.live_standings import router as live_standings_router
+from app.services.flight_path import flight_path_service
+from app.services.match_clock import match_clock
+from app.services.phase_tracker import phase_tracker
 from app.api.v1.video.router import (
     router as video_router,
     multi_device_manager,
@@ -876,6 +884,78 @@ async def lifespan(app: FastAPI):
     else:
         app.state.vision_intelligence = None
 
+    # Phase 23 (W4): grenade trajectory estimator. Consumes kill/knock/
+    # utility/position events and stores an ESTIMATED thrower->explosion
+    # arc ONLY when both endpoints were actually reported in the same
+    # coordinate space (see docs/GRENADE_TRAJECTORY.md). Served at
+    # GET /api/v1/analysis/grenade-trajectories. A failure here never
+    # blocks startup; the endpoint then honestly returns an empty list.
+    if event_bus._running:
+        try:
+            from app.services.grenade_trajectory import (
+                build_grenade_trajectory_service,
+            )
+
+            grenade_trajectory = build_grenade_trajectory_service(event_bus)
+            grenade_trajectory.start()
+            app.state.grenade_trajectory = grenade_trajectory
+            logger.info("Grenade trajectory subscriber started (Phase 23)")
+        except Exception as e:
+            app.state.grenade_trajectory = None
+            logger.warning(f"Grenade trajectory subscriber unavailable: {e}")
+    else:
+        app.state.grenade_trajectory = None
+
+    # Phase 24 (W6): live stats & standings writer. Subscribes to
+    # kill/knock/revive/match_start/match_end/team_wipe on the bus,
+    # accumulates per-player stats, persists them provisionally through
+    # MatchService.record_player_stats (post-match manual entry wins —
+    # see services/live_stats.py), and serves the provisional live
+    # table at GET /api/v1/standings/live. A failure here never blocks
+    # startup; the endpoint then honestly reports the service as down.
+    if event_bus._running:
+        try:
+            from app.services.live_stats import build_live_stats_service
+
+            live_stats = build_live_stats_service(event_bus)
+            live_stats.start()
+            app.state.live_stats = live_stats
+            logger.info("Live stats writer started (Phase 24)")
+        except Exception as e:
+            app.state.live_stats = None
+            logger.warning(f"Live stats writer unavailable: {e}")
+    else:
+        app.state.live_stats = None
+
+    # Phase 24 (W3): match clock + phase tracker + flight-path bus wiring.
+    # The clock subscribes to match_start/match_end itself; the phase
+    # tracker feeds the (previously caller-less) ParachutePhaseDetector
+    # from alive/kill events + the clock; the flight service emits
+    # flight_path_set when the director sets a path. Failures never
+    # block startup — the flight endpoints then report honest empties.
+    if event_bus._running:
+        try:
+            match_clock.start(event_bus)
+            phase_tracker.start(event_bus)
+
+            async def _flight_publish(event_type: str, data: dict) -> None:
+                await event_bus.publish(
+                    event_type=event_type, data=data,
+                    source="flight_path", match_id=data.get("match_id"),
+                )
+
+            flight_path_service.set_publisher(_flight_publish)
+            app.state.match_clock = match_clock
+            app.state.phase_tracker = phase_tracker
+            logger.info("Match clock + phase tracker started (Phase 24)")
+        except Exception as e:
+            app.state.match_clock = None
+            app.state.phase_tracker = None
+            logger.warning(f"Match clock / phase tracker unavailable: {e}")
+    else:
+        app.state.match_clock = None
+        app.state.phase_tracker = None
+
     # Phase 14: register the vision-pipeline feed adapter so
     # GET /api/v1/feed/status lists "vision" as a source. It is NOT
     # started automatically -- capture begins only when an operator calls
@@ -947,6 +1027,17 @@ async def lifespan(app: FastAPI):
             _vi.stop()
         except Exception:
             pass
+    _ls = getattr(app.state, "live_stats", None)
+    if _ls is not None:
+        try:
+            _ls.stop()
+        except Exception:
+            pass
+    try:
+        phase_tracker.stop()
+        match_clock.stop()
+    except Exception:
+        pass
     if simulation_task:
         simulation_task.cancel()
     if chatter_task:
@@ -1035,6 +1126,11 @@ app.include_router(
 # Phase 20: Global Predictive — live WWCD% prediction cards (30s cadence).
 app.include_router(predictions_router, prefix="/api/v1", tags=["Predictions"])
 app.include_router(analytics_extra_router, prefix="/api/v1", tags=["Analytics"])
+# Phase 24 (W3): flight path / clock / phase + POI reads.
+app.include_router(flight_router, prefix="/api/v1", tags=["Flight"])
+app.include_router(poi_router, prefix="/api/v1", tags=["POI"])
+# Phase 24 (W6): live standings from the real event stream.
+app.include_router(live_standings_router, prefix="/api/v1", tags=["Standings"])
 
 @app.get("/")
 async def root():

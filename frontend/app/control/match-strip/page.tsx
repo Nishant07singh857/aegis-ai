@@ -29,7 +29,34 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { RequireRole } from "@/lib/guard";
+import { useAuth } from "@/lib/auth";
+import { apiFetch } from "@/lib/api";
 import { Badge, Card, EmptyState } from "@/components/ui";
+
+/* ---------- flight path (Phase 24: real director-set setter) ---------- */
+
+interface PoiRow {
+  name: string;
+  map: string;
+  x: number;
+  y: number;
+}
+
+interface FlightPathSnapshot {
+  is_set: boolean;
+  source: string | null;
+  map_id: string | null;
+  start_poi: string | null;
+  end_poi: string | null;
+}
+
+interface PredictedDrop {
+  team_id: string;
+  team_name: string | null;
+  usual_poi: string | null;
+  drop_count: number;
+  contested: boolean;
+}
 
 const STORAGE_PREFIX = "aegis:match-strip:v1:";
 
@@ -46,9 +73,9 @@ const CHECKLIST: ChecklistItem[] = [
   {
     id: "flight-path",
     label: "Flight path set",
-    hint: "Plane path planned for this match's map.",
-    href: "/broadcast/director",
-    linkLabel: "Director console",
+    hint: "Director-set in the Flight Path card below (real setter, POI database) — auto-checked when set.",
+    href: "#flight-path-card",
+    linkLabel: "Flight path card",
   },
   {
     id: "teams-ready",
@@ -123,7 +150,91 @@ function formatStartTime(iso: string): string {
 }
 
 function MatchStripInner() {
+  const { token } = useAuth();
   const [matchNumber, setMatchNumber] = useState(1);
+
+  /* flight path setter state (backend is the source of truth) */
+  const [flightPath, setFlightPath] = useState<FlightPathSnapshot | null>(null);
+  const [poiMaps, setPoiMaps] = useState<string[]>([]);
+  const [pois, setPois] = useState<PoiRow[]>([]);
+  const [fpMap, setFpMap] = useState("erangel");
+  const [fpStart, setFpStart] = useState("");
+  const [fpEnd, setFpEnd] = useState("");
+  const [fpBusy, setFpBusy] = useState(false);
+  const [fpMsg, setFpMsg] = useState<string | null>(null);
+  const [predicted, setPredicted] = useState<PredictedDrop[]>([]);
+
+  const loadFlight = useCallback(async () => {
+    if (!token) return;
+    try {
+      const res = await apiFetch<{ flight_path: FlightPathSnapshot }>(
+        "/api/v1/flight/path",
+        { token },
+      );
+      setFlightPath(res.flight_path);
+      if (res.flight_path.is_set) {
+        const pred = await apiFetch<{ predicted_drops: PredictedDrop[] }>(
+          "/api/v1/flight/predicted-drops",
+          { token },
+        );
+        setPredicted(pred.predicted_drops ?? []);
+      } else {
+        setPredicted([]);
+      }
+    } catch {
+      /* backend unreachable — the card shows its honest unset state */
+    }
+  }, [token]);
+
+  useEffect(() => {
+    void loadFlight();
+  }, [loadFlight]);
+
+  useEffect(() => {
+    if (!token) return;
+    void (async () => {
+      try {
+        const res = await apiFetch<{ maps: string[] }>("/api/v1/poi", { token });
+        setPoiMaps(res.maps ?? []);
+      } catch {
+        /* POI db unavailable — map stays a free choice below */
+      }
+    })();
+  }, [token]);
+
+  useEffect(() => {
+    if (!token || !fpMap) return;
+    void (async () => {
+      try {
+        const res = await apiFetch<{ pois: PoiRow[] }>(
+          `/api/v1/poi?map=${encodeURIComponent(fpMap)}`,
+          { token },
+        );
+        setPois(res.pois ?? []);
+      } catch {
+        setPois([]);
+      }
+    })();
+  }, [token, fpMap]);
+
+  const submitFlightPath = useCallback(async () => {
+    if (!token || !fpMap || !fpStart || !fpEnd) return;
+    setFpBusy(true);
+    setFpMsg(null);
+    try {
+      await apiFetch("/api/v1/flight/path", {
+        method: "POST",
+        token,
+        body: { map_id: fpMap, start_poi: fpStart, end_poi: fpEnd },
+      });
+      setFpMsg(`Flight path set (director-set): ${fpStart} → ${fpEnd} on ${fpMap}.`);
+      await loadFlight();
+    } catch (e) {
+      setFpMsg(e instanceof Error ? `Could not set flight path: ${e.message}` : "Could not set flight path.");
+    } finally {
+      setFpBusy(false);
+    }
+  }, [token, fpMap, fpStart, fpEnd, loadFlight]);
   const [startAt, setStartAt] = useState<string | null>(null);
   const [checks, setChecks] = useState<Record<string, boolean>>({});
   const [startInput, setStartInput] = useState("");
@@ -164,9 +275,15 @@ function MatchStripInner() {
     return Number.isNaN(t) ? null : t;
   }, [startAt]);
 
+  // Phase 24: "flight-path" is no longer a manual tick — it is checked
+  // by the REAL director-set flight path on the backend (below).
+  const effectiveChecks = useMemo<Record<string, boolean>>(
+    () => ({ ...checks, "flight-path": !!flightPath?.is_set }),
+    [checks, flightPath],
+  );
   const checkedCount = useMemo(
-    () => CHECKLIST.filter((item) => checks[item.id]).length,
-    [checks]
+    () => CHECKLIST.filter((item) => effectiveChecks[item.id]).length,
+    [effectiveChecks]
   );
   const allChecked = checkedCount === CHECKLIST.length;
 
@@ -319,7 +436,8 @@ function MatchStripInner() {
         <Card title="Pre-match checklist">
           <ol className="space-y-2">
             {CHECKLIST.map((item, i) => {
-              const done = !!checks[item.id];
+              const done = !!effectiveChecks[item.id];
+              const isFlight = item.id === "flight-path";
               return (
                 <li
                   key={item.id}
@@ -330,7 +448,11 @@ function MatchStripInner() {
                   }`}
                 >
                   <button
-                    onClick={() => toggle(item.id)}
+                    onClick={() => {
+                      if (!isFlight) toggle(item.id);
+                    }}
+                    disabled={isFlight}
+                    title={isFlight ? "Set via the Flight Path card below — not a manual tick" : undefined}
                     aria-pressed={done}
                     aria-label={`${done ? "Uncheck" : "Check"}: ${item.label}`}
                     className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-md border text-lg font-bold ${
@@ -370,6 +492,100 @@ function MatchStripInner() {
             </p>
           )}
         </Card>
+
+        {/* Flight Path setter (Phase 24) */}
+        <div id="flight-path-card">
+          <Card
+            title="Flight path (director-set)"
+            action={
+              flightPath?.is_set ? (
+                <Badge tone="green">DIRECTOR-SET</Badge>
+              ) : (
+                <Badge tone="slate">NOT SET</Badge>
+              )
+            }
+          >
+            {flightPath?.is_set ? (
+              <p className="mb-3 text-sm text-emerald-200">
+                Current: {flightPath.start_poi} → {flightPath.end_poi} on{" "}
+                {flightPath.map_id} (director-set)
+              </p>
+            ) : (
+              <p className="mb-3 text-sm text-zinc-400">
+                No flight path set for this match yet. The director sets it
+                at match start from the plane line on the observer feed —
+                AEGIS never detects or invents it.
+              </p>
+            )}
+            <div className="grid gap-2 sm:grid-cols-4">
+              <select
+                value={fpMap}
+                onChange={(e) => setFpMap(e.target.value)}
+                className="rounded border border-zinc-700 bg-[#121218] px-3 py-2 text-sm text-white focus:border-cyan-500 focus:outline-none"
+                aria-label="Map"
+              >
+                {(poiMaps.length > 0
+                  ? poiMaps
+                  : ["erangel", "miramar", "sanhok", "livik", "rondo"]
+                ).map((m) => (
+                  <option key={m} value={m}>
+                    {m}
+                  </option>
+                ))}
+              </select>
+              <select
+                value={fpStart}
+                onChange={(e) => setFpStart(e.target.value)}
+                className="rounded border border-zinc-700 bg-[#121218] px-3 py-2 text-sm text-white focus:border-cyan-500 focus:outline-none"
+                aria-label="Start POI"
+              >
+                <option value="">Start POI…</option>
+                {pois.map((p) => (
+                  <option key={p.name} value={p.name}>
+                    {p.name}
+                  </option>
+                ))}
+              </select>
+              <select
+                value={fpEnd}
+                onChange={(e) => setFpEnd(e.target.value)}
+                className="rounded border border-zinc-700 bg-[#121218] px-3 py-2 text-sm text-white focus:border-cyan-500 focus:outline-none"
+                aria-label="End POI"
+              >
+                <option value="">End POI…</option>
+                {pois.map((p) => (
+                  <option key={p.name} value={p.name}>
+                    {p.name}
+                  </option>
+                ))}
+              </select>
+              <button
+                onClick={() => void submitFlightPath()}
+                disabled={fpBusy || !fpStart || !fpEnd}
+                className="rounded bg-cyan-600 px-4 py-2 text-sm font-semibold text-white hover:bg-cyan-500 disabled:opacity-40"
+              >
+                {fpBusy ? "Setting…" : "Set flight path"}
+              </button>
+            </div>
+            {fpMsg && <p className="mt-2 text-sm text-zinc-300">{fpMsg}</p>}
+            {predicted.length > 0 && (
+              <div className="mt-4">
+                <div className="mb-1 font-mono text-[11px] uppercase tracking-[0.18em] text-zinc-400">
+                  Predicted drops on this path (recorded history)
+                </div>
+                <ul className="space-y-1">
+                  {predicted.map((p) => (
+                    <li key={p.team_id} className="text-sm text-zinc-300">
+                      {p.team_name ?? p.team_id} — usually{" "}
+                      {p.usual_poi ?? "—"} ({p.drop_count} recorded)
+                      {p.contested ? " · contested history" : ""}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+          </Card>
+        </div>
       </div>
     </div>
   );

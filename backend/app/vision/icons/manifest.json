@@ -1,0 +1,653 @@
+{
+ "library": "AEGIS Phase 23 W1 - real killfeed icon templates harvested from real VOD frames",
+ "frame_resolution": "640x360 (native VOD resolution; crops are unscaled)",
+ "canonical_policy": "Canonical template = RAW native crop exactly as it appears in the broadcast frame. NO brightness/contrast enhancement is applied anywhere. *_up4x.png files are plain INTER_LINEAR resizes of the raw crop for matcher convenience only.",
+ "split": {
+  "harvest_vods": [
+   "bmsd2026_gf_day1",
+   "bmsd2026_gf_day2",
+   "pmgc2025_gf_day1"
+  ],
+  "heldout_vods": [
+   "bmsd2026_gf_day3",
+   "bmps2026_gf_day1",
+   "pmgc2025_gf_day2",
+   "pmgo2025_day1"
+  ],
+  "note": "Templates were harvested ONLY from harvest_vods. Held-out VOD frames were never used for templates; they form the W5 evaluation set in data/phase23_work/heldout/."
+ },
+ "quality_definition": {
+  "per_template": "mean_luminance and contrast_std are measured on the native template crop (grayscale). Real broadcast icons are dull: most templates sit at mean luminance 60-140 with the glyph itself well below pure white.",
+  "heldout_tag": "See heldout/labels.csv quality column and LAYOUT_REPORT.md section 6 / manifest heldout_quality_thresholds (filled by build step)."
+ },
+ "templates": [
+  {
+   "file": "ar_a.png",
+   "upscaled_variant_file": "ar_a_up4x.png",
+   "canonical": "raw",
+   "weapon_id": "ar_a",
+   "display_name": "AR silhouette A",
+   "category": "ar",
+   "source": {
+    "vod": "bmsd2026_gf_day1",
+    "timestamp_sec": 2996.0,
+    "entry_id": "d1_e0031_t2996"
+   },
+   "native_size_px": [
+    33,
+    9
+   ],
+   "mean_luminance": 116.1,
+   "contrast_std": 46.8,
+   "quality_notes": "Flat top line, straight magazine mid-body, slim barrel. M416-like profile; model-level ID not reliable at 360p."
+  },
+  {
+   "file": "ar_a_v2.png",
+   "upscaled_variant_file": "ar_a_v2_up4x.png",
+   "canonical": "raw_variant_instance",
+   "weapon_id": "ar_a",
+   "display_name": "AR silhouette A",
+   "category": "ar",
+   "source": {
+    "vod": "bmsd2026_gf_day1",
+    "timestamp_sec": 2772.0,
+    "entry_id": "d1_e0010_t2772"
+   },
+   "native_size_px": [
+    37,
+    7
+   ],
+   "mean_luminance": 80.3,
+   "contrast_std": 78.4,
+   "quality_notes": "Second instance, brighter bar."
+  },
+  {
+   "file": "ar_a_v3.png",
+   "upscaled_variant_file": "ar_a_v3_up4x.png",
+   "canonical": "raw_variant_instance",
+   "weapon_id": "ar_a",
+   "display_name": "AR silhouette A",
+   "category": "ar",
+   "source": {
+    "vod": "bmsd2026_gf_day1",
+    "timestamp_sec": 3554.0,
+    "entry_id": "d1_e0053_t3554"
+   },
+   "native_size_px": [
+    42,
+    7
+   ],
+   "mean_luminance": 87.3,
+   "contrast_std": 54.6,
+   "quality_notes": "Long-barrel instance of the same silhouette family."
+  },
+  {
+   "file": "ar_b.png",
+   "upscaled_variant_file": "ar_b_up4x.png",
+   "canonical": "raw",
+   "weapon_id": "ar_b",
+   "display_name": "AR silhouette B",
+   "category": "ar",
+   "source": {
+    "vod": "bmsd2026_gf_day1",
+    "timestamp_sec": 2941.0,
+    "entry_id": "d1_e0026_t2941"
+   },
+   "native_size_px": [
+    36,
+    8
+   ],
+   "mean_luminance": 64.2,
+   "contrast_std": 79.2,
+   "quality_notes": "Longer handguard and barrel, slanted magazine. Beryl M762 / AKM-like profile; model-level ID not reliable at 360p."
+  },
+  {
+   "file": "ar_b_v2.png",
+   "upscaled_variant_file": "ar_b_v2_up4x.png",
+   "canonical": "raw_variant_instance",
+   "weapon_id": "ar_b",
+   "display_name": "AR silhouette B",
+   "category": "ar",
+   "source": {
+    "vod": "bmsd2026_gf_day1",
+    "timestamp_sec": 3055.0,
+    "entry_id": "d1_e0034_t3055"
+   },
+   "native_size_px": [
+    41,
+    7
+   ],
+   "mean_luminance": 87.2,
+   "contrast_std": 76.3,
+   "quality_notes": "Second instance."
+  },
+  {
+   "file": "ar_b_v3.png",
+   "upscaled_variant_file": "ar_b_v3_up4x.png",
+   "canonical": "raw_variant_instance",
+   "weapon_id": "ar_b",
+   "display_name": "AR silhouette B",
+   "category": "ar",
+   "source": {
+    "vod": "bmsd2026_gf_day1",
+    "timestamp_sec": 4090.0,
+    "entry_id": "d1_e0083_t4090"
+   },
+   "native_size_px": [
+    41,
+    7
+   ],
+   "mean_luminance": 56.1,
+   "contrast_std": 64.2,
+   "quality_notes": "Instance from a headshot entry."
+  },
+  {
+   "file": "smg_compact.png",
+   "upscaled_variant_file": "smg_compact_up4x.png",
+   "canonical": "raw",
+   "weapon_id": "smg_compact",
+   "display_name": "Compact SMG silhouette",
+   "category": "smg",
+   "source": {
+    "vod": "bmsd2026_gf_day1",
+    "timestamp_sec": 3530.0,
+    "entry_id": "d1_e0050_t3530"
+   },
+   "native_size_px": [
+    25,
+    8
+   ],
+   "mean_luminance": 75.3,
+   "contrast_std": 73.3,
+   "quality_notes": "Short thick body, magazine+grip cluster at front half, short barrel. UMP45/Vector-class profile; exact model not resolvable at 360p."
+  },
+  {
+   "file": "smg_compact_v2.png",
+   "upscaled_variant_file": "smg_compact_v2_up4x.png",
+   "canonical": "raw_variant_instance",
+   "weapon_id": "smg_compact",
+   "display_name": "Compact SMG silhouette",
+   "category": "smg",
+   "source": {
+    "vod": "bmsd2026_gf_day1",
+    "timestamp_sec": 3051.0,
+    "entry_id": "d1_e0033_t3051"
+   },
+   "native_size_px": [
+    26,
+    8
+   ],
+   "mean_luminance": 71.3,
+   "contrast_std": 75.8,
+   "quality_notes": "Second instance."
+  },
+  {
+   "file": "sniper_bolt.png",
+   "upscaled_variant_file": "sniper_bolt_up4x.png",
+   "canonical": "raw",
+   "weapon_id": "sniper_bolt",
+   "display_name": "Bolt-action sniper silhouette",
+   "category": "sniper",
+   "source": {
+    "vod": "bmsd2026_gf_day1",
+    "timestamp_sec": 2670.0,
+    "entry_id": "d1_e0003_t2670"
+   },
+   "native_size_px": [
+    52,
+    6
+   ],
+   "mean_luminance": 70.1,
+   "contrast_std": 79.1,
+   "quality_notes": "Very long thin barrel, small receiver. Kar98k/M24/AWM/Win94 share this profile at 360p and cannot be separated."
+  },
+  {
+   "file": "dmr_long.png",
+   "upscaled_variant_file": "dmr_long_up4x.png",
+   "canonical": "raw",
+   "weapon_id": "dmr_long",
+   "display_name": "Long DMR/LMG-class silhouette",
+   "category": "dmr",
+   "source": {
+    "vod": "bmsd2026_gf_day1",
+    "timestamp_sec": 2845.0,
+    "entry_id": "d1_e0018_t2845"
+   },
+   "native_size_px": [
+    51,
+    6
+   ],
+   "mean_luminance": 62.4,
+   "contrast_std": 73.5,
+   "quality_notes": "Thick receiver + long barrel (~51 px). DMR (SKS/Mini14-class) or LMG profile; not separable at 360p."
+  },
+  {
+   "file": "frag_grenade.png",
+   "upscaled_variant_file": "frag_grenade_up4x.png",
+   "canonical": "raw",
+   "weapon_id": "frag_grenade",
+   "display_name": "Frag grenade",
+   "category": "throwable_frag",
+   "source": {
+    "vod": "bmsd2026_gf_day1",
+    "timestamp_sec": 3801.0,
+    "entry_id": "d1_e0068_t3801"
+   },
+   "native_size_px": [
+    15,
+    11
+   ],
+   "mean_luminance": 90.6,
+   "contrast_std": 80.1,
+   "quality_notes": "Round grenade body with pull-ring at top. Confident ID."
+  },
+  {
+   "file": "frag_grenade_v2.png",
+   "upscaled_variant_file": "frag_grenade_v2_up4x.png",
+   "canonical": "raw_variant_instance",
+   "weapon_id": "frag_grenade",
+   "display_name": "Frag grenade",
+   "category": "throwable_frag",
+   "source": {
+    "vod": "bmsd2026_gf_day1",
+    "timestamp_sec": 3680.0,
+    "entry_id": "d1_e0063_t3680"
+   },
+   "native_size_px": [
+    15,
+    11
+   ],
+   "mean_luminance": 104.8,
+   "contrast_std": 74.9,
+   "quality_notes": "Second instance on a bright bar."
+  },
+  {
+   "file": "unknown_dome.png",
+   "upscaled_variant_file": "unknown_dome_up4x.png",
+   "canonical": "raw",
+   "weapon_id": "unknown_dome",
+   "display_name": "Unknown dome icon",
+   "category": "other",
+   "source": {
+    "vod": "bmsd2026_gf_day1",
+    "timestamp_sec": 2945.0,
+    "entry_id": "d1_e0027_t2945"
+   },
+   "native_size_px": [
+    19,
+    10
+   ],
+   "mean_luminance": 64.2,
+   "contrast_std": 74.1,
+   "quality_notes": "UNRESOLVED: dome on a wide flat base with a top knob. Candidates: vehicle kill (side-view car: cabin+body) or smoke-grenade canister. Seen knocking (t2945) and as the match-winning final blow (t~4300, same VOD). Do NOT treat as a named weapon until corroborated on camera."
+  },
+  {
+   "file": "unknown_dome_v2.png",
+   "upscaled_variant_file": "unknown_dome_v2_up4x.png",
+   "canonical": "raw_variant_instance",
+   "weapon_id": "unknown_dome",
+   "display_name": "Unknown dome icon",
+   "category": "other",
+   "source": {
+    "vod": "bmsd2026_gf_day1",
+    "timestamp_sec": 4135.0,
+    "entry_id": "d1_e0084_t4135"
+   },
+   "native_size_px": [
+    16,
+    10
+   ],
+   "mean_luminance": 106.2,
+   "contrast_std": 61.5,
+   "quality_notes": "Second instance."
+  },
+  {
+   "file": "pistol_t.png",
+   "upscaled_variant_file": "pistol_t_up4x.png",
+   "canonical": "raw",
+   "weapon_id": "pistol_t",
+   "display_name": "Pistol silhouette (T-profile)",
+   "category": "pistol",
+   "source": {
+    "vod": "bmsd2026_gf_day1",
+    "timestamp_sec": 2666.0,
+    "entry_id": "d1_e0002_t2666"
+   },
+   "native_size_px": [
+    15,
+    8
+   ],
+   "mean_luminance": 84.7,
+   "contrast_std": 84.2,
+   "quality_notes": "Small T-shaped silhouette: horizontal slide + grip stem. A pistol-class icon; exact model not resolvable at 360p."
+  },
+  {
+   "file": "unknown_diagonal.png",
+   "upscaled_variant_file": "unknown_diagonal_up4x.png",
+   "canonical": "raw",
+   "weapon_id": "unknown_diagonal",
+   "display_name": "Unknown diagonal blade-like icon",
+   "category": "other",
+   "source": {
+    "vod": "bmsd2026_gf_day1",
+    "timestamp_sec": 3900.0,
+    "entry_id": "d1_e0077_t3900"
+   },
+   "native_size_px": [
+    31,
+    7
+   ],
+   "mean_luminance": 72.0,
+   "contrast_std": 68.6,
+   "quality_notes": "UNRESOLVED: long thin diagonal blade-like glyph. Candidate: melee machete icon. Rare (one cluster of ~4 in day1)."
+  },
+  {
+   "file": "unknown_wheel.png",
+   "upscaled_variant_file": "unknown_wheel_up4x.png",
+   "canonical": "raw",
+   "weapon_id": "unknown_wheel",
+   "display_name": "Unknown wheel icon",
+   "category": "other",
+   "source": {
+    "vod": "bmsd2026_gf_day1",
+    "timestamp_sec": 4150.0,
+    "entry_id": "d1_e0088_t4150"
+   },
+   "native_size_px": [
+    17,
+    13
+   ],
+   "mean_luminance": 71.2,
+   "contrast_std": 19.6,
+   "quality_notes": "UNRESOLVED: circle with spokes and a top stem. Candidates: frying pan (front view, handle up) or steering wheel (vehicle). Rare."
+  },
+  {
+   "file": "marker_knock.png",
+   "upscaled_variant_file": "marker_knock_up4x.png",
+   "canonical": "raw",
+   "weapon_id": "marker_knock",
+   "display_name": "Knock (DBNO) marker",
+   "category": "other",
+   "source": {
+    "vod": "bmsd2026_gf_day1",
+    "timestamp_sec": 3530.0,
+    "entry_id": "d1_e0050_t3530"
+   },
+   "native_size_px": [
+    17,
+    8
+   ],
+   "mean_luminance": 61.0,
+   "contrast_std": 43.2,
+   "quality_notes": "Marker-slot glyph: crawling/knocked player figure. Present in the marker slot = victim knocked (DBNO), not eliminated. Verified against a final-blow entry (no marker) and a victim reappearing after a marked entry."
+  },
+  {
+   "file": "marker_knock_v2.png",
+   "upscaled_variant_file": "marker_knock_v2_up4x.png",
+   "canonical": "raw_variant_instance",
+   "weapon_id": "marker_knock",
+   "display_name": "Knock (DBNO) marker",
+   "category": "other",
+   "source": {
+    "vod": "bmsd2026_gf_day1",
+    "timestamp_sec": 3680.0,
+    "entry_id": "d1_e0063_t3680"
+   },
+   "native_size_px": [
+    17,
+    8
+   ],
+   "mean_luminance": 91.3,
+   "contrast_std": 65.1,
+   "quality_notes": "Larger clear instance next to a frag-grenade entry."
+  },
+  {
+   "file": "marker_knock_v3.png",
+   "upscaled_variant_file": "marker_knock_v3_up4x.png",
+   "canonical": "raw_variant_instance",
+   "weapon_id": "marker_knock",
+   "display_name": "Knock (DBNO) marker",
+   "category": "other",
+   "source": {
+    "vod": "bmsd2026_gf_day1",
+    "timestamp_sec": 4049.0,
+    "entry_id": "d1_e0082_t4049"
+   },
+   "native_size_px": [
+    16,
+    7
+   ],
+   "mean_luminance": 47.6,
+   "contrast_std": 20.1,
+   "quality_notes": "Instance showing the round head dot of the figure."
+  },
+  {
+   "file": "marker_headshot.png",
+   "upscaled_variant_file": "marker_headshot_up4x.png",
+   "canonical": "raw",
+   "weapon_id": "marker_headshot",
+   "display_name": "Headshot marker",
+   "category": "other",
+   "source": {
+    "vod": "bmsd2026_gf_day1",
+    "timestamp_sec": 4090.0,
+    "entry_id": "d1_e0083_t4090"
+   },
+   "native_size_px": [
+    14,
+    8
+   ],
+   "mean_luminance": 48.9,
+   "contrast_std": 41.6,
+   "quality_notes": "Marker-slot glyph: white ring with crosshair spokes + centre dot. Present = headshot. NOT to be confused with coloured team logos (e.g. GodLike gold ring/diamond) that sit in the victim-logo slot."
+  },
+  {
+   "file": "marker_headshot_v2.png",
+   "upscaled_variant_file": "marker_headshot_v2_up4x.png",
+   "canonical": "raw_variant_instance",
+   "weapon_id": "marker_headshot",
+   "display_name": "Headshot marker",
+   "category": "other",
+   "source": {
+    "vod": "bmsd2026_gf_day1",
+    "timestamp_sec": 3554.0,
+    "entry_id": "d1_e0053_t3554"
+   },
+   "native_size_px": [
+    14,
+    8
+   ],
+   "mean_luminance": 96.7,
+   "contrast_std": 54.1,
+   "quality_notes": "Second instance."
+  },
+  {
+   "file": "unknown_burst.png",
+   "upscaled_variant_file": "unknown_burst_up4x.png",
+   "canonical": "raw",
+   "weapon_id": "unknown_burst",
+   "display_name": "Unknown explosion-burst icon",
+   "category": "other",
+   "source": {
+    "vod": "bmsd2026_gf_day2",
+    "timestamp_sec": 2706.0,
+    "entry_id": "d2_e0049_t2706"
+   },
+   "native_size_px": [
+    19,
+    9
+   ],
+   "mean_luminance": 86.9,
+   "contrast_std": 56.7,
+   "quality_notes": "UNRESOLVED: spiky burst glyph with a bright core. Candidates: explosion kill (fuel/vehicle explosion) or red-zone. Single sighting cluster in day2."
+  },
+  {
+   "file": "unknown_shotgunlike.png",
+   "upscaled_variant_file": "unknown_shotgunlike_up4x.png",
+   "canonical": "raw",
+   "weapon_id": "unknown_shotgunlike",
+   "display_name": "Unknown thick wedge gun icon",
+   "category": "other",
+   "source": {
+    "vod": "bmsd2026_gf_day2",
+    "timestamp_sec": 3552.0,
+    "entry_id": "d2_e0076_t3552"
+   },
+   "native_size_px": [
+    26,
+    9
+   ],
+   "mean_luminance": 62.8,
+   "contrast_std": 63.6,
+   "quality_notes": "UNRESOLVED: thick wedge-shaped gun silhouette angled down-right. Shotgun-class candidate (S12K/S686 bulk) but a blurred LMG/DMR cannot be excluded at 360p."
+  },
+  {
+   "file": "marker_headshot_v3.png",
+   "upscaled_variant_file": "marker_headshot_v3_up4x.png",
+   "canonical": "raw_variant_instance",
+   "weapon_id": "marker_headshot",
+   "display_name": "Headshot marker",
+   "category": "other",
+   "source": {
+    "vod": "bmsd2026_gf_day2",
+    "timestamp_sec": 2689.0,
+    "entry_id": "d2_e0046_t2689"
+   },
+   "native_size_px": [
+    16,
+    8
+   ],
+   "mean_luminance": 83.0,
+   "contrast_std": 41.2,
+   "quality_notes": "Diamond-phase render of the headshot ring (same icon, sub-pixel phase). W2 must accept both phases."
+  },
+  {
+   "file": "marker_knock_v4.png",
+   "upscaled_variant_file": "marker_knock_v4_up4x.png",
+   "canonical": "raw_variant_instance",
+   "weapon_id": "marker_knock",
+   "display_name": "Knock (DBNO) marker",
+   "category": "other",
+   "source": {
+    "vod": "bmsd2026_gf_day2",
+    "timestamp_sec": 2717.0,
+    "entry_id": "d2_e0052_t2717"
+   },
+   "native_size_px": [
+    13,
+    8
+   ],
+   "mean_luminance": 61.5,
+   "contrast_std": 53.4,
+   "quality_notes": "Large clear instance of the crawling figure (day2)."
+  },
+  {
+   "file": "unknown_wheel_v2.png",
+   "upscaled_variant_file": "unknown_wheel_v2_up4x.png",
+   "canonical": "raw_variant_instance",
+   "weapon_id": "unknown_wheel",
+   "display_name": "Unknown wheel icon",
+   "category": "other",
+   "source": {
+    "vod": "bmsd2026_gf_day2",
+    "timestamp_sec": 3400.0,
+    "entry_id": "d2_e0073_t3400"
+   },
+   "native_size_px": [
+    16,
+    12
+   ],
+   "mean_luminance": 78.5,
+   "contrast_std": 52.9,
+   "quality_notes": "Second instance (day2). All four sightings share the same killer name (Piry...) - a player-signature cause; still unresolved."
+  },
+  {
+   "file": "ar_b_v4.png",
+   "upscaled_variant_file": "ar_b_v4_up4x.png",
+   "canonical": "raw_variant_instance",
+   "weapon_id": "ar_b",
+   "display_name": "AR silhouette B",
+   "category": "ar",
+   "source": {
+    "vod": "bmsd2026_gf_day2",
+    "timestamp_sec": 2689.0,
+    "entry_id": "d2_e0046_t2689"
+   },
+   "native_size_px": [
+    38,
+    7
+   ],
+   "mean_luminance": 110.2,
+   "contrast_std": 80.1,
+   "quality_notes": "Day2 instance from a headshot entry."
+  }
+ ],
+ "heldout_quality": {
+  "definition": "Per-crop tag in data/phase23_work/heldout/labels.csv. Icon crop = the entry's best (max-contrast) auto candidate crop, else a fixed slot band. metric_dull = contrast std < 55 OR Laplacian sharpness < 7000. visual_dull = harvester's clear label == 0. quality = 'dull' if metric_dull OR visual_dull, else 'clean' (deliberately pessimistic OR; no upward overrides were applied).",
+  "heldout_distribution": {
+   "n_entries": 465,
+   "dull": 320,
+   "clean": 145,
+   "icon_luminance": {
+    "min": 44.5,
+    "p25": 72.5,
+    "median": 81.0,
+    "p75": 91.8,
+    "max": 153.7
+   },
+   "icon_contrast_std": {
+    "min": 22.0,
+    "p25": 47.5,
+    "median": 54.1,
+    "p75": 61.9,
+    "max": 89.6
+   },
+   "icon_sharpness_laplacian_var": {
+    "min": 267.5,
+    "p25": 6040.4,
+    "median": 7798.9,
+    "p75": 9612.3,
+    "max": 18767.3
+   }
+  },
+  "heldout_by_vod": {
+   "bmsd2026_gf_day3": 124,
+   "bmps2026_gf_day1": 162,
+   "pmgc2025_gf_day2": 76,
+   "pmgo2025_day1": 103
+  },
+  "heldout_by_weapon": {
+   "ar_b": 182,
+   "smg_compact": 73,
+   "unknown_dome": 63,
+   "ar_a": 57,
+   "frag_grenade": 34,
+   "lmg_box": 14,
+   "unknown_wheel": 10,
+   "sniper_bolt": 8,
+   "bullpup": 5,
+   "unknown_burst": 5,
+   "unknown_lmgT": 4,
+   "vehicle": 3,
+   "dmr_long": 3,
+   "unknown_shotgunlike": 3,
+   "unknown_diagonal": 1
+  },
+  "classes_in_heldout_without_library_template": [
+   "bullpup",
+   "lmg_box",
+   "vehicle",
+   "unknown_lmgT",
+   "note: these silhouette families were only observed in held-out VODs; by the split rule they have no template. W5 should score them as unseen-class cases."
+  ]
+ },
+ "template_library_dullness": {
+  "note": "Per-template native-crop mean luminance / contrast std are in each template record.",
+  "mean_luminance_range": [
+   47.6,
+   116.1
+  ],
+  "interpretation": "The library itself is dull: most canonical templates sit at mean luminance 55-105 with the icon glyph only ~30-60 gray levels above its bar background. Matchers must be tuned on these raw values, not on enhanced imagery."
+ },
+ "heldout_tag": "See heldout/labels.csv quality column, LAYOUT_REPORT.md section 6, and manifest key 'heldout_quality' for the operational dull/clean definition, thresholds and distribution."
+}

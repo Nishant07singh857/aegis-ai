@@ -54,7 +54,10 @@ type FeedEventType =
   | "match_start"
   | "match_end"
   | "standings_update"
-  | "commentary";
+  | "commentary"
+  | "utility"
+  | "airdrop_spotted"
+  | "flare_used";
 
 interface LoggedEvent {
   key: string;
@@ -116,6 +119,7 @@ function SpotterInner() {
   const [victimTeam, setVictimTeam] = useState("");
   const [weapon, setWeapon] = useState("M416");
   const [isKnock, setIsKnock] = useState(false);
+  const [isHeadshot, setIsHeadshot] = useState(false);
   const [matchId, setMatchId] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [quickBusy, setQuickBusy] = useState<FeedEventType | null>(null);
@@ -233,15 +237,20 @@ function SpotterInner() {
         victim: v,
         victim_team: victimTeam,
         weapon,
+        // Phase 24: headshot is an icon in the real killfeed (never
+        // OCR text) — the spotter toggle is its truthful producer.
+        // Travels as an optional payload flag on the kill/knock event.
+        payload: { headshot: isHeadshot },
       });
       const label = `${k}|${v}`;
       logEvent(isKnock ? "knock" : "kill", label);
       pushToast(
         "ok",
-        `${isKnock ? "Knock" : "Kill"} logged: ${k} (${killerTeam}) → ${v} (${victimTeam}) · ${weapon}`,
+        `${isKnock ? "Knock" : "Kill"} logged: ${k} (${killerTeam}) → ${v} (${victimTeam}) · ${weapon}${isHeadshot ? " · HEADSHOT" : ""}`,
       );
       setKiller("");
       setVictim("");
+      setIsHeadshot(false);
     } catch (e) {
       pushToast("err", `Ingest failed: ${actionErrorMessage(e)}`);
     } finally {
@@ -254,10 +263,35 @@ function SpotterInner() {
     victimTeam,
     weapon,
     isKnock,
+    isHeadshot,
     ingest,
     logEvent,
     pushToast,
   ]);
+
+  /** One-tap tag buttons (Phase 24): airdrop / flare / smoke-utility.
+   *  These go through the same feed ingest; smoke reuses the existing
+   *  `utility` event type with payload utility_type="smoke" (vision
+   *  also detects smoke — the spotter tag is the human backup). */
+  const tagIngest = useCallback(
+    async (
+      eventType: FeedEventType,
+      label: string,
+      fields: Record<string, unknown> = {},
+    ) => {
+      setQuickBusy(eventType);
+      try {
+        await ingest(eventType, fields);
+        logEvent(eventType, label);
+        pushToast("ok", `${label} tagged.`);
+      } catch (e) {
+        pushToast("err", `Ingest failed: ${actionErrorMessage(e)}`);
+      } finally {
+        setQuickBusy(null);
+      }
+    },
+    [ingest, logEvent, pushToast],
+  );
 
   const quickIngest = useCallback(
     async (eventType: FeedEventType, label: string) => {
@@ -314,6 +348,42 @@ function SpotterInner() {
           </div>
         </Card>
 
+        {/* spotter tags (Phase 24: airdrop / flare / smoke) */}
+        <Card title="Spotter tags" className="mb-4">
+          <div className="grid grid-cols-3 gap-2">
+            <button
+              type="button"
+              disabled={quickBusy !== null}
+              onClick={() =>
+                void tagIngest("airdrop_spotted", "Airdrop spotted")
+              }
+              className="rounded-xl border border-white/15 bg-white/5 px-2 py-4 font-mono text-[11px] font-bold uppercase tracking-wider text-zinc-200 transition-colors hover:border-[#00f0ff]/50 hover:text-[#00f0ff] disabled:cursor-not-allowed disabled:opacity-40 max-md:min-h-[56px]"
+            >
+              {quickBusy === "airdrop_spotted" ? "Sending…" : "📦 Airdrop"}
+            </button>
+            <button
+              type="button"
+              disabled={quickBusy !== null}
+              onClick={() => void tagIngest("flare_used", "Flare used")}
+              className="rounded-xl border border-white/15 bg-white/5 px-2 py-4 font-mono text-[11px] font-bold uppercase tracking-wider text-zinc-200 transition-colors hover:border-[#00f0ff]/50 hover:text-[#00f0ff] disabled:cursor-not-allowed disabled:opacity-40 max-md:min-h-[56px]"
+            >
+              {quickBusy === "flare_used" ? "Sending…" : "🔴 Flare"}
+            </button>
+            <button
+              type="button"
+              disabled={quickBusy !== null}
+              onClick={() =>
+                void tagIngest("utility", "Smoke / utility", {
+                  payload: { utility_type: "smoke" },
+                })
+              }
+              className="rounded-xl border border-white/15 bg-white/5 px-2 py-4 font-mono text-[11px] font-bold uppercase tracking-wider text-zinc-200 transition-colors hover:border-[#00f0ff]/50 hover:text-[#00f0ff] disabled:cursor-not-allowed disabled:opacity-40 max-md:min-h-[56px]"
+            >
+              {quickBusy === "utility" ? "Sending…" : "💨 Smoke"}
+            </button>
+          </div>
+        </Card>
+
         {/* kill form */}
         <Card title="Log kill / knock" className="mb-4">
           {teamsLoading ? (
@@ -357,6 +427,23 @@ function SpotterInner() {
                     Knock
                   </button>
                 </div>
+              </div>
+
+              {/* headshot toggle (Phase 24) */}
+              <div>
+                <span className={labelClass}>Headshot?</span>
+                <button
+                  type="button"
+                  onClick={() => setIsHeadshot((v) => !v)}
+                  aria-pressed={isHeadshot}
+                  className={`w-full rounded-xl border px-4 py-3.5 font-mono text-sm font-bold uppercase tracking-[0.15em] transition-colors max-md:min-h-[56px] ${
+                    isHeadshot
+                      ? "border-rose-400/60 bg-rose-400/15 text-rose-200"
+                      : "border-white/15 bg-white/5 text-zinc-400 hover:border-white/30"
+                  }`}
+                >
+                  🎯 Headshot {isHeadshot ? "— ON" : "— OFF"}
+                </button>
               </div>
 
               <div className="grid gap-4 sm:grid-cols-2">

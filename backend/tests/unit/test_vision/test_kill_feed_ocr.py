@@ -38,7 +38,9 @@ class TestKillFeedOCRShim:
         assert KillFeedOCR is KillFeedDetector
 
     def test_default_region_preserved(self):
-        assert DEFAULT_KILL_FEED_REGION == (0.62, 0.02, 0.99, 0.30)
+        # Phase 23 W1 measured the real killfeed TOP-LEFT (LAYOUT_REPORT
+        # §2); the old top-right tuple pointed at the minimap/standings.
+        assert DEFAULT_KILL_FEED_REGION == (0.0, 0.24, 0.34, 0.52)
 
     def test_weapon_reference_list_exported(self):
         assert "m416" in KNOWN_WEAPON_TEXT
@@ -89,7 +91,8 @@ class TestKillFeedParsing:
             assert detector.parse_text(text, 90.0) is None, text
 
     def test_weapon_is_honestly_none(self, detector):
-        # Weapon icons are never template-matched or guessed.
+        # The TEXT path never invents a weapon: broadcast weapons are
+        # icons, classified only by the Phase 23 layout/icon path.
         entry = detector.parse_text("AX eliminated BX", 90.0)
         assert entry is not None and entry.weapon is None
 

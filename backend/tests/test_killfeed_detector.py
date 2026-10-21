@@ -1,8 +1,10 @@
 """Phase 14 W2 — KillFeedDetector verification.
 
 SYNTHETIC test: renders fake BGMI-style kill-feed text (white text on a
-dark translucent strip in the top-right corner) onto test frames with PIL,
-runs the Tesseract-based detector, and measures end-to-end parse accuracy.
+dark translucent strip in the top-left kill-feed band — the real
+location measured by Phase 23 W1; the strip is a TEXT feed, so the
+legacy action-word path is what must read it) onto test frames with
+PIL, runs the Tesseract-based detector, and measures parse accuracy.
 
 Also covers:
   * dedup: same kill across 10 frames -> exactly 1 emitted event
@@ -25,7 +27,7 @@ from PIL import Image, ImageDraw, ImageFont
 from app.vision.detectors.killfeed import KillFeedDetector
 
 W, H = 1280, 720
-REGION = (0.62, 0.02, 0.99, 0.30)  # matches DEFAULT_KILL_FEED_REGION
+REGION = (0.0, 0.24, 0.34, 0.52)  # matches DEFAULT_KILL_FEED_REGION (Phase 23: top-left)
 
 _CASES = [
     # (rendered line, expected killer, expected victim, expected type)
@@ -54,7 +56,7 @@ def _font(size: int):
 
 
 def render_frame(lines, seed=0):
-    """Render a BGMI-style frame: dark bg + top-right translucent strip + white text."""
+    """Render a BGMI-style frame: dark bg + top-left translucent strip + white text."""
     rng = np.random.RandomState(seed)
     bg = np.full((H, W, 3), 26, dtype=np.uint8)  # dark map background
     img = Image.fromarray(bg[:, :, ::-1])  # BGR->RGB for PIL
@@ -62,10 +64,10 @@ def render_frame(lines, seed=0):
     x1, y1, x2, y2 = int(W * REGION[0]), int(H * REGION[1]), int(W * REGION[2]), int(H * REGION[3])
     draw.rectangle([x1, y1, x2, y2], fill=(0, 0, 0, 140))  # translucent strip
     font = _font(24)
-    y = y1 + 14
+    y = y1 + 12
     for line in lines:
-        draw.text((x1 + 18, y), line, font=font, fill=(255, 255, 255, 255))
-        y += 38
+        draw.text((x1 + 12, y), line, font=font, fill=(255, 255, 255, 255))
+        y += 36
     arr = np.asarray(img.convert("RGB"))
     return arr[:, :, ::-1].copy()  # back to BGR
 
