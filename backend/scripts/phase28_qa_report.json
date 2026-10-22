@@ -1,0 +1,369 @@
+{
+  "started_at": "2026-10-22T11:12:08+0000",
+  "W0_director_default_mode": {
+    "constant": "semi_auto",
+    "no_env_fresh": "semi_auto",
+    "no_env_helper": "semi_auto",
+    "env_full_auto": "full_auto",
+    "env_legacy_auto": "full_auto",
+    "env_manual": "manual",
+    "env_invalid": "semi_auto",
+    "explicit_after_env_change": "full_auto",
+    "fresh_gets_env_default": "manual",
+    "replay_fallback_unset": "semi_auto",
+    "replay_fallback_set": "manual",
+    "pass": true
+  },
+  "W1_band_filter": {
+    "filter_defaults": {
+      "threshold": 0.05,
+      "row_threshold": 0.32
+    },
+    "pair_counts": {
+      "MUST_TRUE": 4,
+      "SKIP_OK": 51,
+      "EXPIRY": 3
+    },
+    "false_skips": 0,
+    "must_true_pairs": [
+      {
+        "seq": "entry_d1_e0022_t2925",
+        "i": 2,
+        "label": "MUST_TRUE",
+        "caught": true
+      },
+      {
+        "seq": "entry_d1_e0085_t4136",
+        "i": 2,
+        "label": "MUST_TRUE",
+        "caught": true
+      },
+      {
+        "seq": "stack_composite",
+        "i": 0,
+        "label": "MUST_TRUE",
+        "caught": true
+      },
+      {
+        "seq": "stack_composite",
+        "i": 2,
+        "label": "MUST_TRUE",
+        "caught": true
+      }
+    ],
+    "expiry_caught": 2,
+    "expiry_pairs": [
+      {
+        "seq": "entry_d1_e0022_t2925",
+        "i": 0,
+        "label": "EXPIRY",
+        "caught": false
+      },
+      {
+        "seq": "entry_d1_e0022_t2925",
+        "i": 3,
+        "label": "EXPIRY",
+        "caught": true
+      },
+      {
+        "seq": "entry_d1_e0085_t4136",
+        "i": 3,
+        "label": "EXPIRY",
+        "caught": true
+      }
+    ],
+    "skip_rate_on_skip_ok": 0.471,
+    "observe_cost_median_ms": 2.19,
+    "fail_open": {
+      "none": true,
+      "string": true,
+      "int": true,
+      "object": true,
+      "empty_array": true,
+      "tiny_array": true,
+      "1d_array": true,
+      "float_frame": true
+    },
+    "fail_open_pass": true,
+    "pass": true
+  },
+  "A_filter_level": {
+    "stack_rows_label": "LABELLED COMPOSITE: real entry row of d1_e0011 pasted below the real entry of d1_e0085, native pixels/scale",
+    "stack_rows_gt": "computed_in_filter_section",
+    "filter_decisions_quiet_base_base_stacked_stacked": [
+      true,
+      true,
+      false,
+      true,
+      false
+    ],
+    "appearance_transition_caught_by_filter": true,
+    "strip_composite_labels": [
+      "MUST_TRUE",
+      "SKIP_OK",
+      "MUST_TRUE"
+    ],
+    "strip_composite_decisions": [
+      true,
+      true,
+      true,
+      true
+    ],
+    "strip_B_appearance_caught": true
+  },
+  "A_stack_rows_parser_gt": {
+    "base_keys": [
+      "da221dae1d5f"
+    ],
+    "stacked_keys": [],
+    "base_n": 1,
+    "stacked_n": 0
+  },
+  "W2_parse_costs_and_identity": {
+    "entry_median_ms": 1071.0,
+    "entry_n": 16,
+    "quiet_median_ms": 26.5,
+    "quiet_n": 16,
+    "output_mismatches_vs_profile_report": [],
+    "legacy_gate_ab_diffs": [],
+    "pass": true
+  },
+  "A_monitor_level": {
+    "phase1_base": {
+      "sampler": {
+        "samples_parsed": 3,
+        "samples_skipped": 2,
+        "prefilter_bypass_pending": 1,
+        "prefilter_bypass_forced": 1,
+        "prefilter_errors": 0
+      },
+      "kill_knock_emissions": 1
+    },
+    "phase2_stacked": {
+      "parsed_delta": 4,
+      "skipped_delta": 4,
+      "kill_knock_emissions_total": 1,
+      "emissions": [
+        {
+          "type": "FeedEventType.KNOCK",
+          "slot": 5,
+          "key": "da221dae1d5fd7b6b742170bc4c35b11643bc572"
+        }
+      ]
+    }
+  },
+  "B_back_to_back": {
+    "entry1_emissions_after_5_samples": [
+      {
+        "type": "FeedEventType.KNOCK",
+        "slot": 2,
+        "key": "57f7040d0c2519c0ae45a5dd46578dd4fb4614c5"
+      }
+    ],
+    "entry2_samples_to_emit_after_switch": 2,
+    "total_emissions": [
+      {
+        "type": "FeedEventType.KNOCK",
+        "slot": 2,
+        "key": "57f7040d0c2519c0ae45a5dd46578dd4fb4614c5"
+      },
+      {
+        "type": "FeedEventType.KILL",
+        "slot": 2,
+        "key": "7e9502e306d091a58f4beee4f12ee533965c41d8"
+      }
+    ],
+    "pass": true
+  },
+  "C_quiet_background_motion": {
+    "samples": 30,
+    "raw_kill_knock_events_from_sample_once": 0,
+    "sampler": {
+      "samples_parsed": 13,
+      "samples_skipped": 17,
+      "prefilter_bypass_pending": 0,
+      "prefilter_bypass_forced": 10,
+      "prefilter_errors": 0
+    },
+    "pass": true
+  },
+  "D_entry_expiry": {
+    "emissions_while_entry_held": 1,
+    "emissions_after_8_quiet_samples": 1,
+    "voter_pending_unconfirmed_after_expiry": false,
+    "sampler": {
+      "samples_parsed": 7,
+      "samples_skipped": 5,
+      "prefilter_bypass_pending": 1,
+      "prefilter_bypass_forced": 4,
+      "prefilter_errors": 0
+    },
+    "pass": true
+  },
+  "E_low_contrast_filter": {
+    "label": "SYNTHETIC: added real row alpha-blended toward base",
+    "filter_says_changed": {
+      "alpha_0.5": true,
+      "alpha_0.35": true
+    }
+  },
+  "E_forced_parse_bound": {
+    "force_parse_every_config": 3,
+    "samples": 12,
+    "parsed": 6,
+    "skipped": 6,
+    "bypass_forced": 4,
+    "max_consecutive_skips_observed": 2,
+    "pass": true
+  },
+  "F_parallel_dedup_fairness": {
+    "ticks": 13,
+    "elapsed_s": 46.8,
+    "emissions_for_shared_entry": [
+      {
+        "type": "FeedEventType.KILL",
+        "slot": 3,
+        "key": "7e9502e306d091a58f4beee4f12ee533965c41d8"
+      }
+    ],
+    "duplicates_suppressed_total": 2,
+    "samples_per_feed": {
+      "aegis-observer-slot-01": 4,
+      "aegis-observer-slot-02": 4,
+      "aegis-observer-slot-03": 4,
+      "aegis-observer-slot-04": 4,
+      "aegis-observer-slot-05": 3,
+      "aegis-observer-slot-06": 3,
+      "aegis-observer-slot-07": 3,
+      "aegis-observer-slot-08": 3,
+      "aegis-observer-slot-09": 3,
+      "aegis-observer-slot-10": 3,
+      "aegis-observer-slot-11": 3,
+      "aegis-observer-slot-12": 3,
+      "aegis-observer-slot-13": 3,
+      "aegis-observer-slot-14": 3,
+      "aegis-observer-slot-15": 3,
+      "aegis-observer-slot-16": 3
+    },
+    "min_samples_any_feed": 3,
+    "sampler": {
+      "mode": "thread",
+      "cpu_count": 2,
+      "workers_effective": 2,
+      "workers_cap": 8,
+      "workers_explicit": null,
+      "pool_size": 2,
+      "force_parse_every": 3,
+      "band_filter_available": true,
+      "samples_parsed": 39,
+      "samples_skipped": 13,
+      "prefilter_bypass_pending": 3,
+      "prefilter_bypass_forced": 16,
+      "prefilter_errors": 0
+    },
+    "pass": false,
+    "winner_is_rr_first_of_the_three": true
+  },
+  "G_kill_switch_and_fail_open": {
+    "load_with_kill_switch": null,
+    "service_filter_is_none": true,
+    "kill_switch_stats": {
+      "samples_parsed": 5,
+      "samples_skipped": 0,
+      "prefilter_bypass_pending": 0,
+      "prefilter_bypass_forced": 0,
+      "prefilter_errors": 0
+    },
+    "kill_switch_pass": true,
+    "load_without_kill_switch": "BandChangeFilter",
+    "raising_filter_stats": {
+      "samples_parsed": 4,
+      "samples_skipped": 0,
+      "prefilter_bypass_pending": 1,
+      "prefilter_bypass_forced": 1,
+      "prefilter_errors": 2
+    },
+    "raising_filter_raw_kill_knock_events": 1,
+    "raising_filter_pass": true,
+    "pass": true
+  },
+  "H_sampler_sequential_fallback": {
+    "default_mode": "thread",
+    "default_workers_16": 2,
+    "env_mode": "sequential",
+    "env_workers_16": 1,
+    "service_sampler_status": {
+      "mode": "sequential",
+      "cpu_count": 2,
+      "workers_effective": 1,
+      "workers_cap": 8,
+      "workers_explicit": null,
+      "pool_size": 0,
+      "force_parse_every": 3,
+      "band_filter_available": true,
+      "samples_parsed": 0,
+      "samples_skipped": 0,
+      "prefilter_bypass_pending": 0,
+      "prefilter_bypass_forced": 0,
+      "prefilter_errors": 0
+    },
+    "emissions": [
+      {
+        "type": "FeedEventType.KNOCK",
+        "slot": 12,
+        "key": "57f7040d0c2519c0ae45a5dd46578dd4fb4614c5"
+      }
+    ],
+    "pass": true
+  },
+  "finished_at": "2026-10-22T11:15:46+0000",
+  "W3W4_harness_rerun": {
+    "qa_rerun": {
+      "P0_pass": true,
+      "P1_median_s": 22.729,
+      "P1_emitted": 6,
+      "P1_slot_violations": 0,
+      "P3_emissions": 1,
+      "P4_state": "stale_frames",
+      "P4_feed8_emit_s": 25.775,
+      "P4_pass": true,
+      "P2_median_s": 26.035,
+      "P5_pass": true
+    },
+    "w4_claim": {
+      "P0_pass": true,
+      "P1_median_s": 22.309,
+      "P1_emitted": 6,
+      "P1_slot_violations": 0,
+      "P3_emissions": 1,
+      "P4_state": "stale_frames",
+      "P4_feed8_emit_s": 22.981,
+      "P4_pass": true,
+      "P2_median_s": 24.066,
+      "P5_pass": true
+    },
+    "p1_median_delta_pct": 1.9,
+    "cross_check_w4_numbers_json": {
+      "quiet_median_claim_ms": 27.8,
+      "entry_median_claim_ms": 1097.9,
+      "note": "vs QA W2 fresh-detector medians: quiet 26.5 ms, entry 1071.0 ms (within 5%)",
+      "p2_p3_p5_from_harness_json": "P2 median 24.066 (Phase 26 baseline 33.344), P3 exactly 1 emission, P5 pass \u2014 all consistent with Phase 26 baseline direction"
+    },
+    "pass": true
+  },
+  "regression": {
+    "targeted_phase23_27_monitor_director_suites": "321 passed, 0 failed (19 files incl. test_director_default_mode 10/10, test_multi_feed_monitor, phase26 wiring + lifespan)",
+    "full_unit_working_tree": "31 failed, 1344 passed, 2 skipped (3 legacy files excluded: collection ImportErrors at HEAD too)",
+    "full_unit_at_HEAD_worktree": "36 failed, 1227 passed, 8 skipped",
+    "wt_failures_not_failing_at_HEAD": 0,
+    "classification": "ALL 31 WT failures pre-existing at HEAD: legacy test_vision/** heuristic-library tests (flaky/order-dependent), test_dossier_pdf (fpdf, full-suite context, fails at HEAD too), test_event_bus test_connect (live Redis). HEAD-only extra failures are worktree artifacts (untracked .local-voices / data absent). ZERO Phase 28 regressions.",
+    "frontend": "tsc --noEmit exit 0; npm run build exit 0",
+    "secret_scan": "git diff added lines (1763) + all untracked new backend/frontend/docs files: no API key/token/password/private-key patterns"
+  },
+  "notes": [
+    "Probe A parser finding: the LABELLED real-row stack composite parses to 0 candidates (even the base entry's key vanishes) \u2014 a Phase 23-era layout-parser limitation on synthetic stacked composites, NOT a Phase 28 filter/monitor defect: the filter flags the appearance (both composite constructions) and forced parses fire (4 parsed in 8 held samples). No real harvested frame with 2 simultaneous entries exists in the frame set to test the parser further.",
+    "Probe F 'pass' field is False only on the QA script's own >=4 samples/feed threshold under a 45 s wall cap (13 ticks ran): every feed received 3-4 samples, spread <=1 \u2014 round-robin fairness intact, no starvation; the substantive assertions (exactly 1 emission, RR-first winner slot 3, duplicates_suppressed=2) all held.",
+    "Filter expiry: 2/3 EXPIRY pairs flagged changed (matches W1's own report); the missed expiry produces no phantom event at monitor level (Probe D: exactly 1 emission, none after expiry).",
+    "Harness t_bus_s is null in Phase 26 baseline reports too (pre-existing harness instrumentation quirk); VI/director timestamps populate and track t_emit within ~0.35 s."
+  ]
+}

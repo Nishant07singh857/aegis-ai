@@ -37,3 +37,18 @@ from .observer_slot import ObserverSlot  # noqa: F401
 from .event_store import EventStore  # noqa: F401
 from .story import Story, StorySetting  # noqa: F401
 from .anti_cheat_flag import AntiCheatFlag  # noqa: F401
+# Phase 27 (W1): director-learning tables live with their service
+# package (app/services/director_learning/models.py); imported here so
+# Base.metadata is fully populated at app init like every other model.
+from app.services.director_learning.models import (  # noqa: F401,E402
+    DirectorDecision,
+    DirectorDecisionLabel,
+    DirectorLearningAdjustment,
+    DirectorLearningState,
+    DirectorShadowDivergence,
+    DirectorSuggestionFate,
+)
+# Phase 29 (W4): POV pilot journal table lives with its service package
+# (app/services/observer_pilot/models.py); imported here so
+# Base.metadata is fully populated at app init like every other model.
+from app.services.observer_pilot.models import POVPilotDecision  # noqa: F401,E402

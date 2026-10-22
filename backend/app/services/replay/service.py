@@ -61,12 +61,48 @@ class ReplayService:
         self,
         window_seconds: int = 300,
         renderer: Optional[HighlightRenderer] = None,
+        recorder=None,
     ) -> None:
         self.buffer = ReplayBuffer(window_seconds=window_seconds)
         self.detector = HighlightDetector()
         self.renderer = renderer if renderer is not None else highlight_renderer
         self._marks: Dict[str, Mark] = {}
         self._listeners: List[BroadcastListener] = []
+        # Phase 25 (P0-2): ISO recorder + offer/take queue. Both are
+        # lazily built / attachable so existing constructions (and the
+        # many unit tests that build a bare ReplayService) are untouched
+        # until the coordinator wires the real ones in main.py lifespan.
+        self.recorder = recorder
+        self._queue = None
+
+    # ── Phase 25 (P0-2): ISO recorder + offer/take queue ───────
+
+    def attach_recorder(self, recorder) -> None:
+        """Attach the ISO recorder; a built queue picks it up too."""
+        self.recorder = recorder
+        if self._queue is not None and getattr(self._queue, "recorder", None) is None:
+            self._queue.recorder = recorder
+
+    def get_queue(self, **queue_kwargs):
+        """The offer/take ReplayQueue bound to this service (lazy).
+
+        Built once with the attached recorder (or None — entries then
+        honestly stay event replays until a recorder is attached).
+        Extra kwargs (providers, ttl, caps) only apply on first build;
+        tests that need custom providers construct ReplayQueue directly.
+        """
+        if self._queue is None:
+            from .queue import ReplayQueue
+
+            self._queue = ReplayQueue(self, recorder=self.recorder, **queue_kwargs)
+        elif queue_kwargs:  # pragma: no cover - misuse guard
+            raise ValueError("ReplayQueue already built; construct ReplayQueue directly for custom providers.")
+        return self._queue
+
+    def attach_queue(self, queue) -> None:
+        self._queue = queue
+        if getattr(queue, "recorder", None) is not None and self.recorder is None:
+            self.recorder = queue.recorder
 
     # ── listeners (same pattern as director_service) ───────────
 
@@ -271,14 +307,41 @@ class ReplayService:
     def snapshot(self) -> Dict:
         """Lightweight status for /feed-like introspection."""
         self.buffer.prune()
-        return {
+        snap: Dict = {
             "window_seconds": self.buffer.window_seconds,
             "buffered_events": len(self.buffer),
             "marks": len(self._marks),
             "listeners": len(self._listeners),
             "is_video": False,
         }
+        if self._queue is not None:
+            snap["replay_queue"] = self._queue.status()
+        if self.recorder is not None:
+            snap["iso_recorder"] = self.recorder.status()
+        return snap
 
 
 #: Process-wide singleton used by the API router and app/main.py.
 replay_service = ReplayService()
+
+
+def build_replay_stack_from_manager(manager, recordings_dir=None, **recorder_kwargs):
+    """Builder for main.py lifespan wiring (Phase 25, P0-2).
+
+    Builds the ISO recorder tapped on the capture manager's real frame
+    flow, attaches it (and the offer/take queue) to the process-wide
+    ``replay_service`` singleton, and returns ``(recorder, queue)``.
+    The coordinator owns calling this + ``recorder.start_async()`` and
+    ``queue.subscribe_to(event_bus)`` inside the lifespan; nothing here
+    starts recording by itself.
+    """
+    from .queue import ReplayQueue
+    from .recorder import build_iso_recorder_from_manager
+
+    recorder = build_iso_recorder_from_manager(
+        manager, recordings_dir=recordings_dir, **recorder_kwargs
+    )
+    replay_service.attach_recorder(recorder)
+    queue = ReplayQueue(replay_service, recorder=recorder)
+    replay_service.attach_queue(queue)
+    return recorder, queue

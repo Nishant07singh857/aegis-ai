@@ -178,6 +178,17 @@ class VisionCaptureService:
         Optional pre-built instances of the Phase 21 CV detectors.
         Defaults are constructed here (see the module docstring for
         which Gen-1 detectors are deliberately NOT wired).
+    feed_monitor:
+        Phase 25 (W2): optional MultiFeedMonitorService running the
+        cheap readers (killfeed/alive/zone) on every OTHER observer
+        feed in parallel. When attached, start()/stop() drive its
+        lifecycle alongside the primary pipeline and status() embeds
+        its status under "multi_feed_monitor". The primary feed's own
+        slot must be EXCLUDED from the monitor (see
+        build_vision_service) — this service already emits those
+        readers' events for it at full rate. When omitted (the
+        default), behaviour is exactly the pre-Phase-25 single-source
+        service.
     """
 
     SOURCE_ID = "vision0"
@@ -199,6 +210,7 @@ class VisionCaptureService:
         zone_geom: Optional[ZoneDetector] = None,
         healing: Optional[HealingDetector] = None,
         loot: Optional[LootDetector] = None,
+        feed_monitor: Optional[Any] = None,
     ) -> None:
         self._ingest = ingest
         base_config = config or load_capture_config()
@@ -324,6 +336,9 @@ class VisionCaptureService:
         self._frame_provider = frame_provider or (
             lambda: self._grabber.get_latest_frame(self.SOURCE_ID)
         )
+        # Phase 25 (W2): parallel cheap-reader monitors for the other
+        # observer feeds (None = single-source behaviour, unchanged).
+        self._feed_monitor = feed_monitor
         self._task: Optional[asyncio.Task] = None
         self._running = False
         self._source_added = False
@@ -357,6 +372,16 @@ class VisionCaptureService:
         self._running = True
         self._started_at = time.time()
         self._task = asyncio.create_task(self._loop(), name="aegis-vision-loop")
+        # Phase 25 (W2): start the parallel feed monitors alongside the
+        # primary loop. A monitor failure must never take the primary
+        # pipeline down — it is logged and visible in status() instead.
+        if self._feed_monitor is not None:
+            try:
+                await self._feed_monitor.start()
+            except Exception as exc:  # pragma: no cover - defensive
+                self._last_error = f"feed_monitor start: {exc}"[:300]
+                log.error("vision_feed_monitor_start_failed",
+                          error=self._last_error)
         log.info(
             "vision_service_started",
             backend=self.config.backend,
@@ -367,6 +392,14 @@ class VisionCaptureService:
     async def stop(self) -> None:
         """Stop the loop and the capture source. Idempotent."""
         self._running = False
+        # Phase 25 (W2): stop the feed monitors first; their failure to
+        # stop cleanly must not strand the primary pipeline's shutdown.
+        if self._feed_monitor is not None:
+            try:
+                await self._feed_monitor.stop()
+            except Exception as exc:  # pragma: no cover - defensive
+                log.warning("vision_feed_monitor_stop_failed",
+                            error=str(exc)[:200])
         if self._task is not None:
             self._task.cancel()
             try:
@@ -387,6 +420,11 @@ class VisionCaptureService:
     @property
     def running(self) -> bool:
         return self._running
+
+    @property
+    def feed_monitor(self) -> Optional[Any]:
+        """The attached MultiFeedMonitorService (Phase 25), or None."""
+        return self._feed_monitor
 
     # ------------------------------------------------------------------
     # Source wiring
@@ -956,4 +994,78 @@ class VisionCaptureService:
             "pipeline": self._pipeline.get_stats(),
             "ocr": self._ocr_report(),
             "uptime_s": round(uptime, 1),
+            # Phase 25 (W2): parallel monitor status (additive key;
+            # "attached": False is the honest single-source state).
+            "multi_feed_monitor": (
+                self._feed_monitor.status()
+                if self._feed_monitor is not None
+                else {"attached": False}
+            ),
         }
+
+
+# ---------------------------------------------------------------------------
+# Phase 25 (W2): production builder — primary pipeline + feed monitors
+# ---------------------------------------------------------------------------
+
+
+def build_vision_service(
+    ingest: IngestFn,
+    *,
+    config: Optional[CaptureConfig] = None,
+    match_id: Optional[str] = None,
+    observer_slot: Optional[int] = None,
+    monitor_feeds: Optional[List[Any]] = None,
+    frame_grabber: Optional[Any] = None,
+    multi_device_manager: Optional[Any] = None,
+    enable_monitors: bool = True,
+    **service_kwargs: Any,
+) -> VisionCaptureService:
+    """Build a VisionCaptureService with the Phase 25 multi-feed
+    monitor attached (the coordinator wires THIS into the lifespan;
+    main.py is intentionally not edited by W2).
+
+    The primary service keeps its full 10-detector pipeline on its own
+    feed exactly as before. When monitor sources are supplied (explicit
+    ``monitor_feeds`` specs, a shared ``frame_grabber``, or the
+    ``multi_device_manager``), a MultiFeedMonitorService is built over
+    the SAME ingest + match_id and attached; the primary's own
+    observer slot is excluded from monitoring so its cheap-reader
+    events are never emitted twice. With no monitor sources the
+    service is the plain single-source runtime and status() reports
+    ``multi_feed_monitor == {"attached": False}`` plus, when monitors
+    are enabled but sourceless, the builder simply attaches nothing.
+
+    The returned service is NOT started; call ``await svc.start()``
+    (which also starts the monitor) / ``await svc.stop()``.
+    """
+    service = VisionCaptureService(
+        ingest=ingest,
+        config=config,
+        match_id=match_id,
+        observer_slot=observer_slot,
+        **service_kwargs,
+    )
+    if not enable_monitors:
+        return service
+    if not (monitor_feeds or frame_grabber is not None or multi_device_manager is not None):
+        return service
+    from .multi_feed_monitor import build_multi_feed_monitor
+
+    exclude = {service._observer_slot} if service._observer_slot else set()
+    monitor = build_multi_feed_monitor(
+        ingest,
+        config=service.config,
+        match_id=service._match_id,
+        feeds=monitor_feeds,
+        frame_grabber=frame_grabber,
+        multi_device_manager=multi_device_manager,
+        exclude_slots=exclude,
+    )
+    service._feed_monitor = monitor
+    log.info(
+        "vision_service_monitors_attached",
+        feeds=monitor.status()["feeds_total"],
+        excluded_slots=sorted(exclude),
+    )
+    return service

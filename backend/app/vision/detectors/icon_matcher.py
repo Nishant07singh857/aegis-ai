@@ -287,6 +287,12 @@ class IconMatcher:
 
         Coordinates are reported in the ORIGINAL (pre-upscale) crop
         space so callers can split OCR tokens around the icon slot.
+
+        Phase 28 note: a resized-template cache was measured here and
+        removed — interleaved A/B on a real strip: warm cache median
+        251.6 ms vs no-cache 233.1 ms per match_candidates call (VM
+        noise band, no gain): cv2.matchTemplate sliding dominates
+        this cost, the template resizes are only ~5% of it.
         """
         import cv2
 

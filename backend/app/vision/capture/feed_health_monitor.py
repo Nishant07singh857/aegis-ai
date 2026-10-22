@@ -374,3 +374,260 @@ class FeedHealthMonitor:
         self.frame_times.clear()
         self.alerts.clear()
         self._log.info("Feed health monitor reset")
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# PHASE 25 (W2): PER-FEED MONITOR HEALTH
+#
+# The multi-feed cheap-reader monitor (app/vision/multi_feed_monitor.py)
+# needs a small, honest state per OBSERVER FEED — deliberately separate
+# from the FPS/latency scoring above (which describes the FrameGrabber's
+# capture quality). A monitor feed is in exactly one of these states:
+#
+#   ok            fresh, CHANGING frames are arriving and the last
+#                 sample completed without error
+#   stale_frames  frames (or frame deliveries) keep arriving but the
+#                 frame CONTENT has not changed for stale_after_s —
+#                 a frozen game screen / wedged capture repeating the
+#                 same frame. Reported, never disguised as "ok".
+#   no_signal     no frame at all (provider returned None / never
+#                 delivered) for no_signal_after_s, or never yet
+#   error         the most recent sample raised (provider or reader)
+#                 and no successful sample has happened since
+#   stopped       the monitor for this feed is not running
+#
+# States are COMPUTED from recorded facts at read time (timestamps +
+# content signatures), so a feed that silently dies flips state on the
+# next status read without needing a watchdog write.
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+class MonitorFeedState(str, Enum):
+    """Health state of one feed's cheap-reader monitor (Phase 25)."""
+
+    OK = "ok"
+    STALE_FRAMES = "stale_frames"
+    NO_SIGNAL = "no_signal"
+    ERROR = "error"
+    STOPPED = "stopped"
+
+
+@dataclass
+class MonitorFeedHealth:
+    """Recorded facts for one monitored feed (state is derived)."""
+
+    source_id: str
+    observer_slot: Optional[int] = None
+    running: bool = False
+    samples: int = 0
+    samples_ok: int = 0
+    frames_seen: int = 0
+    no_frame_samples: int = 0
+    errors: int = 0
+    consecutive_errors: int = 0
+    reader_errors: int = 0
+    events_emitted: int = 0
+    duplicates_suppressed: int = 0
+    last_sample_at: float = 0.0
+    last_frame_at: float = 0.0        # last time ANY frame was delivered
+    last_fresh_at: float = 0.0        # last time frame CONTENT changed
+    last_success_at: float = 0.0      # last error-free sample
+    last_error_at: float = 0.0
+    last_error: str = ""
+    last_signature: str = ""
+    last_sample_ms: float = 0.0
+
+
+class MultiFeedHealthTracker:
+    """Per-feed monitor health for the Phase 25 multi-feed monitor.
+
+    Thread-affinity: the monitor service records from its scheduler
+    (event-loop thread bookkeeping in to_thread workers is serialised
+    by the service's per-feed locks); this tracker itself keeps plain
+    dict state and is not internally locked.
+    """
+
+    def __init__(
+        self,
+        stale_after_s: float = 6.0,
+        no_signal_after_s: float = 6.0,
+    ) -> None:
+        self.stale_after_s = max(0.5, float(stale_after_s))
+        self.no_signal_after_s = max(0.5, float(no_signal_after_s))
+        self.feeds: Dict[str, MonitorFeedHealth] = {}
+        self._log = logger.bind(component="multi_feed_health")
+
+    # ── registration ─────────────────────────────────────────────
+
+    def register_feed(
+        self, source_id: str, observer_slot: Optional[int] = None
+    ) -> MonitorFeedHealth:
+        health = self.feeds.get(source_id)
+        if health is None:
+            health = MonitorFeedHealth(
+                source_id=source_id, observer_slot=observer_slot
+            )
+            self.feeds[source_id] = health
+        elif observer_slot is not None:
+            health.observer_slot = observer_slot
+        return health
+
+    def unregister_feed(self, source_id: str) -> bool:
+        return self.feeds.pop(source_id, None) is not None
+
+    def set_running(self, source_id: str, running: bool) -> None:
+        health = self.feeds.get(source_id)
+        if health is not None:
+            health.running = running
+
+    # ── recording ────────────────────────────────────────────────
+
+    def record_sample_start(self, source_id: str, now: float) -> None:
+        health = self.feeds.get(source_id)
+        if health is None:
+            return
+        health.samples += 1
+        health.last_sample_at = now
+
+    def record_frame(
+        self, source_id: str, signature: str, now: float
+    ) -> bool:
+        """Record a delivered frame. Returns True when content is FRESH
+        (signature differs from the previous frame's)."""
+        health = self.feeds.get(source_id)
+        if health is None:
+            return False
+        health.frames_seen += 1
+        health.last_frame_at = now
+        fresh = signature != health.last_signature
+        if fresh:
+            health.last_signature = signature
+            health.last_fresh_at = now
+        return fresh
+
+    def record_no_frame(self, source_id: str, now: float) -> None:
+        health = self.feeds.get(source_id)
+        if health is None:
+            return
+        health.no_frame_samples += 1
+        # A no-frame sample that completes without raising is still a
+        # completed sample: it clears a previous transient error state
+        # (the feed then reports no_signal, which is the honest state).
+        health.last_success_at = now
+        health.consecutive_errors = 0
+
+    def record_success(
+        self, source_id: str, now: float, sample_ms: float = 0.0
+    ) -> None:
+        health = self.feeds.get(source_id)
+        if health is None:
+            return
+        health.samples_ok += 1
+        health.last_success_at = now
+        health.consecutive_errors = 0
+        health.last_sample_ms = round(float(sample_ms), 2)
+
+    def record_error(self, source_id: str, error: str, now: float) -> None:
+        health = self.feeds.get(source_id)
+        if health is None:
+            return
+        health.errors += 1
+        health.consecutive_errors += 1
+        health.last_error_at = now
+        health.last_error = str(error)[:300]
+
+    def record_reader_error(self, source_id: str, error: str, now: float) -> None:
+        """A single reader failed inside an otherwise completed sample
+        (per-detector isolation): counted + surfaced, but the feed's
+        state is driven by record_error only for sample-level failures."""
+        health = self.feeds.get(source_id)
+        if health is None:
+            return
+        health.reader_errors += 1
+        health.last_error_at = now
+        health.last_error = str(error)[:300]
+
+    def record_events(self, source_id: str, emitted: int, suppressed: int = 0) -> None:
+        health = self.feeds.get(source_id)
+        if health is None:
+            return
+        health.events_emitted += int(emitted)
+        health.duplicates_suppressed += int(suppressed)
+
+    # ── state derivation ─────────────────────────────────────────
+
+    def feed_state(
+        self, source_id: str, now: Optional[float] = None
+    ) -> MonitorFeedState:
+        health = self.feeds.get(source_id)
+        if health is None or not health.running:
+            return MonitorFeedState.STOPPED
+        now = time.time() if now is None else now
+        # Currently failing: an error more recent than any success.
+        if (
+            health.consecutive_errors > 0
+            and health.last_error_at >= health.last_success_at
+            and health.last_error_at > 0
+        ):
+            return MonitorFeedState.ERROR
+        # Never delivered a frame, or silent for too long.
+        if health.last_frame_at <= 0:
+            return MonitorFeedState.NO_SIGNAL
+        if now - health.last_frame_at > self.no_signal_after_s:
+            return MonitorFeedState.NO_SIGNAL
+        # Frames arrive but the content is frozen.
+        if health.last_fresh_at > 0 and now - health.last_fresh_at > self.stale_after_s:
+            return MonitorFeedState.STALE_FRAMES
+        return MonitorFeedState.OK
+
+    def get_feed_health(
+        self, source_id: str, now: Optional[float] = None
+    ) -> Optional[Dict[str, Any]]:
+        health = self.feeds.get(source_id)
+        if health is None:
+            return None
+        now = time.time() if now is None else now
+        return {
+            "source_id": health.source_id,
+            "observer_slot": health.observer_slot,
+            "state": self.feed_state(source_id, now).value,
+            "running": health.running,
+            "samples": health.samples,
+            "samples_ok": health.samples_ok,
+            "frames_seen": health.frames_seen,
+            "no_frame_samples": health.no_frame_samples,
+            "errors": health.errors,
+            "consecutive_errors": health.consecutive_errors,
+            "reader_errors": health.reader_errors,
+            "events_emitted": health.events_emitted,
+            "duplicates_suppressed": health.duplicates_suppressed,
+            "last_error": health.last_error or None,
+            "last_sample_ago_s": (
+                round(now - health.last_sample_at, 2)
+                if health.last_sample_at else None
+            ),
+            "last_frame_ago_s": (
+                round(now - health.last_frame_at, 2)
+                if health.last_frame_at else None
+            ),
+            "last_fresh_frame_ago_s": (
+                round(now - health.last_fresh_at, 2)
+                if health.last_fresh_at else None
+            ),
+            "last_sample_ms": health.last_sample_ms,
+        }
+
+    def get_all_health(
+        self, now: Optional[float] = None
+    ) -> Dict[str, Dict[str, Any]]:
+        return {
+            source_id: self.get_feed_health(source_id, now)
+            for source_id in self.feeds
+        }
+
+    def summary(self, now: Optional[float] = None) -> Dict[str, Any]:
+        now = time.time() if now is None else now
+        counts: Dict[str, int] = {}
+        for source_id in self.feeds:
+            state = self.feed_state(source_id, now).value
+            counts[state] = counts.get(state, 0) + 1
+        return {"total_feeds": len(self.feeds), "by_state": counts}

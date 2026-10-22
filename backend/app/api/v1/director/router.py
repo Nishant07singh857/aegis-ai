@@ -6,8 +6,16 @@ output page. Auth model:
   * GET  /director/state               — any authenticated user (viewer incl.)
   * GET  /director/suggestions         — operator+ (pending AI proposals)
   * POST /director/mode                — operator+ (explicit mode flips;
-                                         "full_auto" | "semi_auto" | "manual",
+                                         "full_auto" | "semi_auto" | "manual"
+                                         | "clone" (Phase 27 Director-Style),
                                          legacy "auto" -> "full_auto")
+  * POST /director/clone/grab          — operator+ (Phase 27: grab manual
+                                         control inside CLONE mode; 409
+                                         outside clone mode)
+  * POST /director/clone/release       — operator+ (Phase 27: release a
+                                         clone grab; when nothing is
+                                         grabbed this is an honest no-op
+                                         returning the unchanged state)
   * POST /director/scene               — operator+, MANUAL mode only
   * POST /director/camera              — operator+, MANUAL mode only (Phase 17 W2:
                                          active observer camera 1..16 for the
@@ -35,7 +43,7 @@ write.
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 
 from app.api.deps import TokenPayload, get_current_user, require_operator
 from app.services.director_service import (
@@ -91,6 +99,7 @@ def _suggestion_not_found(exc: SuggestionNotFoundError) -> HTTPException:
 
 @router.get("/state", response_model=DirectorState)
 async def get_director_state(
+    request: Request = None,
     _user: TokenPayload = Depends(get_current_user),
 ):
     """Current director state. Any authenticated user, viewers included."""
@@ -98,7 +107,97 @@ async def get_director_state(
     # a poll-driven client (OBS capture page) can never sit on an expired
     # map cam even if it missed the WS broadcast.
     await director_service.enforce_scene_holds()
-    return director_service.snapshot()
+    state = director_service.snapshot()
+    # Phase 29 (W4): per-feed POV summary, _multi_feed_monitor_summary
+    # pattern — from the live director's POV provider when wired;
+    # empty list when it is not (never fabricated).
+    state["pov_feeds"] = _pov_feeds_summary(request)
+    return state
+
+
+def _pov_feeds_summary(request: Request):
+    """Phase 29: per-feed POV summary from the live director (or [])."""
+    if request is None:
+        # TestClient-less unit calls: fall back to the process singleton.
+        try:
+            from app.services.live_director import get_live_director
+
+            service = get_live_director()
+            return service.pov_summary() if service is not None else []
+        except Exception:  # pragma: no cover - defensive
+            return []
+    service = getattr(request.app.state, "live_director", None)
+    if service is None:
+        try:
+            from app.services.live_director import get_live_director
+
+            service = get_live_director()
+        except Exception:  # pragma: no cover - defensive
+            service = None
+    if service is None:
+        return []
+    try:
+        return service.pov_summary()
+    except Exception:  # pragma: no cover - defensive
+        return []
+
+
+def _multi_feed_monitor_summary(request: Request):
+    """Phase 26: summary of the lifespan multi-feed monitor (or None).
+
+    The director surface shows the fleet-level picture (running, feed
+    count, sampling budget, health rollup); full per-feed health lives
+    on GET /api/v1/feed/vision/status. None when the monitor is not
+    running in this process — reported as null, never fabricated.
+    """
+    if request is None:
+        return None
+    monitor = getattr(request.app.state, "multi_feed_monitor", None)
+    if monitor is None:
+        return None
+    full = monitor.status()
+    return {
+        "running": full["running"],
+        "feeds_total": full["feeds_total"],
+        "feeds_enabled": full["feeds_enabled"],
+        "budget": full["budget"],
+        "events_emitted": full["events_emitted"],
+        "duplicates_suppressed": full["cross_feed"]["duplicates_suppressed"],
+        "health_summary": full["health_summary"],
+    }
+
+
+@router.get("/decision-log")
+async def get_director_decision_log(
+    request: Request = None,
+    _user: TokenPayload = Depends(require_operator),
+    limit: int = 50,
+):
+    """Live director decision log (Phase 25, W1). Operator or admin.
+
+    Read-only ring of every live-director evaluation outcome (switch /
+    hold / rejected-challenger / suggestion) with per-candidate score
+    breakdowns, the winning margin and the rule that decided it. When
+    the live director is not running in this process, ``running`` is
+    false and ``decisions`` is honestly empty — nothing is fabricated.
+    """
+    from app.services.live_director import get_live_director
+
+    monitor_summary = _multi_feed_monitor_summary(request)
+    service = get_live_director()
+    if service is None:
+        return {
+            "running": False,
+            "decisions": [],
+            "status": None,
+            "multi_feed_monitor": monitor_summary,
+        }
+    return {
+        "running": service.running,
+        "decisions": service.decision_log(limit=limit),
+        "status": service.status(),
+        "multi_feed_monitor": monitor_summary,
+    }
 
 
 @router.get("/suggestions", response_model=list[DirectorSuggestion])
@@ -159,11 +258,51 @@ async def set_director_mode(
 ):
     """Explicit mode transition. Operator or admin.
 
-    Accepts "full_auto" | "semi_auto" | "manual"; the legacy value "auto"
-    is normalised to "full_auto".
+    Accepts "full_auto" | "semi_auto" | "manual" | "clone"; the legacy
+    value "auto" is normalised to "full_auto".
     """
     return await director_service.set_mode(
         payload.mode, updated_by=user.username
+    )
+
+
+@router.post("/clone/grab", response_model=DirectorState)
+async def grab_clone_control(
+    user: TokenPayload = Depends(require_operator),
+):
+    """Grab manual control inside CLONE mode (Phase 27). Operator+.
+
+    While grabbed, the clone director behaves exactly like MANUAL: the
+    AI never writes, and the human drives via the scene/camera writes.
+    409 outside CLONE mode — the service's message is surfaced as-is.
+    Idempotent when already grabbed. The actor is the current user;
+    the request carries no body.
+    """
+    try:
+        return await director_service.grab_clone_control(
+            updated_by=user.username
+        )
+    except DirectorModeError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(exc),
+        )
+
+
+@router.post("/clone/release", response_model=DirectorState)
+async def release_clone_control(
+    user: TokenPayload = Depends(require_operator),
+):
+    """Release a clone grab (Phase 27). Operator+.
+
+    After release the clone director resumes firing with the learned
+    profile. When nothing is grabbed the service is a no-op, so this
+    returns the CURRENT state unchanged (``clone_grabbed`` stays
+    false) — it never fabricates a release that did not happen. The
+    actor is the current user; the request carries no body.
+    """
+    return await director_service.release_clone_control(
+        updated_by=user.username, reason="explicit"
     )
 
 

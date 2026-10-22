@@ -31,6 +31,7 @@ import { DEFAULT_ACCENT } from '@/lib/overlay-params';
 import { useLatestCommentary } from '@/lib/useCommentary';
 import { usePlayerStats } from '@/lib/usePlayerStats';
 import {
+  DEFAULT_DIRECTOR_MODE,
   formatDirectorUpdatedAt,
   getDirectorState,
   setGraphics,
@@ -324,7 +325,7 @@ function GalleryInner() {
     [token, load]
   );
 
-  const mode = state?.mode ?? 'full_auto';
+  const mode = state?.mode ?? DEFAULT_DIRECTOR_MODE;
   // Unlike scene/overlay/lower-third writes (manual-only), template
   // selection is allowed in SEMI_AUTO too — only FULL_AUTO 409s.
   const locked = mode === 'full_auto';
@@ -373,7 +374,9 @@ function GalleryInner() {
                   ? 'Full Auto'
                   : mode === 'semi_auto'
                     ? 'Semi-Auto'
-                    : 'Manual'}
+                    : mode === 'clone'
+                      ? 'Clone'
+                      : 'Manual'}
               </Badge>
             }
           >

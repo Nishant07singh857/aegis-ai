@@ -68,7 +68,8 @@ def director_with_listener(director: DirectorService, messages: list):
 class TestDirectorStateMachine:
     async def test_defaults(self, director: DirectorService):
         state = director.snapshot()
-        assert state["mode"] == "full_auto"
+        # Phase 28: fresh-show default is semi_auto (was full_auto).
+        assert state["mode"] == "semi_auto"
         assert state["scene"] == "main"
         assert state["overlays"] == {"scorebug": True, "killfeed": True}
         assert state["lower_third"] == {
@@ -93,6 +94,7 @@ class TestDirectorStateMachine:
             await director.set_mode("turbo", updated_by="op1")
 
     async def test_set_scene_rejected_in_full_auto(self, director: DirectorService):
+        await director.set_mode("full_auto", updated_by="op1")
         assert director.snapshot()["mode"] == "full_auto"
         with pytest.raises(DirectorModeError):
             await director.set_scene("standings", updated_by="op1")
@@ -119,6 +121,7 @@ class TestDirectorStateMachine:
             await director.set_overlays(updated_by="op1")
 
     async def test_set_overlays_rejected_in_full_auto(self, director: DirectorService):
+        await director.set_mode("full_auto", updated_by="op1")
         with pytest.raises(DirectorModeError):
             await director.set_overlays(scorebug=False, updated_by="op1")
 
@@ -136,6 +139,7 @@ class TestDirectorStateMachine:
         assert state["lower_third"]["visible"] is False
 
     async def test_set_lower_third_rejected_in_full_auto(self, director: DirectorService):
+        await director.set_mode("full_auto", updated_by="op1")
         with pytest.raises(DirectorModeError):
             await director.set_lower_third(visible=True, updated_by="op1")
 
@@ -176,6 +180,7 @@ class TestDirectorStateMachine:
     async def test_system_publish_no_visible_change_no_broadcast(
         self, director_with_listener: DirectorService, messages: list
     ):
+        await director_with_listener.set_mode("full_auto", updated_by="op1")
         messages.clear()
         result = await director_with_listener.system_publish(
             scene="main", updated_by="director_ai:t1"

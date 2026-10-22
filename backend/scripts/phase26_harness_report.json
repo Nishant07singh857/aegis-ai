@@ -1,0 +1,232 @@
+{
+  "started_at": "2026-10-22T09:13:33+0000",
+  "frames": {
+    "entries": [
+      {
+        "id": "d1_e0011_t2815",
+        "key": "57f7040d0c2519c0ae45a5dd46578dd4fb4614c5",
+        "event_type": "FeedEventType.KNOCK"
+      },
+      {
+        "id": "d1_e0022_t2925",
+        "key": "7e9502e306d091a58f4beee4f12ee533965c41d8",
+        "event_type": "FeedEventType.KILL"
+      },
+      {
+        "id": "d1_e0030_t2995",
+        "key": "c7a3cf826b4e8f04821644fa3ac7800ebbe17f82",
+        "event_type": "FeedEventType.KILL"
+      },
+      {
+        "id": "d1_e0050_t3530",
+        "key": "c05bfcb2135c59ec731bfed1594c73a23600b8fb",
+        "event_type": "FeedEventType.KNOCK"
+      },
+      {
+        "id": "d1_e0066_t3788",
+        "key": "0cf6ca97030ace63b8ef517199399d4df3c41eee",
+        "event_type": "FeedEventType.KNOCK"
+      },
+      {
+        "id": "d1_e0069_t3802",
+        "key": "32f8453289f9e2663c5b8abe980e064748191d0f",
+        "event_type": "FeedEventType.KNOCK"
+      },
+      {
+        "id": "d1_e0085_t4136",
+        "key": "da221dae1d5fd7b6b742170bc4c35b11643bc572",
+        "event_type": "FeedEventType.KNOCK"
+      },
+      {
+        "id": "d1_e0086_t4138",
+        "key": "bee475670c2fa537a0460ca19c80a9160905ffe6",
+        "event_type": "FeedEventType.KNOCK"
+      }
+    ],
+    "quiet_verified": 8
+  },
+  "bus_running": true,
+  "default_config": {
+    "batch": 4,
+    "tick_s": 0.5,
+    "theory_interval_16": 2.0
+  },
+  "P0_quiet_20s": {
+    "ingest_events": 0,
+    "bus_kill_knock": 0,
+    "vi_received_delta": 0,
+    "samples_per_feed_in_20s": {
+      "aegis-observer-slot-01": 1,
+      "aegis-observer-slot-02": 1,
+      "aegis-observer-slot-03": 1,
+      "aegis-observer-slot-04": 1,
+      "aegis-observer-slot-05": 1,
+      "aegis-observer-slot-06": 1,
+      "aegis-observer-slot-07": 1,
+      "aegis-observer-slot-08": 1,
+      "aegis-observer-slot-09": 1,
+      "aegis-observer-slot-10": 1,
+      "aegis-observer-slot-11": 0,
+      "aegis-observer-slot-12": 0,
+      "aegis-observer-slot-13": 0,
+      "aegis-observer-slot-14": 0,
+      "aegis-observer-slot-15": 0,
+      "aegis-observer-slot-16": 0
+    },
+    "pass": true
+  },
+  "P1_default_latency": {
+    "injections": [
+      {
+        "feed": 13,
+        "entry": "d1_e0011_t2815",
+        "t_emit_s": 41.168,
+        "t_bus_s": null,
+        "t_vi_s": 41.822,
+        "t_director_s": 41.822,
+        "slot_on_event": 13,
+        "vi_attributed_delta": 0,
+        "vi_kill_knock_delta": 1,
+        "feed_samples_during_hold": 2
+      },
+      {
+        "feed": 3,
+        "entry": "d1_e0022_t2925",
+        "t_emit_s": null,
+        "t_bus_s": null,
+        "t_vi_s": null,
+        "t_director_s": null,
+        "slot_on_event": null,
+        "vi_attributed_delta": null,
+        "vi_kill_knock_delta": 0,
+        "feed_samples_during_hold": 1
+      },
+      {
+        "feed": 16,
+        "entry": "d1_e0030_t2995",
+        "t_emit_s": null,
+        "t_bus_s": null,
+        "t_vi_s": null,
+        "t_director_s": null,
+        "slot_on_event": null,
+        "vi_attributed_delta": null,
+        "vi_kill_knock_delta": 0,
+        "feed_samples_during_hold": 1
+      },
+      {
+        "feed": 7,
+        "entry": "d1_e0050_t3530",
+        "t_emit_s": 42.296,
+        "t_bus_s": null,
+        "t_vi_s": 42.332,
+        "t_director_s": 42.333,
+        "slot_on_event": 7,
+        "vi_attributed_delta": 0,
+        "vi_kill_knock_delta": 1,
+        "feed_samples_during_hold": 2
+      },
+      {
+        "feed": 14,
+        "entry": "d1_e0066_t3788",
+        "t_emit_s": 27.873,
+        "t_bus_s": null,
+        "t_vi_s": 27.897,
+        "t_director_s": 27.897,
+        "slot_on_event": 14,
+        "vi_attributed_delta": 0,
+        "vi_kill_knock_delta": 1,
+        "feed_samples_during_hold": 2
+      },
+      {
+        "feed": 15,
+        "entry": "d1_e0069_t3802",
+        "t_emit_s": 37.283,
+        "t_bus_s": null,
+        "t_vi_s": 37.298,
+        "t_director_s": 37.298,
+        "slot_on_event": 15,
+        "vi_attributed_delta": 0,
+        "vi_kill_knock_delta": 1,
+        "feed_samples_during_hold": 2
+      }
+    ],
+    "emitted": 4,
+    "median": 39.225,
+    "max": 42.296,
+    "slot_violations": 0
+  },
+  "P3_dedup_3_feeds": {
+    "emissions_for_key": 1,
+    "emitting_slots": [
+      3
+    ],
+    "duplicates_suppressed_total": 1,
+    "pass": true
+  },
+  "P4_frozen_feed": {
+    "feed7_health_state": "stale_frames",
+    "feed8_injection": {
+      "feed": 8,
+      "entry": "d1_e0030_t2995",
+      "t_emit_s": 31.178,
+      "t_bus_s": null,
+      "t_vi_s": 31.195,
+      "t_director_s": 31.195,
+      "slot_on_event": 8,
+      "vi_attributed_delta": 0,
+      "vi_kill_knock_delta": 1,
+      "feed_samples_during_hold": 2
+    },
+    "monitor_running": true,
+    "pass": true
+  },
+  "P2_batch4_latency": {
+    "injections": [
+      {
+        "feed": 16,
+        "entry": "d1_e0022_t2925",
+        "t_emit_s": 35.865,
+        "t_bus_s": null,
+        "t_vi_s": 35.871,
+        "t_director_s": 35.871,
+        "slot_on_event": 16,
+        "vi_attributed_delta": 0,
+        "vi_kill_knock_delta": 1,
+        "feed_samples_during_hold": 2
+      },
+      {
+        "feed": 13,
+        "entry": "d1_e0030_t2995",
+        "t_emit_s": 28.955,
+        "t_bus_s": null,
+        "t_vi_s": 28.969,
+        "t_director_s": 28.969,
+        "slot_on_event": 13,
+        "vi_attributed_delta": 0,
+        "vi_kill_knock_delta": 1,
+        "feed_samples_during_hold": 2
+      }
+    ],
+    "emitted": 2,
+    "median": 32.41,
+    "max": 35.865
+  },
+  "P5_join_leave": {
+    "feeds_total_after_join": 16,
+    "feed15_injection": {
+      "feed": 15,
+      "entry": "d1_e0050_t3530",
+      "t_emit_s": 35.337,
+      "t_bus_s": null,
+      "t_vi_s": 35.35,
+      "t_director_s": 35.351,
+      "slot_on_event": 15,
+      "vi_attributed_delta": 0,
+      "vi_kill_knock_delta": 1,
+      "feed_samples_during_hold": 2
+    },
+    "feeds_total_after_remove": 15,
+    "pass": true
+  },
+  "finished_at": "2026-10-22T09:21:45+0000"
+}

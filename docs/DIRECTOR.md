@@ -27,11 +27,11 @@ renders it.
 
 ## Modes
 
-- **FULL_AUTO** (default): only the system — the match simulator /
+- **FULL_AUTO**: only the system — the match simulator /
   Director AI in `app/main.py` — may write, via `system_publish()`. The
   AI acts directly: it never creates suggestions in this mode. Operator
   scene/overlay/lower-third writes are **rejected**.
-- **SEMI_AUTO**: the AI **never writes and never acts**. It may propose
+- **SEMI_AUTO** (default since Phase 28): the AI **never writes and never acts**. It may propose
   *suggestions* via `propose_suggestion()`; each proposal lands in a
   pending queue that an operator approves or rejects through the API. No
   suggestion ever auto-applies. Operator direct writes are still
@@ -50,6 +50,13 @@ renders it.
 - Transitions are **explicit**, via `POST /director/mode`. The legacy
   Phase 6 value `"auto"` is accepted and **normalised to `"full_auto"`**
   — the string `"auto"` is never stored.
+- **Fresh-show default (Phase 28)**: a new show starts in `semi_auto` —
+  AI salaah deta hai, insaan ka aakhri faisla; jab tak Clone ke paas
+  seekha hua data na ho, naya show semi_auto se shuru ho. The canonical
+  default lives in `director_service.DEFAULT_DIRECTOR_MODE`, resolvable
+  via `default_director_mode()` and overridable with the
+  `AEGIS_DIRECTOR_DEFAULT_MODE` env var. It applies only when nothing
+  is set — an explicitly chosen mode is never overridden.
 
 ## Suggestions (SEMI_AUTO only)
 

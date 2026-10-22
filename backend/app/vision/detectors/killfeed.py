@@ -207,6 +207,14 @@ class KillFeedDetector(BaseDetector):
             # the legacy 2x pipeline reads real rows at conf 0-25).
             "layout_upscale": 4.0,
             "layout_min_word_confidence": 25.0,
+            # --- Phase 28 cost cuts (semantics unchanged, A/B-verified
+            # by scripts/phase28_profile.py) ---
+            # Legacy OCR gate: skip the legacy full-band OCR when the
+            # region holds no aligned bright-glyph row (no text line
+            # can be read from it anyway). Measured Phase 28: on real
+            # quiet frames the legacy fallback was 100% of the parse
+            # cost (~0.42 s median) and never produced an entry.
+            "legacy_structure_gate": True,
         }
         self.config.update(config)
         self._seen: Dict[str, float] = {}  # dedup_key -> first seen epoch
@@ -350,6 +358,56 @@ class KillFeedDetector(BaseDetector):
             return None
         return frame[max(0, y1):y2, max(0, x1):x2]
 
+    @staticmethod
+    def _has_text_row(gray: np.ndarray) -> bool:
+        """Cheap structural test: does this grayscale crop hold at
+        least one horizontal row of aligned bright glyphs (a readable
+        text line)?
+
+        Phase 28 legacy gate. The legacy action-word parser can only
+        ever read a text line; a crop whose bright pixels never form
+        >= 5 glyph-sized blobs sharing a baseline (within tolerance)
+        and spanning >= 22% of the width contains no line to read, so
+        paying full-band Tesseract on it is pure waste — measured on
+        real quiet frames, that was ~0.42 s median per sample at a
+        100% rate (Phase 28 profile). Conservative by construction:
+        any doubt (no cv2, odd shapes) returns True = run the OCR.
+        """
+        try:
+            import cv2
+        except Exception:
+            return True
+        if gray is None or gray.size == 0 or gray.ndim != 2:
+            return True
+        rh, rw = gray.shape[:2]
+        bright = (gray >= 150).astype(np.uint8) * 255
+        n, _, stats, cents = cv2.connectedComponentsWithStats(bright, 8)
+        glyphs: List[Tuple[float, float]] = []
+        for i in range(1, n):
+            x, y, w, h, area = (int(v) for v in stats[i])
+            if h < max(3.0, 0.04 * rh) or h > 0.60 * rh:
+                continue
+            if w < 2 or w > 0.30 * rw:
+                continue
+            if area < 3:
+                continue
+            glyphs.append((float(cents[i][0]), float(cents[i][1])))
+        if len(glyphs) < 5:
+            return False
+        tol = max(2.0, 0.06 * rh)
+        glyphs.sort(key=lambda g: g[1])
+        best = 0
+        best_span = 0.0
+        j = 0
+        for i in range(len(glyphs)):
+            while glyphs[i][1] - glyphs[j][1] > tol:
+                j += 1
+            if i - j + 1 > best:
+                best = i - j + 1
+                xs = [g[0] for g in glyphs[j:i + 1]]
+                best_span = max(xs) - min(xs)
+        return best >= 5 and best_span >= 0.22 * rw
+
     def _preprocess(self, region: np.ndarray):
         """BGR region -> high-contrast PIL image ready for Tesseract."""
         from PIL import Image
@@ -360,6 +418,15 @@ class KillFeedDetector(BaseDetector):
             gray = (0.114 * b + 0.587 * g + 0.299 * r).astype(np.uint8)
         else:
             gray = region.astype(np.uint8)
+
+        # Phase 28 legacy gate: no aligned glyph row -> no text line
+        # exists for the legacy parser; skip the Tesseract call that
+        # dominated quiet-feed parse cost. Returns the same None the
+        # blank-region fast path returns, so callers see no change.
+        if bool(self.config.get("legacy_structure_gate", True)) and not (
+            self._has_text_row(gray)
+        ):
+            return None
 
         img = Image.fromarray(gray, mode="L")
         scale = float(self.config["upscale"])
@@ -636,7 +703,27 @@ class KillFeedDetector(BaseDetector):
         Returns a valid KillFeedEntry or None. Never guesses: any
         missing piece (no confident icon slot, unclear names) -> None.
         Public-ish for tests and the Phase-15 hybrid's entry crops.
+
+        Phase 28 note: a row-result micro-cache keyed by the strip's
+        structural glyph mask was built and MEASURED here, then
+        removed — on the harvested real sequences the bar
+        segmentation jitters every frame (box w 83->130 px across
+        consecutive samples) and three key designs (exact strip mask,
+        tight-bar mask, fixed-size normalised mask) all measured
+        0 repeat hits in 28 strip parses (scripts/phase28_profile.py).
+        A cache that never hits is pure collision surface; the wins
+        that measured real are the legacy structure gate and the
+        step order below.
         """
+
+        # Step order (Phase 28): the icon candidates are computed
+        # BEFORE the row OCR, because when no candidate clears the
+        # icon threshold the entry is None regardless of what OCR
+        # would say — previously the OCR result was computed and
+        # discarded on every such strip (Phase 28 profile: row OCR
+        # is the single most expensive stage). When a candidate IS
+        # viable, OCR runs exactly as before and the loop below is
+        # the original one.
         matcher = self._get_matcher()
         if matcher is None or not matcher.available:
             return None
@@ -649,10 +736,22 @@ class KillFeedDetector(BaseDetector):
         k = min(4.0, max(0.5, float(strip.shape[0]) / 24.0))
         threshold = float(self.config.get("icon_threshold", 0.55))
 
-        # 1) OCR word boxes for the row (needed to vet icon candidates).
+        # 1) Row preprocessing (blank-strip gate, unchanged).
         image = self._preprocess_row(strip)
         if image is None:
             return None
+
+        # 2) Weapon icon candidates, best first (moved before OCR —
+        #    see docstring). No viable candidate -> no entry, and the
+        #    row OCR is skipped entirely.
+        candidates = matcher.match_candidates(strip, top_n=4)
+        if not any(
+            m.location is not None and m.score >= threshold and m.location[2] > 0
+            for m in candidates
+        ):
+            return None
+
+        # 3) OCR word boxes for the row (needed to vet icon candidates).
         try:
             words = self._ocr_words(
                 image, scale=float(self.config.get("layout_upscale", 4.0))
@@ -674,20 +773,21 @@ class KillFeedDetector(BaseDetector):
                         confs.append(wd["conf"])
             return " ".join(parts).strip(), confs
 
-        # 2) Weapon icon candidates, best first. A candidate's LOCATION
-        #    defines the icon slot even when the winner is an unknown_*
-        #    glyph (weapon stays None, names still split). Candidates
-        #    are vetted structurally; the first one passing every guard
-        #    wins — a logo mimicking a glyph (GodLike's gold ring vs the
-        #    wheel/headshot shapes) must not fail the whole row.
-        for match in matcher.match_candidates(strip, top_n=4):
+        # 4) Walk the pre-computed candidates (step 2). A candidate's
+        #    LOCATION defines the icon slot even when the winner is an
+        #    unknown_* glyph (weapon stays None, names still split).
+        #    Candidates are vetted structurally; the first one passing
+        #    every guard wins — a logo mimicking a glyph (GodLike's
+        #    gold ring vs the wheel/headshot shapes) must not fail the
+        #    whole row.
+        for match in candidates:
             if match.location is None or match.score < threshold:
                 continue
             ix, iy, iw, ih = match.location
             if iw <= 0:
                 continue
 
-            # 3) Marker slot: strip area right of the icon, before the
+            # 5) Marker slot: strip area right of the icon, before the
             #    victim side. Knock/headshot glyphs live there. The
             #    slot is BOUNDED by the victim side: the first OCR word
             #    at/right of the slot start is the victim's name, and
@@ -719,7 +819,7 @@ class KillFeedDetector(BaseDetector):
                 knock = bool(mm.knock)
                 headshot = bool(mm.headshot)
 
-            # 4) Split names around the slots, STRICTLY: a killer
+            # 6) Split names around the slots, STRICTLY: a killer
             #    token must END at/before the icon, a victim token must
             #    START at/after the marker slot. Words straddling the
             #    slots are dropped — OCR hallucinates letter fragments

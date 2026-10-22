@@ -14,7 +14,14 @@ from .frame_grabber import (
 )
 from .device_manager import DeviceManager, SpectatorDevice, DeviceStatus
 from .adb_controller import ADBController, ADBCommand
-from .feed_health_monitor import FeedHealthMonitor, FeedHealth, HealthStatus
+from .feed_health_monitor import (
+    FeedHealthMonitor,
+    FeedHealth,
+    HealthStatus,
+    MonitorFeedHealth,
+    MonitorFeedState,
+    MultiFeedHealthTracker,
+)
 from .resolution_scaler import ResolutionScaler, ScalerConfig
 from .config import CaptureConfig, load_capture_config, parse_roi
 from .pipeline import FramePipeline, PipelineResult, DetectorOutcome
@@ -34,6 +41,9 @@ __all__ = [
     "FeedHealthMonitor",
     "FeedHealth",
     "HealthStatus",
+    "MonitorFeedHealth",
+    "MonitorFeedState",
+    "MultiFeedHealthTracker",
     "ResolutionScaler",
     "ScalerConfig",
     "CaptureConfig",

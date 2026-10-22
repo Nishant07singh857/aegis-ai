@@ -1,0 +1,176 @@
+{
+  "started_at": "2026-10-22T10:40:36+0000",
+  "band_filter_env": "(unset)",
+  "per_sample_fresh_detector": {
+    "entry": {
+      "n": 32,
+      "median_s": 1.0979,
+      "p95_s": 1.6371,
+      "mean_s": 1.1091,
+      "min_s": 0.6559,
+      "max_s": 1.9237,
+      "samples_with_candidates": 32,
+      "total_candidates": 32
+    },
+    "quiet": {
+      "n": 32,
+      "median_s": 0.0278,
+      "p95_s": 0.0383,
+      "mean_s": 0.0305,
+      "min_s": 0.0251,
+      "max_s": 0.0692,
+      "samples_with_candidates": 0,
+      "total_candidates": 0
+    }
+  },
+  "per_sample_repeat_single_detector": {
+    "entry": {
+      "n": 32,
+      "median_s": 0.0009,
+      "p95_s": 0.7005,
+      "mean_s": 0.1151,
+      "min_s": 0.0008,
+      "max_s": 1.5453
+    },
+    "quiet": {
+      "n": 32,
+      "median_s": 0.0009,
+      "p95_s": 0.0286,
+      "mean_s": 0.0045,
+      "min_s": 0.0009,
+      "max_s": 0.0309
+    }
+  },
+  "monitor_status": {
+    "sampler_at_start": {
+      "mode": "thread",
+      "cpu_count": 2,
+      "workers_effective": 2,
+      "workers_cap": 8,
+      "workers_explicit": null,
+      "pool_size": 0,
+      "force_parse_every": 3,
+      "band_filter_available": true,
+      "samples_parsed": 0,
+      "samples_skipped": 0,
+      "prefilter_bypass_pending": 0,
+      "prefilter_bypass_forced": 0,
+      "prefilter_errors": 0
+    },
+    "quiet_fleet": {
+      "ticks": 8,
+      "total_samples": 32,
+      "wall_s_for_32_samples": 31.389,
+      "wall_s_per_16feed_cycle": 15.694,
+      "sampler": {
+        "mode": "thread",
+        "cpu_count": 2,
+        "workers_effective": 2,
+        "workers_cap": 8,
+        "workers_explicit": null,
+        "pool_size": 2,
+        "force_parse_every": 3,
+        "band_filter_available": true,
+        "samples_parsed": 16,
+        "samples_skipped": 16,
+        "prefilter_bypass_pending": 0,
+        "prefilter_bypass_forced": 0,
+        "prefilter_errors": 0
+      },
+      "per_feed": {
+        "aegis-observer-slot-01": {
+          "samples": 2,
+          "samples_parsed": 1,
+          "samples_skipped": 1
+        },
+        "aegis-observer-slot-02": {
+          "samples": 2,
+          "samples_parsed": 1,
+          "samples_skipped": 1
+        },
+        "aegis-observer-slot-03": {
+          "samples": 2,
+          "samples_parsed": 1,
+          "samples_skipped": 1
+        },
+        "aegis-observer-slot-04": {
+          "samples": 2,
+          "samples_parsed": 1,
+          "samples_skipped": 1
+        },
+        "aegis-observer-slot-05": {
+          "samples": 2,
+          "samples_parsed": 1,
+          "samples_skipped": 1
+        },
+        "aegis-observer-slot-06": {
+          "samples": 2,
+          "samples_parsed": 1,
+          "samples_skipped": 1
+        },
+        "aegis-observer-slot-07": {
+          "samples": 2,
+          "samples_parsed": 1,
+          "samples_skipped": 1
+        },
+        "aegis-observer-slot-08": {
+          "samples": 2,
+          "samples_parsed": 1,
+          "samples_skipped": 1
+        },
+        "aegis-observer-slot-09": {
+          "samples": 2,
+          "samples_parsed": 1,
+          "samples_skipped": 1
+        },
+        "aegis-observer-slot-10": {
+          "samples": 2,
+          "samples_parsed": 1,
+          "samples_skipped": 1
+        },
+        "aegis-observer-slot-11": {
+          "samples": 2,
+          "samples_parsed": 1,
+          "samples_skipped": 1
+        },
+        "aegis-observer-slot-12": {
+          "samples": 2,
+          "samples_parsed": 1,
+          "samples_skipped": 1
+        },
+        "aegis-observer-slot-13": {
+          "samples": 2,
+          "samples_parsed": 1,
+          "samples_skipped": 1
+        },
+        "aegis-observer-slot-14": {
+          "samples": 2,
+          "samples_parsed": 1,
+          "samples_skipped": 1
+        },
+        "aegis-observer-slot-15": {
+          "samples": 2,
+          "samples_parsed": 1,
+          "samples_skipped": 1
+        },
+        "aegis-observer-slot-16": {
+          "samples": 2,
+          "samples_parsed": 1,
+          "samples_skipped": 1
+        }
+      },
+      "events_emitted": 0
+    },
+    "entry_hold_feed5": {
+      "samples_taken": 6,
+      "parsed_delta": 4,
+      "skipped_delta": 2,
+      "bypass_pending_delta": 1,
+      "bypass_forced_delta": 2,
+      "filter_errors_delta": 0,
+      "emitted_at_sample": 2,
+      "ingested_total": 1
+    }
+  },
+  "finished_at": "2026-10-22T10:41:57+0000"
+}

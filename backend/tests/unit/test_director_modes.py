@@ -77,8 +77,9 @@ def _suggestion(
 
 @pytest.mark.unit
 class TestThreeModes:
-    async def test_default_mode_is_full_auto(self, director: DirectorService):
-        assert director.snapshot()["mode"] == "full_auto"
+    async def test_default_mode_is_semi_auto(self, director: DirectorService):
+        # Phase 28: fresh-show default is semi_auto (was full_auto).
+        assert director.snapshot()["mode"] == "semi_auto"
 
     async def test_legacy_auto_normalises_to_full_auto(
         self, director: DirectorService
@@ -92,6 +93,7 @@ class TestThreeModes:
     async def test_legacy_auto_noop_when_already_full_auto(
         self, director_with_listener: DirectorService, messages: list
     ):
+        await director_with_listener.set_mode("full_auto", updated_by="op1")
         messages.clear()
         state = await director_with_listener.set_mode("auto",
                                                       updated_by="op1")
@@ -100,6 +102,9 @@ class TestThreeModes:
         assert messages == []
 
     async def test_semi_auto_transition(self, director: DirectorService):
+        # Phase 28: semi_auto is the fresh default, so move away first —
+        # set_mode to the already-active mode is an honest no-op.
+        await director.set_mode("manual", updated_by="op1")
         state = await director.set_mode("semi_auto", updated_by="op1")
         assert state["mode"] == "semi_auto"
         assert state["updated_by"] == "op1"
@@ -297,7 +302,7 @@ class TestModeGatedAI:
     async def test_full_auto_never_creates_suggestions(
         self, director_with_listener: DirectorService, messages: list
     ):
-        # Default mode is full_auto.
+        await director_with_listener.set_mode("full_auto", updated_by="op1")
         messages.clear()
         suggestion = await director_with_listener.propose_suggestion(
             **_suggestion()
@@ -309,6 +314,7 @@ class TestModeGatedAI:
     async def test_full_auto_system_publish_still_writes(
         self, director_with_listener: DirectorService
     ):
+        await director_with_listener.set_mode("full_auto", updated_by="op1")
         result = await director_with_listener.system_publish(
             scene="standings", updated_by="director_ai:t1"
         )

@@ -171,6 +171,7 @@ class TestGraphicsModeRule:
     async def test_full_auto_rejects_with_409_and_state_unchanged(
         self, director_with_listener: DirectorService, messages: list
     ):
+        await director_with_listener.set_mode("full_auto", updated_by="op1")
         assert director_with_listener.snapshot()["mode"] == "full_auto"
         before = director_with_listener.snapshot()
         messages.clear()

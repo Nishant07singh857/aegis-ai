@@ -149,6 +149,94 @@ class DayReelSegment(BaseModel):
     team: Optional[str] = None
 
 
+QueueState = Literal[
+    "preparing", "queued", "ready", "taken", "expired", "dismissed"
+]
+
+
+class ReplayQueueEntry(BaseModel):
+    """One offer/take queue entry (Phase 25, P0-2).
+
+    ``is_video`` is the honesty marker: True ONLY when the renderer
+    really cut a clip from an ISO recording for this moment; False
+    means the take re-emits buffered events (event replay).
+    """
+
+    id: str
+    moment_id: Optional[str] = None
+    kind: str
+    score: int = Field(ge=0, le=100)
+    reason: str
+    player: Optional[str] = None
+    team: Optional[str] = None
+    opponents: List[str] = Field(default_factory=list)
+    window_start: float
+    window_end: float
+    window_start_iso: Optional[str] = None
+    window_end_iso: Optional[str] = None
+    feed_id: Optional[str] = None
+    slot_number: Optional[int] = None
+    source: str
+    state: QueueState
+    state_history: List[str] = Field(default_factory=list)
+    is_video: bool = False
+    render_status: str = "not_requested"
+    render_files: Dict[str, str] = Field(default_factory=dict)
+    render_error: Optional[str] = None
+    recording_path: Optional[str] = None
+    slot_label: Optional[str] = Field(
+        default=None, description="'A' or 'B' while the entry holds a READY offer slot."
+    )
+    verified: Optional[bool] = None
+    created_at: float
+    created_at_iso: Optional[str] = None
+    ready_at: Optional[float] = None
+    taken_at: Optional[float] = None
+    taken_at_iso: Optional[str] = None
+    taken_by: Optional[str] = None
+    expires_at: float
+    status_note: Optional[str] = None
+
+
+class ReplayQueueStatus(BaseModel):
+    """Queue list/status surface: entries + the live take gate."""
+
+    counts: Dict[str, int] = Field(default_factory=dict)
+    ready_slots: Dict[str, str] = Field(default_factory=dict)
+    can_take_now: Dict[str, Any]
+    ttl_seconds: float
+    max_entries: int
+    min_score: int
+    max_ready: int
+    subscribed_bus: Optional[str] = None
+    entries: List[ReplayQueueEntry] = Field(default_factory=list)
+
+
+class RecorderFeedStatus(BaseModel):
+    feed_id: str
+    source_id: Optional[str] = None
+    state: Literal["recording", "no_source", "disk_full_paused", "stopped"]
+    frames_written: int = 0
+    segments: int = 0
+    open_segment: Optional[str] = None
+    last_frame_at: Optional[float] = None
+    last_error: Optional[str] = None
+
+
+class RecorderStatus(BaseModel):
+    """ISO recorder status (Phase 25, P0-2), incl. storage math."""
+
+    running: bool
+    recordings_dir: str
+    segment_seconds: float
+    total_cap_bytes: int
+    total_bytes: int
+    fps: int
+    bitrate: str
+    storage_math: Dict[str, float] = Field(default_factory=dict)
+    feeds: Dict[str, RecorderFeedStatus] = Field(default_factory=dict)
+
+
 class DayReel(BaseModel):
     """Whole-day highlight reel: scored moments ordered by excitement,
     duration-capped. Honestly empty when nothing was recorded."""

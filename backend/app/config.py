@@ -143,6 +143,16 @@ class Settings(BaseSettings):
     FIGHT_INTENSITY_SCORE_THRESHOLD: int = Field(default=30, ge=1, le=100)
     FIGHT_COOLDOWN_SECONDS: int = Field(default=5, ge=1, le=30)
     
+    # Director (Phase 28): fresh-show default mode. The runtime
+    # canonical resolver is app.services.director_service.
+    # default_director_mode() (reads this same env var at call time);
+    # this field registers the setting for ops visibility. Only the
+    # default when nothing is set — explicit mode choices are kept.
+    AEGIS_DIRECTOR_DEFAULT_MODE: str = Field(
+        default="semi_auto",
+        description="Fresh-show director default: full_auto | semi_auto | manual | clone",
+    )
+
     # OBS / Broadcast
     OBS_WS_URL: str = Field(default="ws://localhost:4455")
     OBS_PASSWORD: Optional[str] = None

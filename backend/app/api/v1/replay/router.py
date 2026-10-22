@@ -31,8 +31,9 @@ from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import FileResponse
 
-from app.api.deps import TokenPayload, get_current_user, require_operator
+from app.api.deps import TokenPayload, get_current_user, require_operator, require_role
 from app.services.replay import replay_service
+from app.services.replay.queue import ReplayEntryNotFound, ReplayTakeRefused
 from app.services.replay.schemas import (
     CaptureRequest,
     Clip,
@@ -41,8 +42,16 @@ from app.services.replay.schemas import (
     HighlightRender,
     Mark,
     PlayRequest,
+    RecorderStatus,
     RenderRequest,
+    ReplayQueueEntry,
+    ReplayQueueStatus,
 )
+
+#: Take/dismiss are director decisions (blueprint C7): director and
+#: operator (and admin above them) only — spotters/observers may not
+#: take a replay to air.
+require_director_or_operator = require_role("admin", "operator", "director")
 
 router = APIRouter(prefix="/replay", tags=["Replay"])
 
@@ -240,6 +249,146 @@ async def list_renders(
 ) -> List[HighlightRender]:
     """All highlight render records, newest first."""
     return [_render_to_schema(r) for r in replay_service.list_renders()]
+
+
+# ── Phase 25 (P0-2): replay offer/take queue + ISO recorder ─────
+
+
+def _queue():
+    """The offer/take queue bound to the replay service singleton."""
+    return replay_service.get_queue()
+
+
+def _recorder():
+    """The ISO recorder attached to the replay service, built lazily
+    (no frame provider -> feeds honestly report no_source until the
+    coordinator wires the capture-manager-backed recorder at startup).
+    """
+    if replay_service.recorder is None:
+        from app.services.replay.recorder import ISORecorder
+
+        replay_service.attach_recorder(ISORecorder())
+    return replay_service.recorder
+
+
+@router.get("/queue", response_model=ReplayQueueStatus)
+async def get_replay_queue(
+    _user: TokenPayload = Depends(get_current_user),
+) -> ReplayQueueStatus:
+    """Queue entries (newest first) + ready A/B slots + the live
+    ``can_take_now`` lull gate. Any authenticated user."""
+    return ReplayQueueStatus(**_queue().status())
+
+
+@router.post("/queue/scan", response_model=ReplayQueueStatus)
+async def scan_replay_queue(
+    _user: TokenPayload = Depends(require_operator),
+) -> ReplayQueueStatus:
+    """Scan the highlight reel now and enqueue qualifying off-PGM
+    moments (operator+). The same poll runs from the director ticker
+    when wired; this endpoint makes it explicit and testable."""
+    _queue().poll_highlights()
+    return ReplayQueueStatus(**_queue().status())
+
+
+@router.get("/queue/{entry_id}", response_model=ReplayQueueEntry)
+async def get_replay_queue_entry(
+    entry_id: str,
+    _user: TokenPayload = Depends(get_current_user),
+) -> ReplayQueueEntry:
+    entry = _queue().get(entry_id)
+    if entry is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"No replay queue entry with id {entry_id!r}.",
+        )
+    return ReplayQueueEntry(**entry.to_dict())
+
+
+@router.post("/queue/{entry_id}/take", response_model=ReplayQueueEntry)
+async def take_replay_queue_entry(
+    entry_id: str,
+    user: TokenPayload = Depends(require_director_or_operator),
+) -> ReplayQueueEntry:
+    """Take an offered (READY) replay to air — director/operator only.
+
+    Refused (409) when the lull gate is closed (fight on PGM or the
+    late-phase suppression), when the entry is not READY, when it was
+    already taken, or for operator takes in full_auto mode (the system
+    auto-takes there). A successful take airs exactly once through the
+    existing replay.play path with replay stinger/lower-third packaging.
+    """
+    try:
+        entry = await _queue().take(entry_id, taken_by=user.username, via="operator")
+    except ReplayEntryNotFound:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"No replay queue entry with id {entry_id!r}.",
+        )
+    except ReplayTakeRefused as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={"message": str(exc), "gate": exc.gate},
+        )
+    return ReplayQueueEntry(**entry.to_dict())
+
+
+@router.post("/queue/{entry_id}/dismiss", response_model=ReplayQueueEntry)
+async def dismiss_replay_queue_entry(
+    entry_id: str,
+    user: TokenPayload = Depends(require_director_or_operator),
+) -> ReplayQueueEntry:
+    """Dismiss a queued/offered replay without airing it (director/
+    operator only). Frees its A/B slot for the next queued moment."""
+    try:
+        entry = _queue().dismiss(entry_id, dismissed_by=user.username)
+    except ReplayEntryNotFound:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"No replay queue entry with id {entry_id!r}.",
+        )
+    except ReplayTakeRefused as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail=str(exc)
+        )
+    return ReplayQueueEntry(**entry.to_dict())
+
+
+@router.get("/recorder/status", response_model=RecorderStatus)
+async def get_recorder_status(
+    _user: TokenPayload = Depends(get_current_user),
+) -> RecorderStatus:
+    """Per-feed ISO recording state (recording / no_source /
+    disk_full_paused / stopped) + storage usage and cap."""
+    return RecorderStatus(**_recorder().status())
+
+
+@router.post("/recorder/start", response_model=RecorderStatus)
+async def start_recorder(
+    _user: TokenPayload = Depends(require_operator),
+) -> RecorderStatus:
+    """Start ISO recording (operator+). Feeds with no live frame
+    honestly report no_source and write nothing."""
+    recorder = _recorder()
+    if recorder.frame_provider is not None:
+        result = await recorder.start_async()
+    else:
+        result = recorder.start()
+    return RecorderStatus(**result)
+
+
+@router.post("/recorder/stop", response_model=RecorderStatus)
+async def stop_recorder(
+    _user: TokenPayload = Depends(require_operator),
+) -> RecorderStatus:
+    """Stop ISO recording (operator+): open segments are finalised
+    with their sidecars, so everything recorded stays cuttable."""
+    recorder = _recorder()
+    if recorder.frame_provider is not None:
+        result = await recorder.stop_async()
+    else:
+        result = recorder.stop()
+    return RecorderStatus(**result)
 
 
 @router.get("/highlights/{moment_id}/files/{kind}")

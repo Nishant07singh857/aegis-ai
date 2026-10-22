@@ -1,8 +1,10 @@
 """Pydantic schemas for the /api/v1/director endpoints.
 
-Director modes: "full_auto" | "semi_auto" | "manual". The legacy Phase 6
-value "auto" is accepted by POST /director/mode and normalised to
-"full_auto" — it is never stored or returned.
+Director modes: "full_auto" | "semi_auto" | "manual" | "clone"
+(Phase 27, W3/W4: "clone" is the Director-Style mode — the AI drives
+with the learned knob profile; see docs/DIRECTOR_LEARNING.md). The
+legacy Phase 6 value "auto" is accepted by POST /director/mode and
+normalised to "full_auto" — it is never stored or returned.
 
 Invalid values (bad mode/scene/template id) are rejected by FastAPI
 with 422 and a clear message. Operator writes attempted while the
@@ -27,7 +29,7 @@ from pydantic import (
 
 from app.services.director_service import GRAPHICS_TEMPLATE_OPTIONS
 
-DIRECTOR_MODES = ("full_auto", "semi_auto", "manual")
+DIRECTOR_MODES = ("full_auto", "semi_auto", "manual", "clone")
 
 
 class DirectorScene(str, enum.Enum):
@@ -49,8 +51,9 @@ class SuggestionType(str, enum.Enum):
 class ModeRequest(BaseModel):
     mode: str = Field(
         ...,
-        description='Director mode: "full_auto", "semi_auto" or "manual". '
-        'The legacy value "auto" is accepted and normalised to "full_auto".',
+        description='Director mode: "full_auto", "semi_auto", "manual" '
+        'or "clone". The legacy value "auto" is accepted and normalised '
+        'to "full_auto".',
     )
 
     @field_validator("mode")
@@ -64,7 +67,7 @@ class ModeRequest(BaseModel):
         if normalised not in DIRECTOR_MODES:
             raise ValueError(
                 f'Invalid director mode {value!r}: must be "full_auto", '
-                '"semi_auto" or "manual".'
+                '"semi_auto", "manual" or "clone".'
             )
         return normalised
 
@@ -215,6 +218,38 @@ class DirectorState(BaseModel):
         le=16,
         description="Active observer camera slot (1..16) shown on the "
         "broadcast output video layer.",
+    )
+    # Phase 25 (W1): PVW preview candidate from the live director —
+    # {slot, scene, team_id, fight_id, reason, score, breakdown,
+    # updated_at}; null when there is no candidate.
+    preview: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="PVW preview: the live director's top candidate "
+        "(pre-positioned next feed), or null.",
+    )
+    # Phase 27 (W3/W4): clone-mode manual grab. Only meaningful when
+    # mode == "clone": while grabbed, the human drives (manual
+    # semantics) and the AI is silent until release / inactivity.
+    clone_grabbed: bool = Field(
+        default=False,
+        description="True while a human holds manual control inside "
+        "CLONE mode (POST /director/clone/grab).",
+    )
+    clone_grabbed_by: Optional[str] = Field(
+        default=None,
+        description="Username that grabbed clone control, or null.",
+    )
+    clone_grabbed_at: Optional[str] = Field(
+        default=None,
+        description="ISO timestamp of the clone grab, or null.",
+    )
+    # Phase 29 (W4): per-feed POV summary from the live director's
+    # POV provider — [{slot_number, source_id, team_id,
+    # spectated_index, spectated_name, identity_known}]. Empty when
+    # no POV provider/monitor is wired; never fabricated.
+    pov_feeds: List[Dict[str, Any]] = Field(
+        default_factory=list,
+        description="Per-feed spectated-player POV summary (Phase 29).",
     )
     updated_by: Optional[str] = None
     updated_at: str

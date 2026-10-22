@@ -1,12 +1,20 @@
 # backend/app/agents/observer_agents/director_ai.py
 """
 AEGIS AI - Observer Director Agent
+
+.. deprecated:: Phase 25 (P0-0)
+    SUPERSEDED by ``app/services/live_director`` — the ONE live director
+    decision service. This stack (ObserverDirector + POVSelector +
+    SafetyController + PlaybookManager) had zero live callers; its best
+    logic (absolute switch margins 40/15/5/10, staleness 90s/30s, safety
+    caps, final-zone hard lock, narrative continuity) was ported into the
+    live director, with the fight-hold wart fixed (a true phase-based
+    timer, not a boolean). Kept for reference/tests; do NOT wire this
+    into the live path.
+
 Master AI director that controls the entire broadcast.
 Makes decisions on which feed to show, when to switch,
 when to show replays, and manages broadcast flow.
-
-This is the CRITICAL agent that makes AEGIS feel like
-a professional human esports production team.
 """
 
 import asyncio
@@ -799,13 +807,84 @@ class ObserverDirector(BaseAgent):
         await self._switch_feed(candidate, reason)
     
     async def _execute_playbook_action(self, action: Dict[str, Any]) -> None:
-        """Execute a playbook-prescribed action"""
+        """Execute a playbook-prescribed action.
+
+        Phase 25 (P0-0) fix: PlaybookManager emits PlaybookAction values
+        (``switch_to_fight``, ``show_overview``, ...) that this handler
+        previously did not handle — they silently fell through yet still
+        suppressed the decision loop for that tick. EVERY action name is
+        now handled explicitly: mapped to a real behaviour where this
+        (deprecated) stack has one, or logged as an explicit no-op where
+        it does not. No silent fall-throughs remain.
+        """
         action_type = action.get("type")
-        
+        reason = action.get("reason", "Playbook action")
+
         if action_type == "switch_feed":
-            await self._switch_feed(
-                action.get("candidate"),
-                action.get("reason", "Playbook action"),
+            candidate = action.get("candidate")
+            if candidate is not None:
+                await self._switch_feed(candidate, reason)
+            else:
+                self._log.warning(
+                    "Playbook switch_feed without candidate — explicit no-op"
+                )
+        elif action_type == "switch_to_fight":
+            # PlaybookAction.SWITCH_TO_FIGHT: take the most intense
+            # active fight, if one exists.
+            if self.director_state.active_fights:
+                fight_id = max(
+                    self.director_state.active_fights.items(),
+                    key=lambda item: item[1].get("intensity_score", 0),
+                )[0]
+                await self._switch_to_fight(fight_id, reason)
+            else:
+                self._log.info(
+                    "Playbook switch_to_fight with no active fight — "
+                    "explicit no-op"
+                )
+        elif action_type in ("switch_to_team", "switch_to_player"):
+            target = action.get("team_id") or action.get("player_id")
+            if target:
+                candidate = POVCandidate(
+                    feed_type=(
+                        FeedType.TEAM_POV
+                        if action_type == "switch_to_team"
+                        else FeedType.PLAYER_POV
+                    ),
+                    team_id=action.get("team_id"),
+                    player_id=action.get("player_id"),
+                    priority_score=action.get("priority", 50),
+                    reason=reason,
+                )
+                await self._switch_feed(candidate, reason)
+            else:
+                self._log.warning(
+                    f"Playbook {action_type} without a target — explicit no-op"
+                )
+        elif action_type == "follow_action":
+            # Follow the current scene's fight, if any.
+            current = self.director_state.current_scene
+            if current and current.fight_id:
+                await self._switch_to_fight(current.fight_id, reason)
+            else:
+                self._log.info(
+                    "Playbook follow_action with no current fight — "
+                    "explicit no-op"
+                )
+        elif action_type == "hold_current":
+            self._log.info(f"Playbook hold_current: {reason}")
+        elif action_type in (
+            "show_overview",
+            "show_scoreboard",
+            "rotate_teams",
+        ):
+            # This deprecated stack drives OBS feed switches only; it has
+            # no scene/overview/scoreboard surface (DirectorService owns
+            # scenes on the live path). Explicit no-op, never silent.
+            self._log.info(
+                f"Playbook {action_type} has no equivalent in the "
+                "deprecated ObserverDirector stack — explicit no-op "
+                "(scenes live in DirectorService / services/live_director)"
             )
         elif action_type == "show_replay":
             await self._show_replay(action.get("replay_data"))
@@ -813,6 +892,10 @@ class ObserverDirector(BaseAgent):
             await self._cinematic_shot(
                 action.get("mode"),
                 action.get("reason", "Playbook cinematic"),
+            )
+        else:
+            self._log.warning(
+                f"Unhandled playbook action {action_type!r} — explicit no-op"
             )
     
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

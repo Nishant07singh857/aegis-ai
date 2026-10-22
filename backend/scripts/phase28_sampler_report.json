@@ -1,0 +1,296 @@
+{
+  "phase": "28-W3",
+  "generated_at": "2026-10-22T10:09:03+0000",
+  "methodology_notes": "Two bench generations exist because the detector changed mid-phase. RUN 1 (before Worker A's Phase-28 row-result micro-cache landed in detectors/killfeed.py): every sample paid a full parse \u2014 sequential 50.076s, asyncio_to_thread 60.647s, threadpool2 34.537s (1.45x, winner), processpool2 40.274s (1.24x); per-sample median 1366ms, matching Worker A's independent profile median 1357ms. THIS report is the later run, with the row-cache live: the same entry strip re-seen within its 30s TTL returns in ~5ms in EVERY variant, so walls compress toward (8 full parses + 24 cache hits) and ratios shrink \u2014 threadpool still fastest, processpool slowest (pool startup + 691,200 B/frame pickling dominate when the work itself is cached). Direction is identical in both generations; the sampler design (bounded ThreadPoolExecutor) follows the winner common to both. Cycle runs additionally raced other Phase-28 workers on this shared 2-core VM \u2014 treat cycle wall deltas between the plain/prefilter runs as noise, and the parsed/skipped counts as the signal.",
+  "environment": {
+    "cpu_count": 2,
+    "cv2_version": "4.10.0",
+    "cv2_threads": 2,
+    "python": "3.12.3"
+  },
+  "frames": {
+    "entry_ids": [
+      "d1_e0011_t2815",
+      "d1_e0022_t2925",
+      "d1_e0030_t2995",
+      "d1_e0050_t3530",
+      "d1_e0066_t3788",
+      "d1_e0069_t3802",
+      "d1_e0085_t4136",
+      "d1_e0086_t4138"
+    ],
+    "shape": [
+      360,
+      640,
+      3
+    ],
+    "full_frame_bytes": 691200,
+    "killfeed_region_shape": [
+      101,
+      217,
+      3
+    ],
+    "killfeed_region_bytes": 65751,
+    "n_samples_per_variant": 32
+  },
+  "variants": {
+    "sequential_direct": {
+      "wall_s": 14.253,
+      "samples_per_s": 2.245,
+      "per_sample_ms_median": 4.3,
+      "per_sample_ms_max": 3159.7,
+      "candidates_total": 32,
+      "workers": 1,
+      "notes": "plain loop, one detector (per-feed ownership x1)"
+    },
+    "asyncio_to_thread_seq": {
+      "wall_s": 12.433,
+      "samples_per_s": 2.574,
+      "per_sample_ms_median": 4.6,
+      "per_sample_ms_max": 2538.2,
+      "candidates_total": 32,
+      "workers": 1,
+      "notes": "CURRENT production dispatch: asyncio.to_thread per sample, awaited serially"
+    },
+    "threadpool2": {
+      "wall_s": 12.05,
+      "samples_per_s": 2.656,
+      "per_sample_ms_median": 6.3,
+      "per_sample_ms_max": 4928.0,
+      "candidates_total": 32,
+      "workers": 2,
+      "notes": "ThreadPoolExecutor(2), one detector per lane"
+    },
+    "processpool2": {
+      "wall_s": 24.307,
+      "samples_per_s": 1.317,
+      "per_sample_ms_median": 20.9,
+      "per_sample_ms_max": 5055.1,
+      "candidates_total": 32,
+      "workers": 2,
+      "notes": "ProcessPoolExecutor(2), detector per worker via initializer; FULL frame pickled per task (production fn crops internally); wall includes pool startup + worker warm-up"
+    }
+  },
+  "verdict": {
+    "fastest": "threadpool2",
+    "speedup_vs_sequential": {
+      "sequential_direct": 1.0,
+      "asyncio_to_thread_seq": 1.146,
+      "threadpool2": 1.183,
+      "processpool2": 0.586
+    }
+  },
+  "monitor_cycle": {
+    "no_prefilter": {
+      "label": "plain",
+      "cycle_wall_s": [
+        16.254,
+        12.596
+      ],
+      "sampler": {
+        "mode": "thread",
+        "cpu_count": 2,
+        "workers_effective": 2,
+        "workers_cap": 8,
+        "workers_explicit": null,
+        "pool_size": 2,
+        "force_parse_every": 3,
+        "band_filter_available": false,
+        "samples_parsed": 32,
+        "samples_skipped": 0,
+        "prefilter_bypass_pending": 0,
+        "prefilter_bypass_forced": 0,
+        "prefilter_errors": 0
+      },
+      "per_feed": {
+        "aegis-observer-slot-01": {
+          "samples": 2,
+          "samples_parsed": 2,
+          "samples_skipped": 0
+        },
+        "aegis-observer-slot-02": {
+          "samples": 2,
+          "samples_parsed": 2,
+          "samples_skipped": 0
+        },
+        "aegis-observer-slot-03": {
+          "samples": 2,
+          "samples_parsed": 2,
+          "samples_skipped": 0
+        },
+        "aegis-observer-slot-04": {
+          "samples": 2,
+          "samples_parsed": 2,
+          "samples_skipped": 0
+        },
+        "aegis-observer-slot-05": {
+          "samples": 2,
+          "samples_parsed": 2,
+          "samples_skipped": 0
+        },
+        "aegis-observer-slot-06": {
+          "samples": 2,
+          "samples_parsed": 2,
+          "samples_skipped": 0
+        },
+        "aegis-observer-slot-07": {
+          "samples": 2,
+          "samples_parsed": 2,
+          "samples_skipped": 0
+        },
+        "aegis-observer-slot-08": {
+          "samples": 2,
+          "samples_parsed": 2,
+          "samples_skipped": 0
+        },
+        "aegis-observer-slot-09": {
+          "samples": 2,
+          "samples_parsed": 2,
+          "samples_skipped": 0
+        },
+        "aegis-observer-slot-10": {
+          "samples": 2,
+          "samples_parsed": 2,
+          "samples_skipped": 0
+        },
+        "aegis-observer-slot-11": {
+          "samples": 2,
+          "samples_parsed": 2,
+          "samples_skipped": 0
+        },
+        "aegis-observer-slot-12": {
+          "samples": 2,
+          "samples_parsed": 2,
+          "samples_skipped": 0
+        },
+        "aegis-observer-slot-13": {
+          "samples": 2,
+          "samples_parsed": 2,
+          "samples_skipped": 0
+        },
+        "aegis-observer-slot-14": {
+          "samples": 2,
+          "samples_parsed": 2,
+          "samples_skipped": 0
+        },
+        "aegis-observer-slot-15": {
+          "samples": 2,
+          "samples_parsed": 2,
+          "samples_skipped": 0
+        },
+        "aegis-observer-slot-16": {
+          "samples": 2,
+          "samples_parsed": 2,
+          "samples_skipped": 0
+        }
+      },
+      "events_ingested": 0
+    },
+    "band_change_module_present": true,
+    "with_prefilter": {
+      "label": "prefilter",
+      "cycle_wall_s": [
+        13.469,
+        12.481
+      ],
+      "sampler": {
+        "mode": "thread",
+        "cpu_count": 2,
+        "workers_effective": 2,
+        "workers_cap": 8,
+        "workers_explicit": null,
+        "pool_size": 2,
+        "force_parse_every": 3,
+        "band_filter_available": true,
+        "samples_parsed": 20,
+        "samples_skipped": 12,
+        "prefilter_bypass_pending": 0,
+        "prefilter_bypass_forced": 0,
+        "prefilter_errors": 0
+      },
+      "per_feed": {
+        "aegis-observer-slot-01": {
+          "samples": 2,
+          "samples_parsed": 1,
+          "samples_skipped": 1
+        },
+        "aegis-observer-slot-02": {
+          "samples": 2,
+          "samples_parsed": 1,
+          "samples_skipped": 1
+        },
+        "aegis-observer-slot-03": {
+          "samples": 2,
+          "samples_parsed": 1,
+          "samples_skipped": 1
+        },
+        "aegis-observer-slot-04": {
+          "samples": 2,
+          "samples_parsed": 1,
+          "samples_skipped": 1
+        },
+        "aegis-observer-slot-05": {
+          "samples": 2,
+          "samples_parsed": 1,
+          "samples_skipped": 1
+        },
+        "aegis-observer-slot-06": {
+          "samples": 2,
+          "samples_parsed": 1,
+          "samples_skipped": 1
+        },
+        "aegis-observer-slot-07": {
+          "samples": 2,
+          "samples_parsed": 2,
+          "samples_skipped": 0
+        },
+        "aegis-observer-slot-08": {
+          "samples": 2,
+          "samples_parsed": 2,
+          "samples_skipped": 0
+        },
+        "aegis-observer-slot-09": {
+          "samples": 2,
+          "samples_parsed": 1,
+          "samples_skipped": 1
+        },
+        "aegis-observer-slot-10": {
+          "samples": 2,
+          "samples_parsed": 1,
+          "samples_skipped": 1
+        },
+        "aegis-observer-slot-11": {
+          "samples": 2,
+          "samples_parsed": 1,
+          "samples_skipped": 1
+        },
+        "aegis-observer-slot-12": {
+          "samples": 2,
+          "samples_parsed": 1,
+          "samples_skipped": 1
+        },
+        "aegis-observer-slot-13": {
+          "samples": 2,
+          "samples_parsed": 1,
+          "samples_skipped": 1
+        },
+        "aegis-observer-slot-14": {
+          "samples": 2,
+          "samples_parsed": 1,
+          "samples_skipped": 1
+        },
+        "aegis-observer-slot-15": {
+          "samples": 2,
+          "samples_parsed": 2,
+          "samples_skipped": 0
+        },
+        "aegis-observer-slot-16": {
+          "samples": 2,
+          "samples_parsed": 2,
+          "samples_skipped": 0
+        }
+      },
+      "events_ingested": 0
+    }
+  }
+}

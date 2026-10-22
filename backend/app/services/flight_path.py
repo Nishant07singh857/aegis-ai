@@ -92,6 +92,11 @@ class FlightPathService:
         self._poi_db = poi_db  # None -> lazily resolved singleton
         self._publish = publish
         self._path: Optional[Dict[str, Any]] = None
+        # Phase 25 (P1-6): drop-clash alerts already emitted, keyed by
+        # (poi, team-set, basis) so repeat checks never spam the bus,
+        # plus the alert log itself for read surfaces.
+        self._drop_clash_emitted: set = set()
+        self.drop_clash_alerts: List[Dict[str, Any]] = []
 
     # ── POI db access ───────────────────────────────────────────
 
@@ -171,6 +176,9 @@ class FlightPathService:
 
     def clear(self) -> None:
         self._path = None
+        # A new match's path must re-arm clash detection honestly.
+        self._drop_clash_emitted = set()
+        self.drop_clash_alerts = []
 
     # ── reads ───────────────────────────────────────────────────
 
@@ -271,6 +279,138 @@ class FlightPathService:
         return sorted(
             per_team.values(), key=lambda e: (-e["drop_count"], e["team_id"])
         )
+
+    # ── drop-clash alerts (Phase 25, P1-6) ──────────────────────
+
+    def detect_drop_clashes(
+        self,
+        drop_rows: List[Dict[str, Any]],
+        corridor_half_width: float = DEFAULT_CORRIDOR_HALF_WIDTH,
+    ) -> List[Dict[str, Any]]:
+        """Drop clashes in recorded drop data — pure, no emission.
+
+        Two bases, both from REAL recorded rows only:
+
+        * ``predicted`` — 2+ teams whose corridor predicted drops
+          (``predicted_drops``) share the same usual POI. Only exists
+          pre-drop, from the flight corridor + drop history.
+        * ``observed`` — 2+ distinct teams with recorded drops at the
+          same named POI in ``drop_rows`` itself.
+
+        Distances are corridor / normalized map units only — no metre
+        figure is ever stated (no calibrated scale exists here).
+        No flight path / no history / no shared POI -> empty list:
+        a clash is never synthesized. The flight path gate applies to
+        BOTH bases: the drop-clash surface is a plane-phase product of
+        the director-set path, so without one no alert exists at all.
+        """
+        if self._path is None:
+            return []
+        alerts: List[Dict[str, Any]] = []
+        seen: set = set()
+
+        def _add(poi: str, teams: List[Dict[str, Any]], basis: str,
+                 source: str) -> None:
+            team_ids = sorted({str(t["team_id"]) for t in teams if t.get("team_id")})
+            if len(team_ids) < 2:
+                return
+            key = (poi, tuple(team_ids), basis)
+            if key in seen:
+                return
+            seen.add(key)
+            names = {
+                str(t["team_id"]): t.get("team_name")
+                for t in teams
+                if t.get("team_id")
+            }
+            alerts.append(
+                {
+                    "kind": "drop_clash",
+                    "poi": poi,
+                    "teams": team_ids,
+                    "team_names": [names.get(t) for t in team_ids],
+                    "basis": basis,
+                    "source": source,
+                    # Predicted clashes are inference over recorded
+                    # history; observed clashes are the records
+                    # themselves.
+                    "inferred": basis == "predicted",
+                    "units": "normalized_map_coordinates",
+                    "corridor_half_width": corridor_half_width,
+                    "map_id": self._path.get("map_id") if self._path else None,
+                    "match_id": self._path.get("match_id") if self._path else None,
+                }
+            )
+
+        # Predicted basis (needs a set path; predicted_drops enforces).
+        by_poi: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+        for entry in self.predicted_drops(
+            drop_rows, corridor_half_width=corridor_half_width
+        ):
+            if entry.get("usual_poi"):
+                by_poi[str(entry["usual_poi"])].append(entry)
+        for poi, teams in by_poi.items():
+            _add(poi, teams, "predicted", "predicted_drops_corridor")
+
+        # Observed basis: the recorded rows themselves.
+        observed: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+        for row in drop_rows or []:
+            named = row.get("named_location")
+            team_id = str(row.get("team_id") or "")
+            if named and team_id:
+                observed[str(named)].append(
+                    {"team_id": team_id, "team_name": row.get("team_name")}
+                )
+        for poi, teams in observed.items():
+            _add(poi, teams, "observed", "recorded_drop_events")
+
+        return alerts
+
+    async def check_drop_clashes(
+        self,
+        drop_rows: List[Dict[str, Any]],
+        corridor_half_width: float = DEFAULT_CORRIDOR_HALF_WIDTH,
+    ) -> List[Dict[str, Any]]:
+        """Detect clashes and emit NEW ones as bus ``intel_alert``s.
+
+        Emission follows the Phase 24 alert conventions: the payload
+        is an ``intel_alert`` whose ``kind`` is ``drop_clash`` (the
+        live director is its consumer). Each (poi, teams, basis)
+        signature is emitted at most once per set flight path.
+        Returns only the alerts emitted by THIS call. With no
+        publisher wired the alerts are still recorded and returned —
+        detection never depends on the bus.
+        """
+        fresh: List[Dict[str, Any]] = []
+        for alert in self.detect_drop_clashes(
+            drop_rows, corridor_half_width=corridor_half_width
+        ):
+            signature = (
+                alert["poi"],
+                tuple(alert["teams"]),
+                alert["basis"],
+            )
+            if signature in self._drop_clash_emitted:
+                continue
+            self._drop_clash_emitted.add(signature)
+            self.drop_clash_alerts.append(alert)
+            fresh.append(alert)
+            if self._publish is not None:
+                try:
+                    await self._publish("intel_alert", dict(alert))
+                except Exception:  # pragma: no cover - defensive
+                    pass
+            logger.info(
+                "drop_clash_detected",
+                poi=alert["poi"],
+                teams=alert["teams"],
+                basis=alert["basis"],
+            )
+        return fresh
+
+    def drop_clash_snapshot(self) -> List[Dict[str, Any]]:
+        """Every drop-clash alert emitted for the current path."""
+        return list(self.drop_clash_alerts)
 
 
 #: Process-wide singleton (wired in app/main.py lifespan).

@@ -36,6 +36,16 @@ from app.api.v1.users.router import router as users_router
 from app.api.v1.tournament.router import router as tournament_router
 from app.api.v1.stream.router import router as stream_router
 from app.api.v1.director.router import router as director_router
+# Phase 27 (W4): director learning loop API (journal stats, proposals,
+# adjustments, learning mode; director/admin writes).
+from app.api.v1.director_learning.router import (
+    router as director_learning_router,
+)
+# Phase 29 (W4): observer auto-pilot API (status, kill-switch,
+# suggestions, override, POV journal; operator-gated).
+from app.api.v1.observer_pilot.router import (
+    router as observer_pilot_router,
+)
 from app.api.v1.cluster.router import router as cluster_router
 # Phase 10: replay/highlights, feed adapter, broadcast flow, observer visuals.
 from app.api.v1.replay.router import router as replay_router
@@ -290,6 +300,10 @@ manager = ConnectionManager()
 # GLOBAL SERVICES
 # ==========================================
 event_bus = EventBus()
+# DEMO_MODE ONLY: DirectorAIEngine is the DEMO simulator's engine (fed
+# exclusively by match_simulator below when DEMO_MODE=1). It is NOT the
+# live director — the live decision service is
+# app/services/live_director (Phase 25, P0-0), wired in the lifespan.
 director_engine = DirectorAIEngine()
 commentary_engine = get_commentary_engine()
 simulation_task = None
@@ -509,7 +523,10 @@ async def simulate_node_restart(node_identifier: str):
 # SIMULATOR TASK — Match Events
 # ==========================================
 async def match_simulator():
-    """Generates realistic match events and feeds them to the real Director AI."""
+    """DEMO_MODE ONLY simulator: generates fake match events and feeds
+    them to the DEMO DirectorAIEngine (app/intelligence/director_ai.py).
+    This is not the live path — real spectator events are directed by
+    app/services/live_director (Phase 25, P0-0)."""
     logger.info("Match simulator started.")
     
     while True:
@@ -884,6 +901,142 @@ async def lifespan(app: FastAPI):
     else:
         app.state.vision_intelligence = None
 
+    # Phase 25 (W1, P0-0): THE live director — the unified decision
+    # service (app/services/live_director). Subscribes to the real bus
+    # (fight.detected promotions, kill/knock events, Phase 24
+    # intel_alerts — their first consumer) and writes camera switches
+    # through DirectorService (scene AND active_camera), honouring the
+    # mode contract. Wired INDEPENDENT of DEMO_MODE: the demo
+    # DirectorAIEngine below is a separate, DEMO_MODE-only path and is
+    # NOT the live director. If the bus/vision is absent the director
+    # is simply not built and its status reports not-running — it never
+    # fabricates events.
+    if event_bus._running:
+        try:
+            from app.services.live_director import build_live_director
+
+            live_director = build_live_director(event_bus, director_service)
+            live_director.start()
+            app.state.live_director = live_director
+            logger.info("Live director started (Phase 25, P0-0)")
+        except Exception as e:
+            app.state.live_director = None
+            logger.warning(f"Live director unavailable: {e}")
+    else:
+        app.state.live_director = None
+
+    # Phase 27 (W1): director learning loop foundation — decision
+    # journal + suggestion-fate capture + manual-mode shadow
+    # reconciliation (app/services/director_learning). Registers the
+    # journal as the decision/fate sink for the hooks in
+    # LiveDirector._log_decision and DirectorService, hooks the
+    # DirectorService output-write path, and starts the periodic
+    # reconciler. Needs no bus: decisions flow only when the live
+    # director runs, fates flow whenever the API is used. Fully
+    # failure-isolated — with it down, directing is unchanged and the
+    # sinks stay no-ops; a dead DB degrades to drop counters.
+    app.state.director_learning = None
+    try:
+        from app.services.director_learning import build_director_learning
+
+        app.state.director_learning = build_director_learning(director_service)
+        logger.info("Director learning journal started (Phase 27, W1)")
+    except Exception as e:
+        logger.warning(f"Director learning unavailable: {e}")
+
+    # Phase 27 (W2 + W3 integration): outcome labeler + periodic
+    # learning analysis. The labeler subscribes to the SAME bus topics
+    # as the live director and persists evidence-backed outcome labels
+    # (fizzle / missed_fight / premature_exit / good_call) for past
+    # decisions. The analysis task runs the learning engine's rule pass
+    # every 10 minutes (proposals in SUGGEST mode, bounded auto-apply
+    # in AUTO mode; OFF creates nothing). Both failure-isolated — with
+    # them down, directing and journaling are unchanged.
+    app.state.outcome_labeler = None
+    if event_bus._running:
+        try:
+            from app.services.director_learning.labeler import (
+                build_outcome_labeler,
+            )
+
+            app.state.outcome_labeler = build_outcome_labeler(event_bus)
+            logger.info("Outcome labeler started (Phase 27, W2)")
+        except Exception as e:
+            logger.warning(f"Outcome labeler unavailable: {e}")
+
+    async def _phase27_analysis_loop() -> None:
+        while True:
+            try:
+                await asyncio.sleep(600)
+                try:
+                    from app.services.director_learning import engine as _eng
+
+                    _run = _eng.periodic_analysis_callable()
+                    await _run()
+                except Exception:
+                    pass
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                pass
+
+    app.state.phase27_analysis_task = asyncio.create_task(
+        _phase27_analysis_loop()
+    )
+
+    # Phase 25 (integration): replay stack (W3) + housekeeping ticker.
+    # The ISO recorder taps the multi-device manager's real frame flow
+    # and the offer/take queue subscribes to the live director's
+    # replay.candidate hand-offs. The ticker closes two loops that are
+    # otherwise event-starved on a quiet feed: the live director's
+    # context-beat completion (W5) and the replay queue's highlight
+    # scan + full-auto take (W3). Every tick is failure-isolated; a
+    # failure here never blocks startup — statuses then honestly
+    # report the pieces as not running.
+    app.state.iso_recorder = None
+    app.state.replay_queue = None
+    try:
+        from app.services.replay.service import build_replay_stack_from_manager
+
+        _recorder, _queue = build_replay_stack_from_manager(
+            multi_device_manager
+        )
+        await _recorder.start_async()
+        if event_bus._running:
+            _queue.subscribe_to(event_bus)
+        app.state.iso_recorder = _recorder
+        app.state.replay_queue = _queue
+        logger.info("Replay stack started (Phase 25: ISO recorder + queue)")
+    except Exception as e:
+        logger.warning(f"Replay stack unavailable: {e}")
+
+    async def _phase25_ticker() -> None:
+        while True:
+            try:
+                await asyncio.sleep(1.5)
+                _ld = getattr(app.state, "live_director", None)
+                if _ld is not None:
+                    try:
+                        await _ld.evaluate_now(trigger="ticker")
+                    except Exception:
+                        pass
+                _q = getattr(app.state, "replay_queue", None)
+                if _q is not None:
+                    try:
+                        _q.poll_highlights()
+                    except Exception:
+                        pass
+                    try:
+                        await _q.maybe_take_auto()
+                    except Exception:
+                        pass
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                pass
+
+    app.state.phase25_ticker_task = asyncio.create_task(_phase25_ticker())
+
     # Phase 23 (W4): grenade trajectory estimator. Consumes kill/knock/
     # utility/position events and stores an ESTIMATED thrower->explosion
     # arc ONLY when both endpoints were actually reported in the same
@@ -961,12 +1114,101 @@ async def lifespan(app: FastAPI):
     # started automatically -- capture begins only when an operator calls
     # POST /api/v1/feed/vision/start. A machine without the vision stack
     # (no cv2) simply skips registration; the backend keeps working.
+    vision_adapter = None
     try:
         from app.services.feed_adapter.vision_adapter import VisionFeedAdapter
-        feed_service.register(VisionFeedAdapter(event_bus))
+        vision_adapter = VisionFeedAdapter(
+            event_bus, multi_device_manager=multi_device_manager
+        )
+        feed_service.register(vision_adapter)
         logger.info("Vision feed adapter registered (idle until operator starts it)")
     except ImportError as e:
         logger.warning(f"Vision feed adapter unavailable, skipping: {e}")
+
+    # Phase 26: THE multi-feed monitor as a lifespan-owned service —
+    # "har feed ~2 sec, isko live karo". Phase 25 built the monitor but
+    # it only existed as a side effect of the operator-gated vision
+    # start, attached to the primary pipeline's lifecycle. Now the
+    # monitor is built and started HERE, with the app: it ingests
+    # through the vision adapter (the identical NormalizedEvent -> bus
+    # path the primary pipeline uses, so VisionIntelligence and the
+    # LiveDirector consume monitor events exactly like single-feed
+    # events), watches the multi-device manager's shared FrameGrabber,
+    # and auto-enrolls every observer feed the manager maps — feeds
+    # joining/leaving mid-match are adopted/dropped on the next tick
+    # (source ids encode their slot; nothing is ever guessed). The
+    # monitor starts no capture itself: it reads frames only from
+    # sources the capture manager already runs. If the bus is down the
+    # monitor is not built and app.state reports it as not running —
+    # honestly, like every other lifespan service.
+    app.state.multi_feed_monitor = None
+    # Phase 29 (W4): ONE cached roster provider, shared by the monitor
+    # (its POV trackers bind spectated identity from observer_slots +
+    # players) and the pilot service (which drives its 30 s refresh).
+    # Built before the monitor so the provider is threaded in at
+    # construction; the initial refresh is failure-isolated — an
+    # unreachable DB simply leaves POV identity honestly UNKNOWN.
+    _pov_roster_provider = None
+    try:
+        from app.services.observer_pilot.roster import CachedRosterProvider
+
+        _pov_roster_provider = CachedRosterProvider()
+        await _pov_roster_provider.refresh()
+    except Exception as e:
+        _pov_roster_provider = None
+        logger.warning(f"POV roster provider unavailable: {e}")
+    if vision_adapter is not None and event_bus._running:
+        try:
+            from app.vision.multi_feed_monitor import build_multi_feed_monitor
+
+            multi_feed_monitor = build_multi_feed_monitor(
+                ingest=vision_adapter.ingest,
+                multi_device_manager=multi_device_manager,
+                roster_provider=_pov_roster_provider,
+            )
+            vision_adapter.set_shared_monitor(multi_feed_monitor)
+            await multi_feed_monitor.start()
+            app.state.multi_feed_monitor = multi_feed_monitor
+            logger.info(
+                "Multi-feed monitor started in lifespan (Phase 26): "
+                "cheap readers on every connected observer feed"
+            )
+        except Exception as e:
+            app.state.multi_feed_monitor = None
+            logger.warning(f"Multi-feed monitor unavailable: {e}")
+
+    # Phase 29 (W4): the observer auto-pilot service — per-feed POV
+    # decisions through the mode policy (docs/OBSERVER_AUTO_PILOT.md
+    # §6), executed by W3's tap executor, journaled durably. The
+    # LiveDirector gets the monitor's POV states as a read-only
+    # provider (status + decision-log colour; scoring untouched).
+    # Failure-isolated like every lifespan service: with it down,
+    # directing and monitoring are unchanged and the pilot API
+    # honestly reports not-running.
+    app.state.observer_pilot = None
+    _mfm_for_pilot = getattr(app.state, "multi_feed_monitor", None)
+    if _mfm_for_pilot is not None:
+        _ld_for_pov = getattr(app.state, "live_director", None)
+        if _ld_for_pov is not None:
+            try:
+                _ld_for_pov.set_pov_state_provider(_mfm_for_pilot.pov_state)
+            except Exception:
+                pass
+        try:
+            from app.services.observer_pilot import build_observer_pilot
+
+            observer_pilot = build_observer_pilot(
+                _mfm_for_pilot,
+                bus=event_bus if event_bus._running else None,
+                roster_provider=_pov_roster_provider,
+                multi_device_manager=multi_device_manager,
+            )
+            observer_pilot.start()
+            app.state.observer_pilot = observer_pilot
+            logger.info("Observer auto-pilot started (Phase 29, W4)")
+        except Exception as e:
+            app.state.observer_pilot = None
+            logger.warning(f"Observer auto-pilot unavailable: {e}")
 
     # Phase 7 / W3: register this process in the distributed cluster registry
     # (Redis-backed, standalone fallback when Redis is unreachable).
@@ -1021,6 +1263,39 @@ async def lifespan(app: FastAPI):
     yield
     
     logger.info("AEGIS AI Shutting down...")
+    _op = getattr(app.state, "observer_pilot", None)
+    if _op is not None:
+        try:
+            _op.stop()
+        except Exception:
+            pass
+    _mfm = getattr(app.state, "multi_feed_monitor", None)
+    if _mfm is not None:
+        try:
+            await _mfm.stop()
+        except Exception:
+            pass
+    _dl = getattr(app.state, "director_learning", None)
+    if _dl is not None:
+        try:
+            _dl.stop()
+        except Exception:
+            pass
+    _ol = getattr(app.state, "outcome_labeler", None)
+    if _ol is not None:
+        try:
+            _ol.stop()
+        except Exception:
+            pass
+    _p27t = getattr(app.state, "phase27_analysis_task", None)
+    if _p27t:
+        _p27t.cancel()
+    _ld = getattr(app.state, "live_director", None)
+    if _ld is not None:
+        try:
+            _ld.stop()
+        except Exception:
+            pass
     _vi = getattr(app.state, "vision_intelligence", None)
     if _vi is not None:
         try:
@@ -1044,6 +1319,9 @@ async def lifespan(app: FastAPI):
         chatter_task.cancel()
     if director_hold_task:
         director_hold_task.cancel()
+    _p25t = getattr(app.state, "phase25_ticker_task", None)
+    if _p25t:
+        _p25t.cancel()
     try:
         await event_bus.disconnect()
     except Exception:
@@ -1088,6 +1366,17 @@ app.include_router(stream_router, prefix="/api/v1", tags=["Stream"])
 
 # Phase 6: director control API (role-gated; see app/api/v1/director).
 app.include_router(director_router, prefix="/api/v1", tags=["Director"])
+
+# Phase 27 (W4): director learning API (role-gated; see
+# app/api/v1/director_learning).
+app.include_router(
+    director_learning_router, prefix="/api/v1", tags=["Director Learning"]
+)
+
+# Phase 29 (W4): observer auto-pilot API.
+app.include_router(
+    observer_pilot_router, prefix="/api/v1", tags=["Observer Pilot"]
+)
 
 # Phase 7 / W3: cluster introspection API (read-only; any authenticated user).
 app.include_router(cluster_router, prefix="/api/v1", tags=["Cluster"])

@@ -1,3 +1,14 @@
+"""DEMO_MODE-ONLY director engine — NOT the live director.
+
+Phase 25 (P0-0) labelling, so this module can never be mistaken for the
+live decision path: ``DirectorAIEngine`` is fed exclusively by the
+DEMO_MODE match simulator in ``app/main.py``. Its ``SWITCH_POV`` decision
+publishes a scene but never an ``active_camera`` slot. The ONE live
+director is ``app/services/live_director`` (unified decision service
+subscribed to the real event bus, writing scene + active_camera through
+DirectorService). Do not wire this engine to live events.
+"""
+
 import time
 import structlog
 from typing import Dict, List, Optional
@@ -25,9 +36,11 @@ class BroadcastEvent:
 
 class DirectorAIEngine:
     """
-    AEGIS AI - Central Director Engine.
-    Implements: Priority Engine, Switch Cooldowns, Production Safety, 
-    Emotion/Cinematic Engine, and AI Explainability.
+    AEGIS AI - DEMO_MODE Director Engine (see module docstring).
+
+    Implements (for the demo simulator only): Priority Engine, Switch
+    Cooldowns, Production Safety, Emotion/Cinematic Engine, and AI
+    Explainability. The live director is services/live_director.
     """
     def __init__(self):
         # Configuration rules per PRD

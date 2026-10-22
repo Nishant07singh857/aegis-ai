@@ -59,6 +59,14 @@ class FeedService:
             "active_adapter": active.status() if active else None,
             "registered_adapters": sorted(self._adapters.keys()),
             "bus_attached": self._bus is not None,
+            # Phase 26: every registered adapter's status, not only the
+            # active one — the vision adapter carries the lifespan
+            # multi-feed monitor's status, which must stay visible
+            # while the simulator is the active source.
+            "adapters": {
+                adapter_id: adapter.status()
+                for adapter_id, adapter in sorted(self._adapters.items())
+            },
         }
 
 

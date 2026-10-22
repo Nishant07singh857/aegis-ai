@@ -29,6 +29,13 @@
  * GET /director/suggestions and kept fresh via "director.suggestion"
  * frames, reconciled on reconnect. Failed calls surface the backend's
  * message honestly — no state is invented client-side.
+ *
+ * Phase 25 (P0-3): the page opens with a true TD multiview
+ * (components/Multiview): PGM + PVW tiles fed by director.state
+ * (active_camera + the new preview candidate), a GFX preview tile, the
+ * replay offer/take A/B tiles, and a status row. PVW is a preview only —
+ * never an inset over PGM, and no control here puts a second live fight
+ * on screen.
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -38,6 +45,7 @@ import { useLiveSocket } from "@/lib/useLiveSocket";
 import { RequireRole } from "@/lib/guard";
 import { Badge, Card, EmptyState, ErrorState, Loading } from "@/components/ui";
 import {
+  DEFAULT_DIRECTOR_MODE,
   DIRECTOR_MODE_OPTIONS,
   DIRECTOR_SCENES,
   SCENE_LABELS,
@@ -56,7 +64,11 @@ import {
   suggestionExpiresIn,
 } from "@/lib/director";
 import { AudioMixer } from "./components/AudioMixer";
+import { ClonePanel } from "./components/ClonePanel";
 import { CommentaryModePanel } from "./components/CommentaryModePanel";
+import { DirectorLearningPanel } from "./components/DirectorLearningPanel";
+import { POVPilotPanel } from "./components/POVPilotPanel";
+import { Multiview } from "./components/Multiview";
 import { StorytellingPanel } from "./components/StorytellingPanel";
 import type {
   DirectorGraphics,
@@ -116,6 +128,7 @@ function Toggle({
 function modeBadgeTone(mode: DirectorMode): "cyan" | "amber" | "green" {
   if (mode === "full_auto") return "cyan";
   if (mode === "semi_auto") return "amber";
+  if (mode === "clone") return "cyan"; // AI-driven, like full_auto
   return "green";
 }
 
@@ -195,6 +208,7 @@ function DirectorConsoleInner() {
     directorSuggestion,
     suggestionSeq,
     status: wsStatus,
+    zone,
   } = useLiveSocket();
 
   const [state, setState] = useState<DirectorState | null>(null);
@@ -292,8 +306,14 @@ function DirectorConsoleInner() {
     [load]
   );
 
-  const mode: DirectorMode = state?.mode ?? "full_auto";
-  const manual = mode === "manual";
+  const mode: DirectorMode = state?.mode ?? DEFAULT_DIRECTOR_MODE;
+  // Phase 27: a GRABBED clone is human-driven exactly like manual —
+  // the backend's manual gate accepts scene/camera/overlay/lower-third
+  // writes in manual mode or in a grabbed clone, so the controls
+  // enable in both.
+  const manual =
+    mode === "manual" || (mode === "clone" && state?.clone_grabbed === true);
+  const cloneUngrabbed = mode === "clone" && !manual;
   const semiAuto = mode === "semi_auto";
   const controlsDisabled = busy !== null || !manual;
   // Graphics template selection is the one operator write allowed in
@@ -304,8 +324,31 @@ function DirectorConsoleInner() {
     (s) => suggestionExpiresIn(s, nowMs) > 0
   );
 
+  // Phase 25 (P0-3): take the PVW preview — the cut goes through the
+  // SAME backend writes as the camera/scene controls below (MANUAL
+  // mode only; the backend 409s otherwise and the message surfaces via
+  // actionError). PGM/PVW then follow the re-read director state —
+  // no local swap is faked here.
+  const takePreview = useCallback(() => {
+    const preview = state?.preview;
+    if (!preview) return;
+    void run("take-preview", async () => {
+      await postDirectorCamera(token, preview.slot);
+      if (
+        preview.scene &&
+        preview.scene !== state?.scene &&
+        (DIRECTOR_SCENES as readonly string[]).includes(preview.scene)
+      ) {
+        await postDirectorScene(
+          token,
+          preview.scene as (typeof DIRECTOR_SCENES)[number]
+        );
+      }
+    });
+  }, [state, run, token]);
+
   return (
-    <div className="mx-auto max-w-4xl space-y-6 px-4 py-8 text-white">
+    <div className="mx-auto max-w-[1600px] space-y-6 px-4 py-8 text-white">
       <div>
         <h1 className="text-2xl font-bold text-[#00f0ff]">Director Console</h1>
         <p className="text-sm text-white/50">
@@ -326,10 +369,21 @@ function DirectorConsoleInner() {
 
       {!loading && state && (
         <>
-          {/* 3-way mode selector */}
+          {/* Phase 25 (P0-3): true multiview — PGM/PVW pair, GFX
+              preview, Replay A/B, status row. All panels below keep
+              working unchanged; this is a layout expansion on top. */}
+          <Multiview
+            token={token}
+            state={state}
+            zone={zone}
+            onTakePreview={takePreview}
+            takePreviewBusy={busy === "take-preview"}
+          />
+
+          {/* 4-way mode selector (Phase 27 adds Clone) */}
           <Card title="Mode">
             <div className="flex flex-col gap-3">
-              <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
                 {DIRECTOR_MODE_OPTIONS.map((option) => {
                   const active = mode === option.value;
                   const isBusy = busy === `mode-${option.value}`;
@@ -338,7 +392,9 @@ function DirectorConsoleInner() {
                       ? "cyan"
                       : option.value === "semi_auto"
                         ? "amber"
-                        : "green";
+                        : option.value === "clone"
+                          ? "violet"
+                          : "green";
                   return (
                     <button
                       key={option.value}
@@ -356,7 +412,9 @@ function DirectorConsoleInner() {
                             ? "border-[#00f0ff] bg-[#00f0ff]/15 shadow-[0_0_24px_rgba(0,240,255,0.25)]"
                             : tone === "amber"
                               ? "border-amber-300 bg-amber-300/15 shadow-[0_0_24px_rgba(252,211,77,0.25)]"
-                              : "border-emerald-300 bg-emerald-300/15 shadow-[0_0_24px_rgba(110,231,183,0.25)]"
+                              : tone === "violet"
+                                ? "border-violet-400 bg-violet-400/15 shadow-[0_0_24px_rgba(167,139,250,0.25)]"
+                                : "border-emerald-300 bg-emerald-300/15 shadow-[0_0_24px_rgba(110,231,183,0.25)]"
                           : "border-white/10 bg-white/5 hover:border-white/25"
                       } ${busy !== null ? "cursor-wait opacity-70" : ""}`}
                     >
@@ -367,7 +425,9 @@ function DirectorConsoleInner() {
                               ? "text-[#00f0ff]"
                               : tone === "amber"
                                 ? "text-amber-300"
-                                : "text-emerald-300"
+                                : tone === "violet"
+                                  ? "text-violet-300"
+                                  : "text-emerald-300"
                             : "text-white/40"
                         }`}
                       >
@@ -387,9 +447,16 @@ function DirectorConsoleInner() {
                   "SEMI-AUTO: the AI proposes suggestions below but never acts on its own. Approve or reject each one — nothing applies without you."}
                 {mode === "manual" &&
                   "MANUAL: you are driving the output directly. The AI is silent."}
+                {mode === "clone" &&
+                  (manual
+                    ? "CLONE (grabbed): tum haath se chala rahe ho — AI chup hai, lekin shadow me seekhta rehta hai. Release karne par clone seekhe hue style par wapas chalega."
+                    : "CLONE: AI tumhare seekhe hue style (learned profile) ke saath chal raha hai. Factory modes hamesha default par rehte hain — seekhna sirf clone ko badalta hai.")}
               </p>
             </div>
           </Card>
+
+          {/* Phase 27: clone profile + grab/release controls */}
+          <ClonePanel token={token} state={state} onStateRefresh={load} />
 
           {/* suggestion queue (SEMI-AUTO) */}
           {semiAuto && (
@@ -436,7 +503,11 @@ function DirectorConsoleInner() {
                 <Badge tone="green">Manual control</Badge>
               ) : (
                 <Badge tone="slate">
-                  {semiAuto ? "Approve suggestions" : "Locked in Full Auto"}
+                  {semiAuto
+                    ? "Approve suggestions"
+                    : cloneUngrabbed
+                      ? "Grab control (Clone)"
+                      : "Locked in Full Auto"}
                 </Badge>
               )
             }
@@ -478,7 +549,11 @@ function DirectorConsoleInner() {
                 <Badge tone="green">Manual control</Badge>
               ) : (
                 <Badge tone="slate">
-                  {semiAuto ? "Approve suggestions" : "Locked in Full Auto"}
+                  {semiAuto
+                    ? "Approve suggestions"
+                    : cloneUngrabbed
+                      ? "Grab control (Clone)"
+                      : "Locked in Full Auto"}
                 </Badge>
               )
             }
@@ -523,7 +598,11 @@ function DirectorConsoleInner() {
                 <Badge tone="green">Manual control</Badge>
               ) : (
                 <Badge tone="slate">
-                  {semiAuto ? "Approve suggestions" : "Locked in Full Auto"}
+                  {semiAuto
+                    ? "Approve suggestions"
+                    : cloneUngrabbed
+                      ? "Grab control (Clone)"
+                      : "Locked in Full Auto"}
                 </Badge>
               )
             }
@@ -649,7 +728,11 @@ function DirectorConsoleInner() {
                 )
               ) : (
                 <Badge tone="slate">
-                  {semiAuto ? "Approve suggestions" : "Locked in Full Auto"}
+                  {semiAuto
+                    ? "Approve suggestions"
+                    : cloneUngrabbed
+                      ? "Grab control (Clone)"
+                      : "Locked in Full Auto"}
                 </Badge>
               )
             }
@@ -723,7 +806,9 @@ function DirectorConsoleInner() {
               <p className="text-sm text-white/60">
                 {mode === "full_auto"
                   ? "AI is driving — no approvals needed. Scene, overlay and lower-third controls are disabled; switch to Semi-Auto or Manual to take control."
-                  : "Scene, overlay and lower-third controls are disabled in Semi-Auto. Approve a suggestion above to apply it, or switch to Manual for direct control."}
+                  : cloneUngrabbed
+                    ? "Clone AI driving hai — scene, overlay and lower-third controls band hain. Upar Clone panel se Grab control lo, phir ye controls khul jayenge."
+                    : "Scene, overlay and lower-third controls are disabled in Semi-Auto. Approve a suggestion above to apply it, or switch to Manual for direct control."}
               </p>
             </div>
           )}
@@ -745,6 +830,16 @@ function DirectorConsoleInner() {
               director|admin get full trigger control; operator sees a
               read-only preview; other roles never render the panel. */}
           <StorytellingPanel token={token} />
+
+          {/* Phase 27: director learning — proposals, applied lessons,
+              learning mode. Director/admin only (the panel itself
+              returns null for other roles; the backend enforces too). */}
+          <DirectorLearningPanel token={token} />
+
+          {/* Phase 29: observer auto-pilot — per-feed POV, pending
+              POV suggestions, kill-switch, manual overrides, and the
+              durable POV decision journal. */}
+          <POVPilotPanel token={token} />
 
           {/* current state summary */}
           <Card title="Current state">

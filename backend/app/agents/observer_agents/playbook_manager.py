@@ -1,6 +1,16 @@
 # backend/app/agents/observer_agents/playbook_manager.py
 """
 AEGIS AI - Playbook Manager
+
+.. deprecated:: Phase 25 (P0-0)
+    Part of the ObserverDirector stack, SUPERSEDED by
+    ``app/services/live_director`` (the one live director). The live
+    director has no playbook layer — every evaluation ends in an
+    explicit logged outcome. Kept for reference/tests; do not wire
+    into the live path. (The action-name dead-end between this module
+    and ObserverDirector._execute_playbook_action was fixed in
+    Phase 25: every PlaybookAction is now handled explicitly there.)
+
 Production playbooks that define broadcast behavior
 for different match situations. Makes AI broadcasts feel
 like professional human productions.

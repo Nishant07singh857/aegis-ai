@@ -200,7 +200,9 @@ class TestPhaseSuggestions:
         from app.services.director_service import DirectorService
 
         svc = DirectorService()
-        # full_auto default: proposals are a silent no-op.
+        # In full_auto, proposals are a silent no-op (Phase 28: the
+        # fresh default is semi_auto, so pin full_auto explicitly).
+        await svc.set_mode("full_auto")
         assert await svc.propose_phase_suggestions({"phase": "plane"}) == []
         await svc.set_mode("semi_auto")
         created = await svc.propose_phase_suggestions({"phase": "final_circle"})

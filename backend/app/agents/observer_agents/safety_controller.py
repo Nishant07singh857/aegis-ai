@@ -1,6 +1,14 @@
 # backend/app/agents/observer_agents/safety_controller.py
 """
 AEGIS AI - Safety Controller
+
+.. deprecated:: Phase 25 (P0-0)
+    Part of the ObserverDirector stack, SUPERSEDED by
+    ``app/services/live_director`` (the one live director). Its rules
+    (3 s switch cooldown, 8 switches/min cap, final-zone hard lock)
+    were ported into the live director. Kept for reference/tests; do
+    not wire into the live path.
+
 Prevents chaotic broadcast behavior, enforces minimum scene times,
 limits switching frequency, and ensures professional production quality.
 """

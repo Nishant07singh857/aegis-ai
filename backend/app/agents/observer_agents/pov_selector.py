@@ -1,6 +1,13 @@
 # backend/app/agents/observer_agents/pov_selector.py
 """
 AEGIS AI - POV Selector
+
+.. deprecated:: Phase 25 (P0-0)
+    Part of the ObserverDirector stack, SUPERSEDED by
+    ``app/services/live_director`` (the one live director). Its scoring
+    logic was ported into the live director's unified Interest Score.
+    Kept for reference/tests; do not wire into the live path.
+
 Selects the best camera angle/feed for broadcasting.
 Considers fight importance, player status, entertainment value,
 and broadcast priorities.

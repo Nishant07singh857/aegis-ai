@@ -4,10 +4,20 @@
  * W1 backend contract (GET/POST /api/v1/director/*, WS "director.state" /
  * "director.suggestion"):
  *   GET  /api/v1/director/state
- *     -> {"mode": "full_auto"|"semi_auto"|"manual",
+ *     -> {"mode": "full_auto"|"semi_auto"|"manual"|"clone",
+ *         "clone_grabbed": bool, "clone_grabbed_by": str|null,
+ *         "clone_grabbed_at": str|null
+ *           (Phase 27: clone-mode manual grab — while grabbed the human
+ *           drives and the AI is silent; absent on older backends),
  *         "scene": "main"|"standings"|"killfeed_focus"|"commentary"|"map_cam",
  *         "scene_entered_at": str (Phase 18: ISO of the last scene change;
  *           drives the map-cam 30s maximum hold),
+ *         "preview": {"slot": int 1..16, "scene": str|null,
+ *                     "reason": str, "score": number|null} | null
+ *           (Phase 25 P0-3: the decision loop's next candidate feed,
+ *           pre-positioned in the director multiview's PVW tile. Absent /
+ *           null on backends predating the field — the PVW tile then shows
+ *           an honest "No preview candidate" standby, never a dummy feed.),
  *         "overlays": {"scorebug": bool, "killfeed": bool},
  *         "lower_third": {"visible": bool, "title": str, "subtitle": str},
  *         "graphics": {"scorebug_template_id": str,
@@ -19,7 +29,9 @@
  *     -> [{"id": str, "type": "scene"|"overlay"|"lower_third",
  *          "payload": {...}, "reason": str, "confidence": 0..1,
  *          "created_at": str, "expires_at": str, "status": "pending"}]
- *   POST /api/v1/director/mode        {"mode": "full_auto"|"semi_auto"|"manual"}
+ *   POST /api/v1/director/mode        {"mode": "full_auto"|"semi_auto"|"manual"|"clone"}
+ *   POST /api/v1/director/clone/grab     (Phase 27, CLONE mode only; 409 outside)
+ *   POST /api/v1/director/clone/release  (Phase 27; no-op state when not grabbed)
  *   POST /api/v1/director/scene       {"scene": ...}
  *   POST /api/v1/director/camera      {"slot": 1..16} (Phase 17 W2, MANUAL)
  *   POST /api/v1/director/overlays    {"scorebug"?: bool, "killfeed"?: bool}
@@ -45,7 +57,16 @@
 
 import { apiFetch } from "./api";
 
-export type DirectorMode = "full_auto" | "semi_auto" | "manual";
+export type DirectorMode = "full_auto" | "semi_auto" | "manual" | "clone";
+
+/**
+ * Fresh-show default mode (Phase 28) — mirrors the backend canonical
+ * default (director_service.DEFAULT_DIRECTOR_MODE, env-overridable via
+ * AEGIS_DIRECTOR_DEFAULT_MODE). Used only when no state has loaded yet:
+ * AI salaah deta hai, insaan ka aakhri faisla — a new show starts in
+ * semi_auto until the operator explicitly picks another mode.
+ */
+export const DEFAULT_DIRECTOR_MODE: DirectorMode = "semi_auto";
 // Phase 18 (W3): "map_cam" is the tactical-overview scene (Visual
 // Broadcast Bible §2). It auto-returns to "main" after 30s max in every
 // mode — see MAP_CAM_MAX_HOLD_SECONDS.
@@ -88,6 +109,39 @@ export interface DirectorGraphics {
   killfeed_template_id: string;
 }
 
+/**
+ * Phase 25 (P0-3): the decision loop's preview candidate — the feed the
+ * director will cut to next, pre-positioned in the multiview PVW tile.
+ *
+ * Backend contract (Phase 25 W1, verified against
+ * DirectorService._default_state + LiveDirectorService._update_preview):
+ * `preview: {slot, scene, team_id, fight_id, reason, score, breakdown,
+ * updated_at} | null`.
+ *   slot    observer camera slot 1..16 of the candidate feed (required)
+ *   scene   scene the cut would land on ("main" today)
+ *   team_id candidate team id (id, not display name — the tile prefers
+ *           the observer mapping's team name and falls back to this)
+ *   reason  human-readable pipeline reason, e.g.
+ *           "Top candidate: <team_id> (score 82.0)"
+ *   score   unified Interest Score, 0..100 float (a 0..1 fraction is
+ *           also accepted and rendered as a percentage — see
+ *           formatPreviewScore). Null when the pipeline reports none.
+ *
+ * Absent/null on older backends: normalizeDirectorState maps every
+ * missing or malformed preview to null and the PVW tile shows an honest
+ * standby — a preview is never invented client-side.
+ */
+export interface DirectorPreview {
+  slot: number;
+  scene: string | null;
+  reason: string;
+  score: number | null;
+  /** Candidate team id from the pipeline (null when unreported). */
+  team_id: string | null;
+  /** Fight the candidate belongs to (null for heat/intel candidates). */
+  fight_id: string | null;
+}
+
 /** Fresh-state defaults — mirrors the backend GRAPHICS_TEMPLATE_DEFAULTS. */
 export const DEFAULT_DIRECTOR_GRAPHICS: DirectorGraphics = {
   scorebug_template_id: "scorebug-classic",
@@ -120,6 +174,21 @@ export interface DirectorState {
    * read it directly — no undefined checks needed post-normalisation.
    */
   graphics: DirectorGraphics;
+  /**
+   * Phase 25 (P0-3): preview candidate for the PVW tile. Present on
+   * every state after normalizeDirectorState — null when the backend
+   * has no candidate (or predates the field). Never undefined, never
+   * fabricated.
+   */
+  preview: DirectorPreview | null;
+  /**
+   * Phase 27: clone-mode manual grab. Present on every state after
+   * normalizeDirectorState (defaults filled in for older backends:
+   * not grabbed, nobody, no stamp). Only meaningful in clone mode.
+   */
+  clone_grabbed: boolean;
+  clone_grabbed_by: string | null;
+  clone_grabbed_at: string | null;
   updated_by: string | null;
   updated_at: string;
 }
@@ -143,6 +212,11 @@ export const DIRECTOR_MODE_OPTIONS: readonly {
     value: "manual",
     label: "Manual",
     description: "You control everything",
+  },
+  {
+    value: "clone",
+    label: "Director Style — Clone",
+    description: "AI drives with your learned style",
   },
 ];
 
@@ -169,9 +243,22 @@ export function isDirectorState(value: unknown): value is DirectorState {
   if (
     s.mode !== "full_auto" &&
     s.mode !== "semi_auto" &&
-    s.mode !== "manual"
+    s.mode !== "manual" &&
+    s.mode !== "clone"
   )
     return false;
+  // clone grab fields (Phase 27) are optional for backward
+  // compatibility; when present they must be bool / string-or-null.
+  if (
+    s.clone_grabbed !== undefined &&
+    s.clone_grabbed !== null &&
+    typeof s.clone_grabbed !== "boolean"
+  )
+    return false;
+  for (const key of ["clone_grabbed_by", "clone_grabbed_at"] as const) {
+    const v = s[key];
+    if (v !== undefined && v !== null && typeof v !== "string") return false;
+  }
   if (typeof s.scene !== "string" || !DIRECTOR_SCENES.includes(s.scene as DirectorScene)) {
     return false;
   }
@@ -224,6 +311,9 @@ export function isDirectorState(value: unknown): value is DirectorState {
       if (v !== undefined && typeof v !== "string") return false;
     }
   }
+  // preview (Phase 25) is deliberately NOT validated here: a malformed
+  // preview must never reject an otherwise-good director state. It is
+  // sanitised to null by normalizeDirectorState instead.
   return true;
 }
 
@@ -237,6 +327,54 @@ export function isDirectorGraphics(value: unknown): value is DirectorGraphics {
     typeof g.standings_template_id === "string" &&
     typeof g.killfeed_template_id === "string"
   );
+}
+
+/**
+ * Sanitise the raw `preview` field of a director state (Phase 25).
+ * Returns a DirectorPreview only when the payload carries a valid
+ * observer slot (integer 1..16); every other shape — absent, null,
+ * malformed — becomes null (the PVW tile's honest standby). The scene
+ * is kept only when it names a known director scene; reason defaults
+ * to "" and score to null rather than an invented value.
+ */
+export function normalizeDirectorPreview(raw: unknown): DirectorPreview | null {
+  if (raw === null || raw === undefined || typeof raw !== "object") {
+    return null;
+  }
+  const p = raw as Record<string, unknown>;
+  const slot = p.slot;
+  if (
+    typeof slot !== "number" ||
+    !Number.isInteger(slot) ||
+    slot < 1 ||
+    slot > 16
+  ) {
+    return null;
+  }
+  const scene =
+    typeof p.scene === "string" &&
+    (DIRECTOR_SCENES as readonly string[]).includes(p.scene)
+      ? p.scene
+      : null;
+  const reason = typeof p.reason === "string" ? p.reason : "";
+  const score =
+    typeof p.score === "number" && Number.isFinite(p.score) ? p.score : null;
+  const team_id =
+    typeof p.team_id === "string" && p.team_id ? p.team_id : null;
+  const fight_id =
+    typeof p.fight_id === "string" && p.fight_id ? p.fight_id : null;
+  return { slot, scene, reason, score, team_id, fight_id };
+}
+
+/**
+ * Display form of a preview score. The decision pipeline's unified
+ * score is 0..100 (POVSelector convention); a 0..1 fraction is rendered
+ * as the equivalent percentage. Null stays null — callers omit the
+ * score entirely instead of showing a guessed number.
+ */
+export function formatPreviewScore(score: number | null): string | null {
+  if (score === null || !Number.isFinite(score)) return null;
+  return String(Math.round(score <= 1 ? score * 100 : score));
 }
 
 /** Normalise a validated state so optional text fields are always strings. */
@@ -269,11 +407,36 @@ export function normalizeDirectorState(state: DirectorState): DirectorState {
     .scene_entered_at;
   const scene_entered_at =
     typeof rawEnteredAt === "string" ? rawEnteredAt : "";
+  // Phase 25 (P0-3): sanitise the preview candidate (null when the
+  // backend has none or predates the field).
+  const preview = normalizeDirectorPreview(
+    (state as { preview?: unknown }).preview
+  );
+  // Phase 27: clone grab fields default honestly (not grabbed) when
+  // the backend payload predates them.
+  const rawGrab = state as {
+    clone_grabbed?: unknown;
+    clone_grabbed_by?: unknown;
+    clone_grabbed_at?: unknown;
+  };
+  const clone_grabbed = rawGrab.clone_grabbed === true;
+  const clone_grabbed_by =
+    typeof rawGrab.clone_grabbed_by === "string" && rawGrab.clone_grabbed_by
+      ? rawGrab.clone_grabbed_by
+      : null;
+  const clone_grabbed_at =
+    typeof rawGrab.clone_grabbed_at === "string" && rawGrab.clone_grabbed_at
+      ? rawGrab.clone_grabbed_at
+      : null;
   return {
     ...state,
     graphics,
     active_camera,
     scene_entered_at,
+    preview,
+    clone_grabbed,
+    clone_grabbed_by,
+    clone_grabbed_at,
     lower_third: {
       visible: state.lower_third.visible,
       title:
@@ -359,6 +522,34 @@ export async function postDirectorMode(
     method: "POST",
     token: token ?? undefined,
     body: { mode },
+  });
+}
+
+/**
+ * POST /api/v1/director/clone/grab (Phase 27) — grab manual control
+ * inside CLONE mode. The backend 409s outside clone mode and surfaces
+ * its message; the actor is the bearer token's user (no body).
+ */
+export async function postDirectorCloneGrab(
+  token: string | null
+): Promise<void> {
+  await apiFetch<unknown>("/api/v1/director/clone/grab", {
+    method: "POST",
+    token: token ?? undefined,
+  });
+}
+
+/**
+ * POST /api/v1/director/clone/release (Phase 27) — release a clone
+ * grab; the clone director resumes with the learned profile. When
+ * nothing is grabbed the backend returns the unchanged state.
+ */
+export async function postDirectorCloneRelease(
+  token: string | null
+): Promise<void> {
+  await apiFetch<unknown>("/api/v1/director/clone/release", {
+    method: "POST",
+    token: token ?? undefined,
   });
 }
 
