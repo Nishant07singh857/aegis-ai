@@ -928,14 +928,30 @@ class TeamStatusReader(BaseDetector):
     How it works: the team-bar region is split into ``slots`` equal cards.
     For each card, the bottom ``hp_strip_fraction`` is sampled in HSV:
 
-    - enough green/yellow pixels  -> ``alive``
-    - enough red-orange pixels    -> ``knocked``
-    - card clearly present but neither color -> ``dead`` (greyed card)
-    - card not detectable at all  -> ``unknown`` (never guessed)
+    - a green/yellow BAND in the strip  -> ``alive``
+    - a red-orange BAND in the strip    -> ``knocked``
+    - card present AND the strip itself positively grey (filled,
+      bright, desaturated, essentially free of HP colours) -> ``dead``
+    - anything else                     -> ``unknown`` (never guessed)
 
-    HSV ranges and ratio thresholds are exposed as constructor arguments and
-    MUST be calibrated against real footage; the defaults are reasonable
-    starting points, not ground truth.
+    Band evidence is measured INSIDE the candidate band, never over
+    the whole strip or card (Phase 29 D-1 root fix, measured
+    2026-10-22 on synthetic frames): a partial HP fill *is* the band,
+    so a fill's width fraction is its HP value, not a detection gate.
+    A colour mask counts as a band only when its row projection is
+    concentrated with a bottom-anchored peak, its band rows form a
+    contiguous run, the coloured pixels inside those rows form solid
+    runs (purity), and the fill fraction *within the band rows*
+    clears a small floor. Scattered colour speckle fails the
+    run/purity/concentration structure even at high density, and a
+    card whose strip carries colour speckle is UNKNOWN -- DEAD is a
+    positive identification of a grey strip, never the residue of
+    failed alive/knocked tests.
+
+    HSV ranges and thresholds are exposed as constructor arguments and
+    MUST be calibrated against real footage; the defaults are
+    measured on the synthetic frame builders in the test suite, not
+    ground truth for real BGMI frames.
     """
 
     DEFAULT_REGION = HUDRegion(name="team_bar", x=0.015, y=0.800,
@@ -950,12 +966,20 @@ class TeamStatusReader(BaseDetector):
             (35, 70, 70), (90, 255, 255)),     # green..yellow HP fill
         knocked_hsv: Tuple[Tuple[int, int, int], Tuple[int, int, int]] = (
             (0, 90, 90), (18, 255, 255)),      # red-orange knock banner
-        healthy_min_ratio: float = 0.10,
-        knocked_min_ratio: float = 0.14,
+        healthy_min_ratio: float = 0.005,
+        knocked_min_ratio: float = 0.005,
         presence_std_min: float = 8.0,
         presence_mean_min: float = 12.0,
         dead_fill_min_ratio: float = 0.25,
         min_confidence: float = 0.5,
+        band_min_concentration: float = 2.0,
+        band_peak_min_fraction: float = 0.30,
+        band_min_run_fraction: float = 0.15,
+        band_min_purity: float = 0.5,
+        band_min_width_fraction: float = 0.005,
+        dead_strip_sat_max: float = 10.0,
+        dead_max_color_ratio: float = 0.005,
+        dead_strip_mean_min: float = 70.0,
     ) -> None:
         super().__init__(name="team_status_reader")
         self.region = region or self.DEFAULT_REGION
@@ -963,12 +987,41 @@ class TeamStatusReader(BaseDetector):
         self.hp_strip_fraction = hp_strip_fraction
         self.healthy_hsv = healthy_hsv
         self.knocked_hsv = knocked_hsv
+        # NOTE (D-1 fix): healthy_min_ratio / knocked_min_ratio are now
+        # floors on the fill fraction INSIDE the candidate band rows,
+        # not over the whole strip. Measured on the synthetic builders:
+        # the smallest drawn band (hp 0.03) has band fill 0.008, real
+        # bands at hp >= 0.05 have >= 0.031; 0.005 sits below both and
+        # above "no band at all" (0.0). The structural band gates below
+        # (concentration / run / purity) carry the anti-speckle load.
         self.healthy_min_ratio = healthy_min_ratio
         self.knocked_min_ratio = knocked_min_ratio
         self.presence_std_min = presence_std_min
         self.presence_mean_min = presence_mean_min
         self.dead_fill_min_ratio = dead_fill_min_ratio
         self.min_confidence = min_confidence
+        # Band-structure gates (measured distributions in
+        # tests/unit/test_team_status_hp_bands.py): real bands score
+        # concentration 2.57-4.54, contiguous band-run 13-23 rows
+        # (0.22-0.39 of the strip), purity 1.0, peak at 0.47-0.61 of
+        # the strip. Colour speckle scores purity <= 0.26 (coloured
+        # densities 0.02-0.40) and, at densities where its ratio could
+        # matter, concentration <= 1.94.
+        self.band_min_concentration = band_min_concentration
+        self.band_peak_min_fraction = band_peak_min_fraction
+        self.band_min_run_fraction = band_min_run_fraction
+        self.band_min_purity = band_min_purity
+        self.band_min_width_fraction = band_min_width_fraction
+        # DEAD positive-test gates, all measured on the STRIP (never
+        # the whole card, whose saturation dilutes the strip out):
+        # synthetic dead strips are filled (fill 0.92-1.0), bright
+        # (mean gray 95-106) and perfectly desaturated (sat 0.0,
+        # HP-colour ratio 0.0). A live card's strip with no visible
+        # band is dark (mean ~56) or carries colour ratio >= 0.019
+        # (speckle floor) -- both fail DEAD and stay UNKNOWN.
+        self.dead_strip_sat_max = dead_strip_sat_max
+        self.dead_max_color_ratio = dead_max_color_ratio
+        self.dead_strip_mean_min = dead_strip_mean_min
         self._last_emitted: Optional[Tuple[str, ...]] = None
         self._log = logger.bind(reader=self.name)
 
@@ -1002,43 +1055,132 @@ class TeamStatusReader(BaseDetector):
         detail.update({"healthy_ratio": round(healthy_ratio, 3),
                        "knocked_ratio": round(knocked_ratio, 3)})
 
-        def _is_bar(mask: np.ndarray) -> bool:
-            """Structural check: a real HP/knock banner is a horizontal band --
-            its color is vertically concentrated (high row-projection
-            peak-to-mean ratio), spans much of the card width, and sits in the
-            lower part of the strip (HUD bars are bottom-anchored). Speckles
-            spread over the strip (noise, background clutter) fail this and
-            are not classified."""
-            rows = np.count_nonzero(mask, axis=1).astype(np.float32)
-            if rows.sum() == 0:
-                return False
-            strip_h = mask.shape[0]
-            concentration = float(rows.max()) / max(float(rows.mean()), 1e-6)
-            peak_row = int(np.argmax(rows))
-            bx, _, bw, _ = cv2.boundingRect(mask)
-            # Real HUD bars are thin, concentrated bands (concentration >> 2);
-            # uniform noise sits near ~1.3. Threshold 2.0 separates them.
-            return (concentration >= 2.0
-                    and bw >= 0.40 * mask.shape[1]
-                    and peak_row >= 0.30 * strip_h)
+        healthy = self._band_evidence(healthy_mask, self.healthy_min_ratio)
+        knocked = self._band_evidence(knocked_mask, self.knocked_min_ratio)
+        detail.update({
+            "healthy_band_fill": round(healthy["band_fill"], 3),
+            "healthy_band_purity": round(healthy["purity"], 3),
+            "healthy_band_run": healthy["run_len"],
+            "knocked_band_fill": round(knocked["band_fill"], 3),
+            "knocked_band_purity": round(knocked["purity"], 3),
+            "knocked_band_run": knocked["run_len"],
+        })
 
-        if healthy_ratio >= self.healthy_min_ratio and _is_bar(healthy_mask):
-            conf = min(1.0, healthy_ratio / self.healthy_min_ratio * 0.5 + 0.5)
-            return TeamSlotStatus.ALIVE, conf, detail
-        if knocked_ratio >= self.knocked_min_ratio and _is_bar(knocked_mask):
-            conf = min(1.0, knocked_ratio / self.knocked_min_ratio * 0.5 + 0.5)
-            return TeamSlotStatus.KNOCKED, conf, detail
+        def _band_conf(band_fill: float) -> float:
+            # Confidence scales with the fill evidence inside the band
+            # (a 3% sliver is a real but weak read; a half-full band is
+            # unambiguous). The structural gates have already passed.
+            return min(1.0, 0.55 + 0.45 * (band_fill / 0.5))
 
-        # Card present but neither alive nor knocked color: greyed-out dead
-        # card -- but only if the card actually has content AND is
-        # desaturated (a real dead card is grey; noise/clutter is not).
+        if healthy["is_band"]:
+            return (TeamSlotStatus.ALIVE, _band_conf(healthy["band_fill"]),
+                    detail)
+        if knocked["is_band"]:
+            return (TeamSlotStatus.KNOCKED, _band_conf(knocked["band_fill"]),
+                    detail)
+
+        # DEAD is a POSITIVE identification, never a fall-through: the
+        # strip itself must be present (filled, bright grey) and
+        # essentially free of colour -- low strip saturation AND a
+        # near-zero HP-colour ratio, both measured on the strip. The
+        # pre-fix whole-card test (fill_ratio >= 0.25 and card mean_sat
+        # < 40) held for EVERY live card (measured fill 1.0, sat
+        # 0.8-12 on live low-HP cards), which is exactly how live
+        # players were read as dead. A card that fails this test --
+        # dark strip, colour speckle, ambiguous tint -- is UNKNOWN.
+        strip_gray = gray[strip_y:h, :]
+        strip_fill_ratio = float(np.count_nonzero(strip_gray > 20)) / strip_gray.size
+        strip_mean = float(np.mean(strip_gray))
+        strip_mean_sat = float(np.mean(hsv[:, :, 1]))
+        color_ratio = healthy_ratio + knocked_ratio
         fill_ratio = float(np.count_nonzero(gray > 20)) / gray.size
         mean_sat = float(np.mean(cv2.cvtColor(card, cv2.COLOR_BGR2HSV)[:, :, 1]))
-        detail["fill_ratio"] = round(fill_ratio, 3)
-        detail["mean_sat"] = round(mean_sat, 1)
-        if fill_ratio >= self.dead_fill_min_ratio and mean_sat < 40:
+        detail.update({
+            "fill_ratio": round(fill_ratio, 3),
+            "mean_sat": round(mean_sat, 1),
+            "strip_fill_ratio": round(strip_fill_ratio, 3),
+            "strip_mean": round(strip_mean, 1),
+            "strip_mean_sat": round(strip_mean_sat, 1),
+            "color_ratio": round(color_ratio, 3),
+        })
+        if (strip_fill_ratio >= self.dead_fill_min_ratio
+                and strip_mean >= self.dead_strip_mean_min
+                and strip_mean_sat <= self.dead_strip_sat_max
+                and color_ratio <= self.dead_max_color_ratio):
             return TeamSlotStatus.DEAD, 0.6, detail
         return TeamSlotStatus.UNKNOWN, 0.0, {**detail, "reason": "ambiguous"}
+
+    def _band_evidence(self, mask: np.ndarray,
+                       min_fill: float) -> Dict[str, Any]:
+        """Structural band evidence for one colour mask of the HP strip.
+
+        A real HP/knock band is a horizontal band: its colour is
+        vertically concentrated (row-projection peak-to-mean), its
+        peak sits in the lower part of the strip, the rows around the
+        peak that carry at least half the peak's pixels form ONE
+        contiguous run, and inside those band rows the coloured
+        pixels form solid horizontal runs (purity = mean over band
+        rows of longest-run / row pixel count). The fill fraction is
+        measured INSIDE the band rows only -- a partial fill is a
+        narrow band, not a failed band, so the mask's width is never
+        gated beyond a minimal anti-dot floor. Colour speckle spread
+        over the strip fails concentration/run/purity (measured:
+        purity <= 0.26 for coloured speckle at densities 0.02-0.40,
+        vs 1.0 for every drawn real band).
+        """
+        import cv2
+        strip_h, strip_w = mask.shape[:2]
+        out: Dict[str, Any] = {"is_band": False, "band_fill": 0.0,
+                               "purity": 0.0, "run_len": 0,
+                               "concentration": 0.0}
+        rows = np.count_nonzero(mask, axis=1).astype(np.float32)
+        if rows.sum() == 0:
+            return out
+        peak_count = float(rows.max())
+        peak_row = int(np.argmax(rows))
+        concentration = peak_count / max(float(rows.mean()), 1e-6)
+        out["concentration"] = concentration
+        # Contiguous run of band rows (rows carrying >= half the peak
+        # row's pixels) containing the peak row.
+        row_floor = max(1.0, 0.5 * peak_count)
+        lo = peak_row
+        while lo > 0 and rows[lo - 1] >= row_floor:
+            lo -= 1
+        hi = peak_row
+        while hi < strip_h - 1 and rows[hi + 1] >= row_floor:
+            hi += 1
+        run_len = hi - lo + 1
+        out["run_len"] = run_len
+        band = mask[lo:hi + 1, :]
+        band_fill = float(np.count_nonzero(band)) / band.size if band.size else 0.0
+        out["band_fill"] = band_fill
+        # Purity: per band row, the longest solid run of colour as a
+        # fraction of that row's coloured pixels (1.0 = one solid bar
+        # segment; speckle rows scatter into isolated pixels).
+        purities = []
+        for r in range(band.shape[0]):
+            count = int(rows[lo + r])
+            if count <= 0:
+                continue
+            row = np.concatenate(([0], band[r] > 0, [0])).astype(np.int8)
+            edges = np.diff(row)
+            starts = np.where(edges == 1)[0]
+            ends = np.where(edges == -1)[0]
+            longest = int(np.max(ends - starts)) if len(starts) else 0
+            purities.append(longest / count)
+        purity = float(np.mean(purities)) if purities else 0.0
+        out["purity"] = purity
+        _, _, bw, _ = cv2.boundingRect(mask)
+        min_run = max(2, int(np.ceil(self.band_min_run_fraction * strip_h)))
+        out["is_band"] = bool(
+            concentration >= self.band_min_concentration
+            and peak_row >= self.band_peak_min_fraction * strip_h
+            and run_len >= min_run
+            and purity >= self.band_min_purity
+            and bw >= max(1.0, self.band_min_width_fraction * strip_w)
+            and band_fill >= min_fill
+        )
+        return out
 
     def read(self, frame: np.ndarray) -> TeamStatus:
         """Classify every slot; unreadable slots are UNKNOWN, never guessed."""

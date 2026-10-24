@@ -37,3 +37,7 @@ backend/data/logs/
 # W3 audio pipeline — runtime artifacts (never commit)
 .local-voices/
 audio_out/
+
+# Local analysis junk: never commit (venv 462MB + 17GB datasets)
+analysis-env/
+data/

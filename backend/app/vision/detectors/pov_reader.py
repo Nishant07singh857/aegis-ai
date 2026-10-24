@@ -32,9 +32,14 @@ Per-card status + HP fraction:
   fraction is None -- never derived from the status.
 
 Known limits (honest, measured or structural):
-  * TeamStatusReader's ``_is_bar`` structural check requires the HP
-    band to span >= 40% of the card width, so an ALIVE card under
-    ~40% HP may classify UNKNOWN there; this reader inherits that.
+  * TeamStatusReader's band check no longer gates on the HP band's
+    width (the D-1 root fix in hud.py): band evidence is measured
+    inside the band rows (concentration / contiguous run / purity),
+    so on the synthetic builders a live card classifies correctly
+    down to ~3% HP fill, and a sub-band fill (<= ~2%, where the
+    drawn bar leaves no pixels in the HSV band) reads UNKNOWN there
+    instead of the pre-fix DEAD. This reader inherits that floor;
+    real-footage calibration of the floor is a scrim task.
   * The nameplate region and the highlight marker are best-guess
     spectator-layout placements (same status as every other
     HUDRegion default in hud.py): they MUST be confirmed/calibrated
