@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 from enum import Enum
 from pydantic_settings import BaseSettings
-from pydantic import Field, SecretStr, field_validator
+from pydantic import Field, SecretStr, field_validator, model_validator
 
 class Environment(str, Enum):
     DEVELOPMENT = "development"
@@ -32,6 +32,30 @@ class AgentPriority(int, Enum):
     LOW = 40
     BACKGROUND = 20
 
+class GuardedSecretStr(SecretStr):
+    """SECRET_KEY type (Integrity Fix Pack, C1).
+
+    There is deliberately NO usable default value for the JWT signing key
+    anywhere in code: when SECRET_KEY is not supplied via the environment
+    the stored value is empty and ``get_secret_value()`` raises a loud
+    RuntimeError instead of silently returning a committed, forgeable
+    string. ``security.py`` signs/verifies JWTs exclusively through
+    ``get_secret_value()``, so an unconfigured deployment can never mint
+    or accept tokens. In production, Settings validation (below) fails
+    even earlier, at boot.
+    """
+
+    def get_secret_value(self) -> str:
+        value = self._secret_value
+        if not value:
+            raise RuntimeError(
+                "SECRET_KEY is not set: refusing to sign or verify JWTs "
+                "without a configured signing key. Set SECRET_KEY in the "
+                "environment (generate one with `openssl rand -hex 32`)."
+            )
+        return value
+
+
 class Settings(BaseSettings):
     """Central configuration with comprehensive validation"""
     
@@ -52,7 +76,14 @@ class Settings(BaseSettings):
     KEEPALIVE_TIMEOUT: int = Field(default=65, ge=1, description="Keepalive timeout")
     
     # Security
-    SECRET_KEY: SecretStr = Field(default="change-me-in-production-please-very-long-secret")
+    # C1 (Integrity Fix Pack): NO default signing key. The value must come
+    # from the SECRET_KEY environment variable; unset means an empty
+    # GuardedSecretStr whose get_secret_value() raises RuntimeError, and
+    # production boot fails fast in _fail_fast_in_production below.
+    SECRET_KEY: GuardedSecretStr = Field(
+        default_factory=lambda: GuardedSecretStr(""),
+        description="JWT signing key (REQUIRED from env; generate with `openssl rand -hex 32`)",
+    )
     JWT_ALGORITHM: str = "HS256"
     JWT_EXPIRE_MINUTES: int = Field(default=1440, ge=1, description="JWT expiry in minutes")
     ACCESS_TOKEN_EXPIRE_MINUTES: int = Field(default=30, ge=1)
@@ -74,9 +105,13 @@ class Settings(BaseSettings):
     ADMIN_API_KEYS: List[str] = Field(default=[], description="Static allowlist of operator API keys (dev/demo grade)")
     
     # Database
+    # H1 (Integrity Fix Pack): NO default connection string — the old one
+    # embedded a username/password in code. DATABASE_URL must come from
+    # the environment; empty means "not configured", and production boot
+    # fails fast in _fail_fast_in_production below.
     DATABASE_URL: str = Field(
-        default="postgresql+asyncpg://aegis:aegis123@localhost:5432/aegis",
-        description="Database connection URL"
+        default="",
+        description="Database connection URL (REQUIRED from env; no built-in credentials)"
     )
     DATABASE_POOL_SIZE: int = Field(default=20, ge=5, le=100)
     DATABASE_MAX_OVERFLOW: int = Field(default=10, ge=0, le=50)
@@ -245,7 +280,37 @@ class Settings(BaseSettings):
         if isinstance(v, str):
             return [int(x.strip()) for x in v.split(",") if x.strip()]
         return v
-    
+
+    @model_validator(mode="after")
+    def _fail_fast_in_production(self):
+        """C1+H1 (Integrity Fix Pack): production refuses to boot without
+        a real SECRET_KEY and DATABASE_URL from the environment.
+
+        Non-production is not exempt from safety: an unset SECRET_KEY
+        still yields an empty GuardedSecretStr, and every JWT sign/verify
+        call then raises RuntimeError (see GuardedSecretStr) — there is
+        no forgeable fallback key in any environment.
+        """
+        if self.ENVIRONMENT == Environment.PRODUCTION.value:
+            missing = []
+            # Raw-value check: get_secret_value() would raise RuntimeError,
+            # which is the non-production path; in production we want one
+            # clear boot error naming every missing variable.
+            secret_raw = self.SECRET_KEY._secret_value if self.SECRET_KEY else None
+            if not secret_raw:
+                missing.append("SECRET_KEY")
+            if not self.DATABASE_URL:
+                missing.append("DATABASE_URL")
+            if missing:
+                raise ValueError(
+                    "Refusing to boot in production: required environment "
+                    f"variable(s) not set: {', '.join(missing)}. There are "
+                    "no built-in defaults for these values. Generate a "
+                    "SECRET_KEY with `openssl rand -hex 32` and set "
+                    "DATABASE_URL to the real connection string."
+                )
+        return self
+
     def model_post_init(self, __context):
         """Create all required directories"""
         for dir_path in [

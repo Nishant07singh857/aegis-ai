@@ -248,7 +248,13 @@ function ObserverInner() {
     if (!token || !teamId) return;
     setOtherTeamsError(null);
     try {
-      const res = await apiFetch<TeamsResponse>("/api/v1/teams", { token });
+      // Names-only endpoint (H31): GET /api/v1/teams is team-scoped for
+      // observers (own team only), which left this dropdown permanently
+      // empty. /teams/names returns id + name + tag for every team and
+      // nothing else — no other team's details are ever fetched.
+      const res = await apiFetch<TeamsResponse>("/api/v1/teams/names", {
+        token,
+      });
       // Victim dropdown needs the other teams' NAMES only — never details.
       setOtherTeams(
         (res.data ?? [])

@@ -8,12 +8,15 @@ import { useAuth } from "../lib/auth";
 import { RequireRole } from "../lib/guard";
 import { Badge, Card, EmptyState, ErrorState, Loading } from "../components/ui";
 import { StreamControl } from "../components/stream-control";
+import { SourceBadge } from "@/components/source-badge";
+import { demoSourceOf } from "@/lib/source";
 
 interface SystemInfo {
   status?: string;
   health?: Record<string, number | string>;
   modes?: Record<string, boolean>;
   event_bus?: string;
+  source?: string;
 }
 
 interface Agent {
@@ -93,11 +96,15 @@ function levelTone(level: string | undefined): "cyan" | "red" | "amber" | "green
 function useAdminFetch<T>(path: string, token: string | null, sessionExpired: () => void) {
   const [data, setData] = useState<T | null>(null);
   const [error, setError] = useState<{ status?: number; message: string } | null>(null);
+  // C6: "demo" when the response carries the backend's DEMO_MODE marker
+  // ("source": "demo" on the block, a row, or the envelope); null otherwise.
+  const [demo, setDemo] = useState<"demo" | null>(null);
 
   const load = useCallback(async () => {
     setError(null);
     try {
       const res = await apiFetch<T>(path, { token: token ?? undefined });
+      setDemo(demoSourceOf(res));
       const payload = (res as { data?: unknown }).data;
       setData((payload ?? res) as T);
     } catch (e) {
@@ -109,10 +116,11 @@ function useAdminFetch<T>(path: string, token: string | null, sessionExpired: ()
         setError(info);
       }
       setData(null);
+      setDemo(null);
     }
   }, [path, token, sessionExpired]);
 
-  return { data, error, load };
+  return { data, error, load, demo };
 }
 
 function AdminPageInner() {
@@ -216,7 +224,7 @@ function AdminPageInner() {
           </div>
         </Card>
 
-        <Card title="System">
+        <Card title="System" action={<SourceBadge source={system.demo} />}>
           {!system.data && !system.error && <Loading label="Loading system…" />}
           {system.error && (
             <ErrorState message={system.error.message} onRetry={() => void system.load()} />
@@ -232,7 +240,10 @@ function AdminPageInner() {
               </div>
               {system.data.health && (
                 <div className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
-                  {Object.entries(system.data.health).map(([k, v]) => (
+                  {Object.entries(system.data.health)
+                    // "source" is the provenance marker (badge), not a metric.
+                    .filter(([k]) => k !== "source")
+                    .map(([k, v]) => (
                     <div key={k} className="rounded-lg bg-white/5 p-3">
                       <div className="text-xs text-white/50">{prettyKey(k)}</div>
                       <div className="text-lg font-semibold text-[#00f0ff]">{String(v)}</div>
@@ -258,7 +269,7 @@ function AdminPageInner() {
 
         <StreamControl token={token} onSessionExpired={handleExpired} />
 
-        <Card title="Agents">
+        <Card title="Agents" action={<SourceBadge source={agents.demo} />}>
           {!agents.data && !agents.error && <Loading label="Loading agents…" />}
           {agents.error && <ErrorState message={agents.error.message} onRetry={() => void agents.load()} />}
           {agents.data && agentRows.length === 0 && <EmptyState message="No agents reported." />}
@@ -294,7 +305,7 @@ function AdminPageInner() {
           )}
         </Card>
 
-        <Card title="Devices">
+        <Card title="Devices" action={<SourceBadge source={devices.demo} />}>
           {!devices.data && !devices.error && <Loading label="Loading devices…" />}
           {devices.error && (
             <ErrorState message={devices.error.message} onRetry={() => void devices.load()} />

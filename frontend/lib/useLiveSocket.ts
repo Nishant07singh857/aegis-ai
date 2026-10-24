@@ -167,7 +167,14 @@ export function useLiveSocket(apiBase?: string): {
    */
   zone: ZoneStateFrame | null;
   health: any;
+  /** Frame-level `"source"` marker of the latest system_health frame
+   *  ("demo" when the backend is serving DEMO_MODE demo state, else
+   *  null). Row/object-level markers are also possible — see
+   *  lib/source.ts hasDemoSource. */
+  healthSource: string | null;
   agents: any[];
+  /** Frame-level `"source"` marker of the latest agents_state frame. */
+  agentsSource: string | null;
   modes: Record<string, boolean>;
   agentLogs: any[];
   ack: ActionAck | null;
@@ -187,7 +194,9 @@ export function useLiveSocket(apiBase?: string): {
   const [rundownState, setRundownState] = useState<RundownStateFrame | null>(null);
   const [zone, setZone] = useState<ZoneStateFrame | null>(null);
   const [health, setHealth] = useState<any>(null);
+  const [healthSource, setHealthSource] = useState<string | null>(null);
   const [agents, setAgents] = useState<any[]>([]);
+  const [agentsSource, setAgentsSource] = useState<string | null>(null);
   const [modes, setModes] = useState<Record<string, boolean>>({});
   const [agentLogs, setAgentLogs] = useState<any[]>([]);
   const [ack, setAck] = useState<ActionAck | null>(null);
@@ -247,7 +256,8 @@ export function useLiveSocket(apiBase?: string): {
     }, delay);
   }, []);
 
-  const handleFrame = useCallback((type: string, data: any) => {
+  const handleFrame = useCallback(
+    (type: string, data: any, frameSource: string | null = null) => {
     switch (type) {
       case 'connected':
         setStatus('live');
@@ -288,9 +298,16 @@ export function useLiveSocket(apiBase?: string): {
         break;
       case 'system_health':
         setHealth(data ?? null);
+        setHealthSource(
+          frameSource ??
+            (data && typeof data === 'object' && typeof data.source === 'string'
+              ? data.source
+              : null)
+        );
         break;
       case 'agents_state':
         setAgents(Array.isArray(data) ? data : []);
+        setAgentsSource(frameSource);
         break;
       case 'modes_state':
         setModes(data && typeof data === 'object' ? (data as Record<string, boolean>) : {});
@@ -375,7 +392,11 @@ export function useLiveSocket(apiBase?: string): {
       try {
         const frame = JSON.parse(ev.data);
         if (frame && typeof frame.type === 'string') {
-          handleFrame(frame.type, frame.data);
+          handleFrame(
+            frame.type,
+            frame.data,
+            typeof frame.source === 'string' ? frame.source : null
+          );
         }
       } catch {
         /* ignore malformed frames */
@@ -449,7 +470,9 @@ export function useLiveSocket(apiBase?: string): {
     rundownState,
     zone,
     health,
+    healthSource,
     agents,
+    agentsSource,
     modes,
     agentLogs,
     ack,

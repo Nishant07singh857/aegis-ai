@@ -32,6 +32,10 @@ from typing import Any, Dict, List, Optional
 from unittest.mock import AsyncMock, Mock
 
 import pytest
+import pytest_asyncio
+from sqlalchemy import JSON
+from sqlalchemy.dialects import postgresql
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.agents.base_agent import AgentConfig
 from app.agents.fight_agents.fight_detector import FightDetector
@@ -833,13 +837,57 @@ async def test_service_observed_snapshot_extension():
 # ────────────────────────────────────────────────────────────────
 
 
-@pytest.fixture()
-def intel_client(monkeypatch):
+async def _seed_auth_user(monkeypatch):
+    """Real (test) DB user behind the hand-minted _token() below.
+
+    H2 (Integrity Fix Pack): get_current_user revocation-checks JWT
+    principals against the DB user's live is_active flag via
+    deps.AsyncSessionLocal, and a missing DB row fails closed (401).
+    Point that lookup at a throwaway in-memory engine and seed the
+    u-viewer account — same pattern as
+    tests/unit/test_integrity_credentials_auth.py's auth_env fixture.
+    The password is never exercised (the token is minted directly);
+    the row exists so the is_active check has a live account to find.
+    Returns the engine so the caller can dispose it.
+    """
+    from app.api import deps
+    from app.db import models as _models  # noqa: F401 — populate Base.metadata
+    from app.db.base import Base
+    from app.db.models.user import User
+
+    for table in Base.metadata.tables.values():
+        for column in table.columns:
+            if isinstance(column.type, postgresql.JSONB):
+                column.type = JSON()
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    maker = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    monkeypatch.setattr(deps, "AsyncSessionLocal", maker)
+    async with maker() as session:
+        session.add(
+            User(
+                id="u-viewer",
+                email="test-viewer@example.test",
+                username="test-viewer",
+                hashed_password="test-only-not-a-real-hash",
+                full_name="Test viewer",
+                role="viewer",
+                is_active=True,
+            )
+        )
+        await session.commit()
+    return engine
+
+
+@pytest_asyncio.fixture()
+async def intel_client(monkeypatch):
     from httpx import ASGITransport, AsyncClient
     from fastapi import FastAPI
 
     from app.api.v1.vision_intelligence import router as router_module
 
+    engine = await _seed_auth_user(monkeypatch)
     svc = _service()
     monkeypatch.setattr(
         router_module, "get_vision_intelligence_service", lambda: svc
@@ -847,7 +895,9 @@ def intel_client(monkeypatch):
     app = FastAPI()
     app.include_router(router_module.router, prefix="/api/v1")
     transport = ASGITransport(app=app)
-    return AsyncClient(transport=transport, base_url="http://test"), svc
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        yield client, svc
+    await engine.dispose()
 
 
 def _token(role: str = "viewer") -> str:
@@ -888,6 +938,7 @@ async def test_intel_api_service_missing_is_honest(monkeypatch):
 
     from app.api.v1.vision_intelligence import router as router_module
 
+    engine = await _seed_auth_user(monkeypatch)
     monkeypatch.setattr(
         router_module, "get_vision_intelligence_service", lambda: None
     )
@@ -899,6 +950,7 @@ async def test_intel_api_service_missing_is_honest(monkeypatch):
             "/api/v1/vision-intelligence/intel/airdrops",
             headers={"Authorization": f"Bearer {_token()}"},
         )
+    await engine.dispose()
     assert resp.status_code == 200
     body = resp.json()
     assert body["running"] is False

@@ -955,6 +955,12 @@ class KillFeedDetector(BaseDetector):
             "raw_text": entry.raw_text,
             "ocr_confidence": round(entry.confidence, 1),
             "headshot": entry.headshot,
+            # Integrity C2 (source marker ONLY — parser behaviour is
+            # unchanged): this headshot flag is icon-derived (measured
+            # 7.7 % precision, WEAPON_RECOGNITION §2.7) and must never
+            # be persisted as a player stat. The spotter toggle is the
+            # only trusted headshot producer.
+            "headshot_source": "vision_icon",
             "dedup_key": entry.dedup_key(),
         }
         if entry.weapon is not None:
@@ -978,6 +984,9 @@ class KillFeedDetector(BaseDetector):
             player=entry.killer,
             victim=entry.victim,
             weapon=entry.weapon,
+            # Integrity C2: vision provenance — never a trusted
+            # headshot source (see feed_adapter/schemas.py).
+            source="vision_killfeed",
             payload=payload,
         )
 

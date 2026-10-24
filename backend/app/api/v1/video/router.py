@@ -14,13 +14,19 @@ pipeline -- it never touches FrameGrabber sources directly; all writes go
 through ``MultiDeviceCaptureManager`` so the slot map stays consistent.
 
 Phase 17 (W2) additions:
-  * GET  /video/feed/{slot}            — public MJPEG program feed
+  * GET  /video/feed/{slot}            — MJPEG program feed
     (multipart/x-mixed-replace) for the broadcast output video layer.
-    Unauthenticated ON PURPOSE: the /broadcast/output page is captured by
-    an unauthenticated headless Chromium (same trust model as /ws/live).
-    Real frames come from the manager; ?sim=1 (or AEGIS_VIDEO_SIMULATOR=1)
-    streams a watermarked test pattern; slots without a live frame stream
-    an honest labelled "NO FEED" slate.
+
+    H3 (Integrity Fix Pack) — BREAKING CHANGE: this endpoint used to be
+    unauthenticated ON PURPOSE (the /broadcast/output page was captured
+    by an unauthenticated headless Chromium). Live observer frames must
+    not be reachable by anyone who can reach the port, so it now requires
+    the same authentication as /video/status and /video/thumbnail
+    (``get_current_user``: Bearer JWT or X-API-Key). Headless capture must
+    be updated to carry a credential. Real frames come from the manager;
+    ?sim=1 (or AEGIS_VIDEO_SIMULATOR=1) streams a watermarked test
+    pattern; slots without a live frame stream an honest labelled
+    "NO FEED" slate.
 """
 
 from __future__ import annotations
@@ -302,6 +308,7 @@ async def _mjpeg_program_stream(
 @router.get("/feed/{slot_number}")
 async def video_feed(
     slot_number: int,
+    _user: TokenPayload = Depends(get_current_user),
     sim: bool = Query(
         default=False,
         description="Simulator mode: stream a watermarked test pattern "
@@ -321,9 +328,11 @@ async def video_feed(
     ``multipart/x-mixed-replace`` — the broadcast output video layer
     displays it with a plain ``<img>`` tag; no WebRTC needed.
 
-    UNAUTHENTICATED on purpose: the /broadcast/output page is captured by
-    an unauthenticated headless Chromium (same trust model as /ws/live).
-    This is broadcast program content, not device internals.
+    AUTHENTICATED (H3, Integrity Fix Pack — breaking change): any
+    authenticated user, same dependency as /status and /thumbnail.
+    Previously this stream was deliberately unauthenticated for headless
+    Chromium capture of /broadcast/output; that capture must now carry a
+    Bearer JWT or X-API-Key credential.
 
     Modes:
       * REAL (default): frames from the W4 capture manager (ADB observer

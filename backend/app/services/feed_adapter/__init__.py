@@ -13,13 +13,20 @@ from .fight_schema import (
     canonical_to_bus_payload,
     fight_event_to_canonical,
 )
-from .schemas import FeedEventType, NormalizedEvent
+from .schemas import (
+    HEADSHOT_TRUSTED_SOURCES,
+    VISION_KILLFEED_SOURCE,
+    FeedEventType,
+    NormalizedEvent,
+)
 from .service import FeedService, feed_service
 from .simulator import SimulatorFeedAdapter
 
 __all__ = [
     "BaseFeedAdapter",
     "FeedEventType",
+    "HEADSHOT_TRUSTED_SOURCES",
+    "VISION_KILLFEED_SOURCE",
     "NormalizedEvent",
     "FeedService",
     "feed_service",

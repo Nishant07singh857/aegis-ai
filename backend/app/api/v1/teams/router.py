@@ -17,6 +17,7 @@ from .schemas import (
     TeamCreate,
     TeamDetailResponse,
     TeamListResponse,
+    TeamNameListResponse,
     TeamPatch,
     TeamUpdate,
 )
@@ -44,6 +45,28 @@ async def list_teams(
         # Phase 16: observers see ONLY their assigned team.
         teams = [t for t in teams if t.id == scope]
     return {"data": teams}
+
+
+@router.get("/teams/names", response_model=TeamNameListResponse)
+async def list_team_names(
+    service: TeamService = Depends(get_team_service),
+):
+    """Names-only team list (id + name + tag) for picker dropdowns.
+
+    Deliberately NOT team-scoped (H31): the Phase-16 scope on
+    ``GET /teams`` filters an observer to their own team, which left the
+    observer console's victim-team dropdown permanently empty. This
+    endpoint exposes ONLY id/name/tag for every team — the full team
+    records stay scoped on ``GET /teams`` and ``GET /teams/{id}``.
+    Registered before ``/teams/{team_id}`` so "names" is not parsed as
+    a team id.
+    """
+    teams = await service.list_teams(skip=0, limit=500)
+    return {
+        "data": [
+            {"id": t.id, "name": t.name, "tag": t.tag} for t in teams
+        ]
+    }
 
 
 @router.get("/teams/{team_id}", response_model=TeamDetailResponse)

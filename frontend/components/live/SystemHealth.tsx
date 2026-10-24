@@ -1,9 +1,13 @@
 'use client';
 
 import { Card, EmptyState } from '../ui';
+import { SourceBadge } from '../source-badge';
+import { demoSourceOf } from '@/lib/source';
 
 interface Props {
   health: any;
+  /** Frame-level "source" marker from useLiveSocket (C6 demo labelling). */
+  source?: string | null;
 }
 
 function Bar({ label, value }: { label: string; value: number }) {
@@ -25,7 +29,11 @@ function Bar({ label, value }: { label: string; value: number }) {
   );
 }
 
-export default function SystemHealth({ health }: Props) {
+export default function SystemHealth({ health, source }: Props) {
+  // C6: health frames are demo state only in DEMO_MODE (marked
+  // "source": "demo"); with DEMO_MODE off the backend does not serve
+  // this block at all and the card stays in its honest waiting state.
+  const demo = source === "demo" ? "demo" : demoSourceOf(health);
   if (!health) {
     return (
       <Card title="System Health">
@@ -34,7 +42,7 @@ export default function SystemHealth({ health }: Props) {
     );
   }
   return (
-    <Card title="System Health">
+    <Card title="System Health" action={<SourceBadge source={demo} />}>
       <div className="space-y-3">
         <Bar label="CPU" value={Number(health.cpu_usage ?? 0)} />
         <Bar label="Memory" value={Number(health.memory_usage ?? 0)} />

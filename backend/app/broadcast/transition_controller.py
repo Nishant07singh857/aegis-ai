@@ -2,7 +2,14 @@
 """
 AEGIS AI - Transition Controller
 Manages scene transitions with professional effects.
-Supports cuts, fades, wipes, stinger transitions, and more.
+
+Visual Broadcast Bible rule (inspection H15): camera changes are
+hard cuts. FADE and SWIPE transitions are Bible-banned — they are no
+longer registered as types or defaults here, and ``set_transition``
+rejects them with a clear error so a mistaken wiring cannot put a
+banned transition on air. (This module is dormant today — zero
+production callers — which is exactly why the banned types had to be
+removed before any wiring happens.)
 """
 
 from typing import Dict, List, Optional, Any
@@ -14,13 +21,31 @@ logger = structlog.get_logger("aegis.broadcast.transitions")
 
 
 class TransitionType(str, Enum):
-    """Types of scene transitions"""
+    """Types of scene transitions (Bible-legal only).
+
+    FADE and SWIPE existed here before (inspection H15) and were
+    removed: they are banned by the Visual Broadcast Bible. Do not
+    re-add them; ``set_transition`` also rejects their names/values
+    explicitly in case a banned transition is constructed elsewhere.
+    """
     CUT = "cut_transition"
-    FADE = "fade_transition"
-    SWIPE = "swipe_transition"
     SLIDE = "slide_transition"
     STINGER = "stinger_transition"
     LUMAS = "luma_wipe_transition"
+
+
+#: Names and type-values banned by the Visual Broadcast Bible.
+BANNED_TRANSITION_NAMES = frozenset({
+    "quick fade", "slow fade", "dramatic fade", "fade",
+    "swipe left", "swipe right", "swipe",
+})
+BANNED_TRANSITION_VALUES = frozenset({
+    "fade_transition", "swipe_transition", "fade", "swipe",
+})
+
+
+class BannedTransitionError(ValueError):
+    """Raised when a Bible-banned transition (fade/swipe) is requested."""
 
 
 class EasingType(str, Enum):
@@ -76,35 +101,50 @@ class TransitionController:
         self._log = logger.bind(component="transition_controller")
     
     def _setup_defaults(self) -> None:
-        """Setup default transitions"""
-        
+        """Setup default transitions (Bible-legal only).
+
+        The previous defaults registered three fades and two swipes
+        with activatable durations (inspection H15); they are gone.
+        """
+
         defaults = [
             Transition("Cut", TransitionType.CUT, 0),
-            Transition("Quick Fade", TransitionType.FADE, 200),
-            Transition("Slow Fade", TransitionType.FADE, 1000),
-            Transition("Swipe Left", TransitionType.SWIPE, 400, direction="left"),
-            Transition("Swipe Right", TransitionType.SWIPE, 400, direction="right"),
             Transition("Slide Up", TransitionType.SLIDE, 500, direction="up"),
-            Transition("Dramatic Fade", TransitionType.FADE, 2000, easing=EasingType.EASE_OUT),
         ]
-        
+
         for transition in defaults:
             self.transitions[transition.name] = transition
-    
+
     async def set_transition(self, name: str, duration_ms: Optional[int] = None) -> bool:
-        """Set the active transition type"""
-        
+        """Set the active transition type.
+
+        Raises:
+            BannedTransitionError: if ``name`` (or the registered
+                transition's type) is a Bible-banned fade/swipe. A banned
+                transition is a clear error, never a silent activation.
+        """
+
+        if name.strip().lower() in BANNED_TRANSITION_NAMES:
+            raise BannedTransitionError(
+                f"Transition {name!r} is banned by the Visual Broadcast "
+                "Bible (no fades, no swipes — hard cuts only)."
+            )
+
         transition = self.transitions.get(name)
         if not transition:
             self._log.error(f"Transition not found: {name}")
             return False
-        
+
+        type_value = str(getattr(transition.transition_type, "value", transition.transition_type)).lower()
+        if type_value in BANNED_TRANSITION_VALUES:
+            raise BannedTransitionError(
+                f"Transition {name!r} uses banned type {type_value!r} "
+                "(Visual Broadcast Bible: no fades, no swipes)."
+            )
+
         settings = {}
-        
-        if transition.transition_type == TransitionType.FADE:
-            settings["fadeColor"] = transition.fade_color
-        
-        if transition.transition_type in [TransitionType.SWIPE, TransitionType.SLIDE]:
+
+        if transition.transition_type == TransitionType.SLIDE:
             settings["direction"] = transition.direction
         
         response = await self.obs.send_command("SetCurrentSceneTransition", {

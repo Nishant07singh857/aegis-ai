@@ -263,6 +263,8 @@
 | State in Redis | 🟡 | Transport + cache + cluster in Redis; agent/match state in process memory |
 | Team ×16 / Fight ×6 / Stats ×4 / Prediction ×4 / Zone ×3 / Director ×2 / Commentary ×2 / MVP ×2 / Master ×1 | 🟡 mixed | Counts land close as *classes/instances* (Team ×16 as runtime instances of one class; Prediction exactly 4; Fight 4 of 6; Zone 1+service; Director split across agent+module+service; Commentary 6 vs 3; MVP 1 vs 2; Master exactly 1); Overlay ×2 and Coach ×2 categories **do not exist as agent classes** |
 
+> **CORRECTION (2026-10-24, Integrity Fix Pack — inspection H5/H32):** The row above ("run in-process under one `AgentOrchestrator`") is **wrong at runtime**. The agent system is **dormant**: `AgentOrchestrator` has zero production callers and `app/main.py` never starts it. What actually runs in production, via direct instantiation, is only **6 agent classes** — FightDetector, TeamTracker, UtilityTracker, StorytellerAgent, VoiceSynthesizer, LanguageManager — plus **3 function-modules** (MVP `compute_mvp_score`, win-probability, day-reel). The other 34–35 of the 41 classes never execute in production. The orchestrator also no longer constructs the deprecated second director stack (ObserverDirector / POVSelector / SafetyController / PlaybookManager — superseded by `services/live_director`).
+
 ## DB Tables
 
 9 of 12 PRD tables exist (`matches`, `teams`, `players`, `fight_events`, `kill_events`, `highlights`, `predictions`, `commentary`, `utility_events`); `player_stats`/`team_stats` are **computed at query time with dead fallback models** (🟡), and **`leaderboard` is a derived in-memory view, never a table** (❌ — defensible). Ten extra tables exist beyond the PRD (tournaments, users, observer_slots, stories, event_store, etc.).

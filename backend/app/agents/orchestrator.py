@@ -1,8 +1,27 @@
 # backend/app/agents/orchestrator.py
 """
 AEGIS AI - Agent Orchestrator
-Master orchestrator that manages ALL 40+ AI agents.
-Handles initialization, lifecycle, coordination, and monitoring.
+
+DORMANT IN PRODUCTION — honest status (inspection H5/H32/H33):
+``AgentOrchestrator`` is NOT started by the production app.
+``app/main.py`` never imports or starts it; its only callers are
+``backend/scripts/smoke_agents.py`` and e2e tests. The 41
+``BaseAgent`` subclasses are a library, not a running system.
+
+What actually runs in production, via direct instantiation (not via
+this orchestrator), is only:
+
+- 6 agent classes: FightDetector, TeamTracker, UtilityTracker,
+  StorytellerAgent, VoiceSynthesizer, LanguageManager; plus
+- 3 function-modules: the MVP scorer (``compute_mvp_score``),
+  win-probability, and the day-reel builder.
+
+Do NOT "fix" dormancy by starting this orchestrator without
+reviewing each agent first: parts of this library fabricate data or
+consume telemetry shapes that cannot exist under the spectator-only
+directive, and this orchestrator no longer constructs the deprecated
+second director stack (see the Phase 1 / Phase 4 notes in
+``initialize_all_agents``).
 """
 
 import asyncio
@@ -25,9 +44,13 @@ from .fight_agents import (
     FightDetector, IntensityScorer, ClutchDetector, EngagementAnalyzer,
 )
 from .observer_agents import (
-    ObserverDirector, POVSelector, CinematicController,
-    SafetyController, PlaybookManager,
+    CinematicController,
 )
+# NOTE (H33): ObserverDirector (director_ai.py), POVSelector,
+# SafetyController and PlaybookManager are intentionally NOT imported
+# here. That stack self-declares "SUPERSEDED by live_director, do not
+# wire"; this orchestrator must never construct it, or starting the
+# orchestrator would run two directors at once.
 from .commentary_agents import (
     ScriptGenerator, EmotionEngine, HypeDetector,
     VoiceSynthesizer, CasterMemory, LanguageManager,
@@ -78,23 +101,30 @@ class OrchestratorState:
 
 class AgentOrchestrator:
     """
-    Master orchestrator for the entire AEGIS AI agent system.
-    
-    Manages:
+    Dormant orchestrator for the agent library — NOT run in production.
+
+    Production never starts this class (``app/main.py`` does not
+    import it). Only 6 agent classes run in production, via direct
+    instantiation elsewhere: FightDetector, TeamTracker,
+    UtilityTracker, StorytellerAgent, VoiceSynthesizer,
+    LanguageManager — plus 3 function-modules (MVP
+    ``compute_mvp_score``, win-probability, day-reel). Everything this
+    orchestrator would construct beyond that is dormant library code.
+
+    If constructed (smoke script / e2e tests only), it registers:
+
     - 16 Team Agents (one per team)
-    - 4 Fight Detection Agents
-    - 5 Observer/Broadcast Agents
-    - 6 Commentary Agents
-    - 5 Analytics Agents
-    - 4 Prediction Agents
-    - 4 Narrative Agents
-    - 4 Highlight Agents
-    - 3 Referee Agents
-    
-    Total: 40+ specialized AI agents working together
-    
+    - Fight Detection / Commentary / Analytics / Prediction /
+      Narrative / Highlight / Referee agents from the library
+
+    It deliberately does NOT construct the deprecated second director
+    stack — ObserverDirector (``director_ai.py``), ``POVSelector``,
+    ``SafetyController``, ``PlaybookManager`` — which is superseded by
+    ``app/services/live_director`` (inspection H33). The live director
+    is the one and only director.
+
     Startup Order (by priority):
-    1. CRITICAL: ObserverDirector, EventBus
+    1. CRITICAL: (none — the deprecated director stack is not built)
     2. HIGH: FightDetector, CommentaryAgents
     3. MEDIUM: TeamAgents (16), AnalyticsAgents
     4. LOW: PredictionAgents, NarrativeAgents, HighlightAgents
@@ -111,7 +141,11 @@ class AgentOrchestrator:
         
         # Specialized agent references
         self.team_agents: Dict[str, TeamTracker] = {}
-        self.observer_director: Optional[ObserverDirector] = None
+        # Always None (H33): the deprecated ObserverDirector stack is
+        # never constructed by this orchestrator. Attribute kept only
+        # so existing attribute access (smoke/e2e) reads an honest
+        # None instead of an unexpected AttributeError.
+        self.observer_director: Optional[Any] = None
         self.fight_coordinator: Optional[FightDetector] = None
         self.commentary_agent: Optional[ScriptGenerator] = None
         
@@ -151,32 +185,18 @@ class AgentOrchestrator:
         self.state.startup_phase = "phase_1_critical"
         self._log.info("Phase 1: Initializing CRITICAL agents...")
         
-        # Observer Director (CRITICAL - controls broadcast)
-        self.observer_director = ObserverDirector(
-            config=self._make_config(
-                "observer_director", "observer_director", AgentPriority.CRITICAL
-            ),
-            event_bus=self.event_bus,
+        # H33: the deprecated second director stack is NOT constructed
+        # here. ObserverDirector (director_ai.py) and SafetyController
+        # self-declare "SUPERSEDED by app/services/live_director, do
+        # not wire" — constructing them would let a started
+        # orchestrator run two directors at once. The live director
+        # (services/live_director) is the only director; this phase
+        # therefore registers no CRITICAL agents.
+        self._log.info(
+            "Phase 1: deprecated director stack intentionally not "
+            "constructed (superseded by services/live_director)"
         )
-        self._register_agent(
-            "observer_director",
-            "observer_director",
-            self.observer_director,
-            AgentPriority.CRITICAL,
-        )
-        
-        # Safety Controller
-        safety_controller = SafetyController(
-            config=self._make_config("safety_controller", "safety_controller", AgentPriority.CRITICAL),
-            event_bus=self.event_bus,
-        )
-        self._register_agent(
-            "safety_controller",
-            "safety_controller",
-            safety_controller,
-            AgentPriority.CRITICAL,
-        )
-        
+
         self._log.info(f"Phase 1 complete: {len(self.agents)} agents")
         
         # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -378,27 +398,17 @@ class AgentOrchestrator:
         )
         self._register_agent("performance_tracker", "performance_tracker", perf_tracker, AgentPriority.MEDIUM)
         
-        # POV Selector
-        pov_selector = POVSelector(
-            config=self._make_config("pov_selector", "pov_selector", AgentPriority.MEDIUM),
-            event_bus=self.event_bus,
-        )
-        self._register_agent("pov_selector", "pov_selector", pov_selector, AgentPriority.MEDIUM)
-        
+        # H33: POVSelector and PlaybookManager are NOT constructed
+        # here — they are part of the same deprecated ObserverDirector
+        # stack (superseded by services/live_director, "do not wire").
+
         # Cinematic Controller
         cinematic = CinematicController(
             config=self._make_config("cinematic_controller", "cinematic_controller", AgentPriority.MEDIUM),
             event_bus=self.event_bus,
         )
         self._register_agent("cinematic_controller", "cinematic_controller", cinematic, AgentPriority.MEDIUM)
-        
-        # Playbook Manager
-        playbook = PlaybookManager(
-            config=self._make_config("playbook_manager", "playbook_manager", AgentPriority.MEDIUM),
-            event_bus=self.event_bus,
-        )
-        self._register_agent("playbook_manager", "playbook_manager", playbook, AgentPriority.MEDIUM)
-        
+
         self._log.info(f"Phase 4 complete: {len(self.agents)} agents")
         
         # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

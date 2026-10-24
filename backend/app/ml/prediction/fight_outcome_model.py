@@ -1,8 +1,21 @@
 # backend/app/ml/prediction/fight_outcome_model.py
 """
 AEGIS AI - Fight Outcome Prediction Model
-Predicts fight winners using real-time game state features.
-Uses gradient boosting + neural network ensemble.
+
+Honest status (inspection H18): there is NO gradient-boosting +
+neural-network ensemble here, and no training code exists in this
+module — that claim was removed. What actually exists:
+
+- an optional externally-trained model, loaded from disk via joblib
+  (``load()``), used through ``predict_proba`` when one is supplied;
+- otherwise, an explicit rule-based heuristic fallback
+  (``_rule_based_predict``), whose results are labelled as such via
+  ``model_name``.
+
+Dormant: zero production callers. If a loaded model raises during
+prediction, ``predict()`` now raises
+:class:`FightOutcomeUnavailable` instead of silently returning a
+fabricated 0.5/0.5 "normal" result.
 """
 
 import time
@@ -13,6 +26,15 @@ import structlog
 import numpy as np
 
 logger = structlog.get_logger("aegis.ml.fight_outcome")
+
+
+class FightOutcomeUnavailable(RuntimeError):
+    """Raised when a loaded fight-outcome model fails to predict.
+
+    Replaces the old silent fallback that returned 0.5/0.5 with a
+    TEAM_A_WIN outcome as if it were a real prediction (inspection
+    H18). No probability is fabricated when the model errors.
+    """
 
 
 class FightOutcome(str, Enum):
@@ -205,8 +227,16 @@ class OutcomePrediction:
 
 class FightOutcomeModel:
     """
-    Predicts fight outcomes using gradient boosting + neural network.
-    
+    Fight-outcome predictor — NOT a trained ensemble.
+
+    No training code exists in this module and no trained model ships
+    with the repo. Prediction uses, in order:
+
+    1. an externally-trained model loaded via ``load()`` (joblib,
+       ``predict_proba``), if one was supplied; or
+    2. an explicit rule-based heuristic over the feature values,
+       labelled ``fight_outcome_rule_based_heuristic`` in results.
+
     Features (30+ features):
     - HP and armor status
     - Damage dealt and rates
@@ -214,7 +244,7 @@ class FightOutcomeModel:
     - Weapons and utility
     - Player skill ratings
     - Match context
-    
+
     Output: Win probability for each team
     """
     
@@ -227,6 +257,10 @@ class FightOutcomeModel:
         # Statistics
         self._total_predictions = 0
         self._correct_predictions = 0
+        self._outcomes_recorded = 0
+        # fight_id -> predicted outcome, for honest accuracy counting
+        # in record_outcome()
+        self._pending_predictions: Dict[str, FightOutcome] = {}
         
         if model_path:
             self.load(model_path)
@@ -294,19 +328,20 @@ class FightOutcomeModel:
         
         # Predict
         if self.model is not None:
+            model_name = "fight_outcome_model_loaded_external"
             try:
                 # Get probabilities
                 probs = self.model.predict_proba(X)[0]
-                
+
                 # Map to outcomes (simplified)
                 team_a_win = probs[0] if len(probs) > 0 else 0.5
                 team_b_win = probs[1] if len(probs) > 1 else 1 - team_a_win
                 trade = probs[2] if len(probs) > 2 else 0.0
                 disengage = 1 - team_a_win - team_b_win - trade
-                
+
                 # Determine outcome
                 max_prob = max(team_a_win, team_b_win, trade, disengage)
-                
+
                 if max_prob == team_a_win:
                     outcome = FightOutcome.TEAM_A_WIN
                     confidence = team_a_win
@@ -319,27 +354,33 @@ class FightOutcomeModel:
                 else:
                     outcome = FightOutcome.DISENGAGE
                     confidence = disengage
-                
+
             except Exception as e:
+                # Honest failure (inspection H18): the old code silently
+                # returned 0.5/0.5 + TEAM_A_WIN as a normal result.
+                # A failed model prediction is unavailable, not 50/50.
+                self._total_predictions -= 1
                 self._log.error(f"Prediction error: {e}")
-                team_a_win = 0.5
-                team_b_win = 0.5
-                trade = 0.0
-                disengage = 0.0
-                outcome = FightOutcome.TEAM_A_WIN
-                confidence = 0.5
+                raise FightOutcomeUnavailable(
+                    f"Loaded fight-outcome model failed to predict "
+                    f"fight {features.fight_id!r}: {e}"
+                ) from e
         else:
-            # Rule-based fallback
+            # Explicit rule-based heuristic fallback (labelled as such)
+            model_name = "fight_outcome_rule_based_heuristic"
             team_a_win, team_b_win, trade, disengage = self._rule_based_predict(features)
             max_prob = max(team_a_win, team_b_win)
             outcome = FightOutcome.TEAM_A_WIN if team_a_win >= team_b_win else FightOutcome.TEAM_B_WIN
             confidence = max_prob
-        
+
         # Get top factors
         top_factors = self._get_top_factors(features, team_a_win, team_b_win)
-        
+
         inference_time = (time.time() - start_time) * 1000
-        
+
+        if features.fight_id:
+            self._pending_predictions[features.fight_id] = outcome
+
         return OutcomePrediction(
             fight_id=features.fight_id,
             team_a_win_prob=round(team_a_win, 4),
@@ -349,7 +390,7 @@ class FightOutcomeModel:
             predicted_outcome=outcome,
             confidence=round(confidence, 4),
             top_factors=top_factors,
-            model_name="fight_outcome_model",
+            model_name=model_name,
             model_version=self.model_version,
             inference_time_ms=round(inference_time, 2),
         )
@@ -459,21 +500,49 @@ class FightOutcomeModel:
         
         return sorted(factors, key=lambda f: f["impact"], reverse=True)[:5]
     
-    def record_outcome(self, fight_id: str, actual_outcome: FightOutcome) -> None:
-        """Record actual outcome for accuracy tracking"""
-        pass  # Would update accuracy metrics
-    
+    def record_outcome(self, fight_id: str, actual_outcome: FightOutcome) -> bool:
+        """Record an actual outcome for accuracy tracking.
+
+        Real (small) counting implementation — replaces the previous
+        ``pass`` stub (inspection H18), under which accuracy could
+        never move. Compares the actual outcome against the prediction
+        previously made for ``fight_id`` by ``predict()``.
+
+        Returns:
+            True if a pending prediction for ``fight_id`` was found
+            and counted; False (with a warning, and nothing counted)
+            when there is no prediction to score against — accuracy is
+            never credited for an unknown fight.
+        """
+        predicted = self._pending_predictions.pop(fight_id, None)
+        if predicted is None:
+            self._log.warning(
+                "record_outcome for unknown fight_id; not counted",
+                fight_id=fight_id,
+            )
+            return False
+        self._outcomes_recorded += 1
+        if predicted == actual_outcome:
+            self._correct_predictions += 1
+        return True
+
     def get_accuracy(self) -> float:
-        """Get prediction accuracy"""
-        if self._total_predictions == 0:
+        """Accuracy over outcomes actually recorded via record_outcome.
+
+        0.0 when no outcome has been recorded yet (no denominator —
+        accuracy is not derived from raw prediction count).
+        """
+        if self._outcomes_recorded == 0:
             return 0.0
-        return self._correct_predictions / self._total_predictions
-    
+        return self._correct_predictions / self._outcomes_recorded
+
     def get_stats(self) -> Dict[str, Any]:
         """Get model statistics"""
         return {
             "model_version": self.model_version,
             "total_predictions": self._total_predictions,
+            "outcomes_recorded": self._outcomes_recorded,
+            "correct_predictions": self._correct_predictions,
             "accuracy": round(self.get_accuracy(), 4),
             "has_model": self.model is not None,
             "feature_count": len(self.feature_names),

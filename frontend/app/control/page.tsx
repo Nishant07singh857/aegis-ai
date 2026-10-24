@@ -11,8 +11,11 @@
  * by design, and is never referenced from any capture-safe page.
  *
  * Data: live WS (/ws/live) via useLiveSocket — agents_state, system_health,
- * modes_state and agent_logs frames. No mock data: every row comes from a
- * real WS frame; empty feeds render honest empty states.
+ * modes_state and agent_logs frames. Every row comes from a WS frame, and
+ * frames the backend marks as demo state ("source": "demo" — served only
+ * in DEMO_MODE; with DEMO_MODE off the fabricated operator state is not
+ * served at all, C6) are badged as demo wherever they render. Absent
+ * feeds render honest empty states.
  */
 
 import { useCallback, useEffect, useMemo, useState } from "react";
@@ -24,6 +27,8 @@ import { RequireRole } from "@/lib/guard";
 import { Badge, Card, EmptyState } from "@/components/ui";
 import { StreamControl } from "@/components/stream-control";
 import ConnectionBanner from "@/components/live/ConnectionBanner";
+import { SourceBadge } from "@/components/source-badge";
+import { demoSourceOf } from "@/lib/source";
 
 function statusTone(
   status: string | undefined
@@ -208,8 +213,24 @@ function ClusterCard({ token }: { token: string | null }) {
 
 function ControlRoomInner() {
   const { token, logout } = useAuth();
-  const { status, reconnect, retryCount, agents, health, modes, agentLogs } =
-    useLiveSocket();
+  const {
+    status,
+    reconnect,
+    retryCount,
+    agents,
+    agentsSource,
+    health,
+    healthSource,
+    modes,
+    agentLogs,
+  } = useLiveSocket();
+
+  // C6: demo state is labelled, never passed off as real. The marker can
+  // sit on the WS frame, on the health object, or on individual rows.
+  const agentsDemo =
+    agentsSource === "demo" ? "demo" : demoSourceOf(agents);
+  const healthDemo =
+    healthSource === "demo" ? "demo" : demoSourceOf(health);
 
   const handleExpired = useCallback(() => {
     // A 401 from the stream card means the JWT died; the guard will
@@ -248,10 +269,13 @@ function ControlRoomInner() {
   const healthEntries = useMemo<[string, string][]>(() => {
     if (!health || typeof health !== "object" || Array.isArray(health))
       return [];
-    return Object.entries(health as Record<string, unknown>).map(([k, v]) => [
-      k,
-      typeof v === "string" || typeof v === "number" ? String(v) : "—",
-    ]);
+    return Object.entries(health as Record<string, unknown>)
+      // "source" is the provenance marker (shown as a badge), not a metric.
+      .filter(([k]) => k !== "source")
+      .map(([k, v]) => [
+        k,
+        typeof v === "string" || typeof v === "number" ? String(v) : "—",
+      ]);
   }, [health]);
 
   const modeEntries = useMemo<[string, boolean][]>(() => {
@@ -310,7 +334,10 @@ function ControlRoomInner() {
 
         <ClusterCard token={token} />
 
-        <Card title="Agents">
+        <Card
+          title="Agents"
+          action={<SourceBadge source={agentsDemo} />}
+        >
           {agentRows.length === 0 && (
             <EmptyState message="No agent frames received yet — waiting on the live socket." />
           )}
@@ -390,7 +417,10 @@ function ControlRoomInner() {
         </Card>
 
         <div className="grid gap-6 lg:grid-cols-2">
-          <Card title="Pipeline / event bus health">
+          <Card
+            title="Pipeline / event bus health"
+            action={<SourceBadge source={healthDemo} />}
+          >
             {healthEntries.length === 0 && modeEntries.length === 0 && (
               <EmptyState message="No health frames received yet — waiting on the live socket." />
             )}

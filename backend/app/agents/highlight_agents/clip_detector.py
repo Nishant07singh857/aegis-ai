@@ -287,12 +287,37 @@ class ClipDetector(BaseAgent):
         self,
         data: Dict[str, Any],
         context: Dict[str, Any],
-    ) -> HighlightClip:
-        """Create multi-kill highlight clip"""
-        
+    ) -> Optional[HighlightClip]:
+        """Create multi-kill highlight clip.
+
+        Honesty rule (inspection H14): ``kill_count`` and ``time_span``
+        must come from the actual event. The previous defaults
+        (``kill_count=3``, ``time_span=10``) invented a multi-kill out
+        of an event that carried neither field. Missing (or
+        sub-multi-kill) fields now mean the event is insufficient:
+        skip + log, never invent.
+        """
+
         player_name = data.get("player_name", "Unknown")
-        kill_count = data.get("kill_count", 3)
-        time_span = data.get("time_span", 10)
+        kill_count = data.get("kill_count")
+        time_span = data.get("time_span")
+
+        if kill_count is None or time_span is None:
+            self._log.warning(
+                "multi_kill event skipped: missing kill_count/time_span "
+                "(no defaults are invented)",
+                kill_count=kill_count,
+                time_span=time_span,
+            )
+            return None
+        if kill_count < 3:
+            self._log.warning(
+                "multi_kill event skipped: kill_count below multi-kill "
+                "threshold",
+                kill_count=kill_count,
+                time_span=time_span,
+            )
+            return None
         
         excitement = 50 + kill_count * 10
         if time_span < 5:
@@ -823,11 +848,15 @@ class ClipDetector(BaseAgent):
             clip_event_type = str(data.get("clip_event_type") or "multi_kill")
             match_id = data.get("match_id") or self.config.match_id
 
+            # Honesty rule (inspection H14): kill_count / time_span are
+            # taken from the event itself, never defaulted here. If the
+            # commentary event does not carry them, detect_clip treats
+            # the event as insufficient and produces no clip.
             event_data = {
-                "player_name": "Unknown",
-                "team_name": "",
-                "kill_count": 3,
-                "time_span": 10,
+                "player_name": data.get("player_name", "Unknown"),
+                "team_name": data.get("team_name", ""),
+                "kill_count": data.get("kill_count"),
+                "time_span": data.get("time_span"),
                 "timestamp_ms": int(time.time() * 1000),
                 "commentary_text": str(data.get("text", ""))[:300],
                 "trigger": data.get("trigger", ""),

@@ -1,22 +1,59 @@
 # backend/app/ml/fight_detection/evaluator.py
 """
-AEGIS AI - Fight Detection Evaluator
-Comprehensive model evaluation with mAP, precision/recall,
-confusion matrix, and per-class analysis.
+AEGIS AI - Fight Detection Evaluator — RETIRED (honest retire, C4).
+
+DO NOT USE this evaluator. Despite the old docstring's claim of
+"comprehensive COCO-style evaluation", it could never score a model:
+``_process_outputs`` returned empty boxes/scores/labels for every
+image, so mAP was always 0 regardless of the model. Any evaluation
+"result" from this class would be fiction.
+
+The evaluation entry points now raise
+:class:`FightEvaluatorRetiredError` on use. For a real evaluation
+pattern, see the killfeed evaluator
+(``app/ml/killfeed_detection/evaluator.py``): per-class
+precision/recall/mAP from ultralytics' actual validation pass on a
+held-out split.
+
+Dormant before retirement as well: zero production callers.
 """
 
+from __future__ import annotations
+
 import time
-from typing import Dict, List, Optional, Any, Tuple
+from typing import TYPE_CHECKING, Dict, List, Optional, Any, Tuple
 from dataclasses import dataclass, field
 from collections import defaultdict
 import structlog
 import numpy as np
-import torch
 
-from .model import FightDetectionModel
-from .dataset import FightDataset
+try:  # torch is only needed by the (retired) evaluation loop itself.
+    import torch
+except ImportError:  # pragma: no cover - torch absent in some envs
+    torch = None  # type: ignore[assignment]
+
+if TYPE_CHECKING:
+    from .model import FightDetectionModel
+    from .dataset import FightDataset
 
 logger = structlog.get_logger("aegis.ml.evaluator")
+
+
+class FightEvaluatorRetiredError(RuntimeError):
+    """Raised on any use of the retired fight-detection evaluator (C4)."""
+
+
+FIGHT_EVALUATOR_RETIRED_REASON = (
+    "FightEvaluator is RETIRED: its _process_outputs returned empty "
+    "boxes/scores/labels for every image, so its mAP was always 0 and "
+    "it never evaluated anything. Use the killfeed evaluation pattern "
+    "(app/ml/killfeed_detection, ultralytics val() with real per-class "
+    "metrics) to build a real evaluator instead."
+)
+
+
+def _raise_retired() -> None:
+    raise FightEvaluatorRetiredError(FIGHT_EVALUATOR_RETIRED_REASON)
 
 
 @dataclass
@@ -75,18 +112,20 @@ class EvalMetrics:
 
 class FightEvaluator:
     """
-    Model evaluator for fight detection.
-    
-    Features:
-    - mAP calculation (COCO-style)
-    - Precision/Recall curves
-    - Per-class performance analysis
-    - Confusion matrix
-    - Inference speed benchmarking
-    - False positive analysis
+    RETIRED — constructing or using this class raises
+    :class:`FightEvaluatorRetiredError`.
+
+    The historical feature list (COCO-style mAP, PR curves, per-class
+    analysis, confusion matrix) described an evaluator whose output
+    processing discarded every prediction, so none of those metrics
+    were ever really computed (inspection C4). The scaffolding is kept
+    for reference only; every entry point refuses honestly.
     """
-    
+
     def __init__(self, config: Optional[EvalConfig] = None):
+        # RETIRED (C4): refuse at construction so no evaluation path
+        # can ever run from this class.
+        _raise_retired()
         self.config = config or EvalConfig()
         self.metrics = EvalMetrics()
     
@@ -97,6 +136,8 @@ class FightEvaluator:
         device: str = "cuda",
     ) -> EvalMetrics:
         """
+        RETIRED — always raises FightEvaluatorRetiredError (C4).
+
         Run complete evaluation.
         
         Args:
@@ -107,7 +148,8 @@ class FightEvaluator:
         Returns:
             EvalMetrics with all computed metrics
         """
-        
+        _raise_retired()
+
         logger.info("Starting evaluation...")
         start_time = time.time()
         
@@ -174,8 +216,14 @@ class FightEvaluator:
         self,
         outputs: Tuple[torch.Tensor, ...],
     ) -> List[Dict[str, Any]]:
-        """Process raw model outputs into predictions"""
-        
+        """RETIRED — always raises FightEvaluatorRetiredError (C4).
+
+        The old body returned empty boxes/scores/labels for every
+        image ("simplified: extract high-confidence detections" —
+        nothing was ever extracted), which is why mAP was always 0.
+        """
+        _raise_retired()
+
         predictions = []
         
         for output in outputs:

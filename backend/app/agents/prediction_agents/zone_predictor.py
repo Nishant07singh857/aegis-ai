@@ -1,13 +1,24 @@
 # backend/app/agents/prediction_agents/zone_predictor.py
 """
 AEGIS AI - Zone Predictor
-Predicts next safe zone location based on current zone,
-historical patterns, and game mechanics.
+
+DORMANT — this agent is NOT live in production and has no trained
+zone-prediction model behind it.
+
+The previous implementation of ``predict_next_zone`` fabricated its
+output: it offset the current centre by ``random.uniform`` angle /
+distance and invented alternative-prediction confidences. Those were
+random numbers presented as predictions (FULL_PROJECT_INSPECTION H13).
+
+Honest behaviour now: ``predict_next_zone`` (and
+``get_zone_probability``, which depended on a fabricated prediction)
+raise :class:`ZonePredictionUnavailable` with an explicit reason.
+No random prediction can be produced from this module. A real zone
+predictor would need a model trained on measured zone data; none
+exists in this repo today.
 """
 
 import time
-import math
-import random
 from typing import Dict, List, Optional, Any, Tuple
 from dataclasses import dataclass, field
 from collections import deque
@@ -16,6 +27,21 @@ from ..base_agent import BaseAgent, AgentConfig
 from ...core.event_bus import EventBus, EventRecord
 
 logger = structlog.get_logger("aegis.agents.zone_predictor")
+
+
+class ZonePredictionUnavailable(RuntimeError):
+    """Raised when a zone prediction is requested from this dormant agent.
+
+    There is no trained zone model and no measured prediction method
+    behind this class, so any numeric prediction would be fabricated.
+    """
+
+
+ZONE_PREDICTION_UNAVAILABLE_REASON = (
+    "ZonePredictor is dormant: no trained zone-prediction model exists, "
+    "and the previous random-offset implementation was fabrication "
+    "(inspection H13). Zone prediction is unavailable."
+)
 
 @dataclass
 class ZonePrediction:
@@ -45,14 +71,16 @@ class ZonePrediction:
 
 class ZonePredictor(BaseAgent):
     """
-    Predicts next safe zone location.
-    
-    Uses:
-    - Current zone position and size
-    - Historical zone patterns per map
-    - Zone shift mechanics (zone always inside previous)
-    - Distance-based probability distribution
-    - Common zone ending areas
+    DORMANT zone-predictor agent — does NOT predict zones.
+
+    Historically this class claimed to predict the next safe zone from
+    the current zone, historical patterns and zone-shift mechanics, but
+    the implementation was a random offset with invented confidences.
+    That fabrication was removed (inspection H13): prediction entry
+    points now raise :class:`ZonePredictionUnavailable`. The class is
+    kept only so dormant imports / the (also dormant) orchestrator
+    registry shape do not silently change; nothing in production
+    instantiates it.
     """
     
     def __init__(self, config: AgentConfig, event_bus: EventBus):
@@ -96,86 +124,23 @@ class ZonePredictor(BaseAgent):
         current_phase: int,
         map_name: str = "erangel",
     ) -> ZonePrediction:
-        """Predict the next safe zone"""
-        
-        pred = ZonePrediction(
-            prediction_id=f"zone_pred_{int(time.time())}",
-            current_center_x=current_center_x,
-            current_center_y=current_center_y,
-            current_radius=current_radius,
-            current_phase=current_phase,
+        """Zone prediction is unavailable — always raises.
+
+        The previous body fabricated a prediction (random centre offset
+        + invented confidences, inspection H13). It was removed rather
+        than re-tuned: there is no trained model or measured method
+        behind this dormant agent, so the only honest result is an
+        explicit unavailable error.
+
+        Raises:
+            ZonePredictionUnavailable: always, with the reason above.
+        """
+        self._log.warning(
+            "zone prediction requested from dormant ZonePredictor; "
+            "returning unavailable",
+            reason=ZONE_PREDICTION_UNAVAILABLE_REASON,
         )
-        
-        # Get shrink ratio
-        shrink_ratio = self.zone_shrink_ratios.get(
-            current_phase + 1,
-            0.5 - current_phase * 0.05,
-        )
-        
-        # Predicted radius
-        pred.predicted_radius = current_radius * shrink_ratio
-        
-        # Maximum shift distance (new center must be within current zone)
-        max_shift = current_radius * (1 - shrink_ratio)
-        
-        # Strategy 1: Zone tends to shift away from center (toward edge)
-        # Calculate direction bias based on current center position
-        map_center_x, map_center_y = self._get_map_center(map_name)
-        
-        dx = current_center_x - map_center_x
-        dy = current_center_y - map_center_y
-        
-        # Bias toward map edges (away from center)
-        direction_magnitude = math.sqrt(dx**2 + dy**2)
-        if direction_magnitude > 0:
-            bias_x = (dx / direction_magnitude) * max_shift * 0.4
-            bias_y = (dy / direction_magnitude) * max_shift * 0.4
-        else:
-            bias_x = 0
-            bias_y = 0
-        
-        # Add some randomness
-        random_angle = random.uniform(0, 2 * math.pi)
-        random_distance = random.uniform(0, max_shift * 0.6)
-        
-        random_x = math.cos(random_angle) * random_distance
-        random_y = math.sin(random_angle) * random_distance
-        
-        # Predicted center
-        pred.predicted_center_x = current_center_x + bias_x + random_x
-        pred.predicted_center_y = current_center_y + bias_y + random_y
-        
-        # Ensure within map bounds
-        map_size = self._get_map_size(map_name)
-        pred.predicted_center_x = max(pred.predicted_radius, min(map_size - pred.predicted_radius, pred.predicted_center_x))
-        pred.predicted_center_y = max(pred.predicted_radius, min(map_size - pred.predicted_radius, pred.predicted_center_y))
-        
-        # Confidence based on phase (earlier = less confident)
-        pred.confidence = min(0.9, 0.3 + current_phase * 0.08)
-        
-        # Generate alternative predictions
-        for i in range(3):
-            alt_angle = random.uniform(0, 2 * math.pi)
-            alt_dist = random.uniform(0, max_shift)
-            alt_x = current_center_x + math.cos(alt_angle) * alt_dist
-            alt_y = current_center_y + math.sin(alt_angle) * alt_dist
-            alt_conf = 0.1 + random.uniform(0, 0.15)
-            pred.alternative_centers.append((alt_x, alt_y, alt_conf))
-        
-        # Check common final zones
-        if current_phase >= 5:
-            common_zones = self.common_final_zones.get(map_name, [])
-            for cz_x, cz_y in common_zones:
-                dist = math.sqrt(
-                    (current_center_x - cz_x)**2 + (current_center_y - cz_y)**2
-                )
-                if dist < current_radius * 0.8:
-                    # Boost probability near common zones
-                    pred.alternative_centers.append((cz_x, cz_y, 0.25))
-        
-        self.predictions.append(pred)
-        
-        return pred
+        raise ZonePredictionUnavailable(ZONE_PREDICTION_UNAVAILABLE_REASON)
     
     def get_zone_probability(
         self,
@@ -183,28 +148,16 @@ class ZonePredictor(BaseAgent):
         y: float,
         prediction: ZonePrediction,
     ) -> float:
-        """Get probability that a given point is in next zone"""
-        
-        # Distance from predicted center
-        dist = math.sqrt(
-            (x - prediction.predicted_center_x)**2 +
-            (y - prediction.predicted_center_y)**2
-        )
-        
-        # Base probability from main prediction
-        if dist <= prediction.predicted_radius:
-            base_prob = 1.0 - (dist / prediction.predicted_radius) * 0.3
-        else:
-            base_prob = max(0, 1.0 - (dist - prediction.predicted_radius) / 200)
-        
-        # Check alternatives
-        alt_prob = 0
-        for alt_x, alt_y, alt_conf in prediction.alternative_centers:
-            alt_dist = math.sqrt((x - alt_x)**2 + (y - alt_y)**2)
-            if alt_dist <= prediction.predicted_radius:
-                alt_prob = max(alt_prob, alt_conf)
-        
-        return max(base_prob * prediction.confidence, alt_prob)
+        """Zone probability is unavailable — always raises.
+
+        This derived a "probability" from a fabricated prediction and
+        its invented confidence, so it has the same defect as
+        ``predict_next_zone`` (inspection H13) and was retired with it.
+
+        Raises:
+            ZonePredictionUnavailable: always.
+        """
+        raise ZonePredictionUnavailable(ZONE_PREDICTION_UNAVAILABLE_REASON)
     
     def _get_map_center(self, map_name: str) -> Tuple[float, float]:
         """Get map center coordinates"""

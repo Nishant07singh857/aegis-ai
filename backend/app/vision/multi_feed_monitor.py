@@ -472,6 +472,9 @@ def _entry_to_event(detector: Any, entry: Any, match_id: Optional[str], now: flo
         "raw_text": getattr(entry, "raw_text", ""),
         "ocr_confidence": round(float(getattr(entry, "confidence", 0.0)), 1),
         "headshot": bool(getattr(entry, "headshot", False)),
+        # Integrity C2 (source marker ONLY): icon-derived headshot —
+        # never a trusted/persistable headshot source.
+        "headshot_source": "vision_icon",
         "dedup_key": _entry_key(entry),
     }
     weapon = getattr(entry, "weapon", None)
@@ -482,6 +485,8 @@ def _entry_to_event(detector: Any, entry: Any, match_id: Optional[str], now: flo
         player=getattr(entry, "killer", None),
         victim=getattr(entry, "victim", None),
         weapon=weapon,
+        # Integrity C2: vision provenance (see feed_adapter/schemas.py).
+        source="vision_killfeed",
         payload=payload,
     )
 

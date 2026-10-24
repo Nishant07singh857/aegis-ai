@@ -28,7 +28,7 @@ class HealingInfo:
     team_id: str = ""
     
     # Healing details
-    heal_type: str = ""  # first_aid, bandage, medkit, boost, painkiller
+    heal_type: str = ""  # first_aid, bandage, medkit, boost, painkiller, unknown
     heal_amount: int = 0
     heal_duration: float = 0.0  # seconds
     heal_progress: float = 0.0  # 0-100%
@@ -50,6 +50,11 @@ class HealingInfo:
     
     # Detection
     confidence: float = 0.0
+    # What the confidence number actually IS: the contour fill ratio
+    # (bright-mask pixels / bbox area) of the progress bar on this
+    # frame — an evidence quantity, NOT a calibrated probability
+    # (never measured in the Phase 23 programme; H20).
+    confidence_basis: str = "contour_fill_ratio"
 
 
 class HealingDetector(BaseDetector):
@@ -128,6 +133,7 @@ class HealingDetector(BaseDetector):
                         "completed": e.is_completed,
                         "cancelled": e.is_cancelled,
                         "confidence": round(e.confidence, 3),
+                        "confidence_basis": e.confidence_basis,
                     }
                     for e in healing_events
                 ],
@@ -182,17 +188,30 @@ class HealingDetector(BaseDetector):
                 expected_full_width = int(self.heal_region.width * w * 0.8)
                 progress = min(100, (bw / expected_full_width) * 100)
                 
-                # Determine heal type based on color
-                heal_type = "first_aid"  # Default
+                # Determine heal type based on color. No colour evidence
+                # -> "unknown": the old invented default "first_aid"
+                # fabricated a classification (and its 75 HP amount)
+                # out of nothing (H20).
+                heal_type = "unknown"
                 if region.size > 0 and y + bh < region.shape[0]:
                     bar_color = region[y + bh//2, x + bw//2]
                     heal_type = self._identify_heal_type(bar_color)
-                
+
+                # Confidence derived from evidence: fill ratio of the
+                # bright progress-bar contour (solid bar ~= 1.0).
+                bar_roi = bright[y:y + bh, x:x + bw]
+                fill_ratio = (
+                    float(cv2.countNonZero(bar_roi)) / float(bw * bh)
+                    if bw > 0 and bh > 0 else 0.0
+                )
+
                 event = HealingInfo(
                     event_id=f"heal_{int(time.time()*1000)}",
                     heal_type=heal_type,
-                    heal_duration=self.heal_types.get(heal_type, {}).get("duration", 6.0),
-                    heal_amount=self.heal_types.get(heal_type, {}).get("amount", 75),
+                    # Unknown type -> duration/amount stay 0 (unknown),
+                    # never the first_aid defaults.
+                    heal_duration=self.heal_types.get(heal_type, {}).get("duration", 0.0),
+                    heal_amount=self.heal_types.get(heal_type, {}).get("amount", 0),
                     heal_progress=progress,
                     is_active=progress < 95,
                     is_completed=progress >= 95,
@@ -201,7 +220,7 @@ class HealingDetector(BaseDetector):
                     progress_bar_x=x1 + x,
                     progress_bar_y=y1 + y,
                     progress_bar_width=bw,
-                    confidence=0.7,
+                    confidence=round(fill_ratio, 3),
                 )
                 
                 events.append(event)
@@ -233,8 +252,10 @@ class HealingDetector(BaseDetector):
         # White = bandage
         elif r > 200 and g > 200 and b > 200:
             return "bandage"
-        
-        return "first_aid"
+
+        # No colour rule matched: say so honestly instead of the old
+        # invented "first_aid" fallback (H20).
+        return "unknown"
     
     def _update_active_heals(self, detected: List[HealingInfo]) -> None:
         """Update active healing tracking"""

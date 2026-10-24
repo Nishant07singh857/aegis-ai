@@ -11,9 +11,14 @@ from datetime import datetime, timedelta
 import uuid
 
 from app.services.match_service import MatchService
+# NOTE (H-fix): MatchTeamStats / MatchPlayerStats do NOT live in
+# app.db.models — their canonical definitions are in
+# app.services.match_service (see that module's Phase 22 docstring), which
+# is why this file used to die at collection with ImportError.
+from app.services.match_service import MatchPlayerStats, MatchTeamStats
 from app.db.models import (
     Match, MatchStatus, MatchMap, Tournament, TournamentStatus,
-    MatchTeamStats, MatchPlayerStats, MatchEvent,
+    MatchEvent,
     Team,
 )
 
@@ -57,7 +62,8 @@ class TestMatchService:
             id=str(uuid.uuid4()),
             tournament_id=str(uuid.uuid4()),
             match_number=1,
-            match_name="Match 1",
+            # The Match model has no match_name column (the service only
+            # sets it dynamically when a caller passes one).
             map_name=MatchMap.ERANGEL,
             status=MatchStatus.SCHEDULED,
             scheduled_time=datetime.utcnow() + timedelta(hours=2),
@@ -67,7 +73,8 @@ class TestMatchService:
     def sample_teams(self):
         """Sample teams for match"""
         return [
-            Team(id=f"team_{i:03d}", name=f"Team {i}", short_name=f"T{i}")
+            # The Team model has no short_name column; its short label is tag.
+            Team(id=f"team_{i:03d}", name=f"Team {i}", tag=f"T{i}")
             for i in range(16)
         ]
     
@@ -329,13 +336,19 @@ class TestMatchService:
         
         mock_match_result = AsyncMock()
         mock_match_result.scalar_one_or_none = Mock(return_value=sample_match)
-        
+
+        # record_match_results first asks PointsCalculator to configure
+        # itself from the active tournament (one extra execute; None here
+        # = no active tournament -> documented BMSD defaults).
+        mock_config_result = AsyncMock()
+        mock_config_result.scalar_one_or_none = Mock(return_value=None)
+
         mock_team_result = AsyncMock()
         mock_team_result.scalar_one_or_none = Mock(side_effect=lambda: sample_teams[0])
-        
+
         mock_session.execute = AsyncMock()
-        mock_session.execute.side_effect = [mock_match_result] + [mock_team_result] * len(team_results)
-        
+        mock_session.execute.side_effect = [mock_match_result, mock_config_result] + [mock_team_result] * len(team_results)
+
         results = await service.record_match_results(
             match_id=sample_match.id,
             team_results=team_results,
@@ -358,13 +371,17 @@ class TestMatchService:
         
         mock_match_result = AsyncMock()
         mock_match_result.scalar_one_or_none = Mock(return_value=sample_match)
-        
+
+        # PointsCalculator configure step consumes one execute (see above).
+        mock_config_result = AsyncMock()
+        mock_config_result.scalar_one_or_none = Mock(return_value=None)
+
         mock_team_result = AsyncMock()
         mock_team_result.scalar_one_or_none = Mock(return_value=sample_teams[0])
-        
+
         mock_session.execute = AsyncMock()
-        mock_session.execute.side_effect = [mock_match_result, mock_team_result]
-        
+        mock_session.execute.side_effect = [mock_match_result, mock_config_result, mock_team_result]
+
         results = await service.record_match_results(
             match_id=sample_match.id,
             team_results=team_results,

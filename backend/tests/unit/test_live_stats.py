@@ -121,7 +121,15 @@ def kill_event(
     headshot: bool = False,
     ts: float = T0 + 100,
 ) -> Dict[str, Any]:
-    """Feed-adapter to_bus_payload() shape (headshot always present)."""
+    """Feed-adapter to_bus_payload() shape (headshot always present).
+
+    Integrity C2: bus payloads now also carry provenance. This helper
+    simulates the TRUSTED producer — a spotter-confirmed event as
+    stamped server-side at ingest — so ``headshot_confirmed`` mirrors
+    the flag. Icon-derived (vision) events carry
+    ``headshot_confirmed=False`` and are covered in
+    test_integrity_headshot_stats.py.
+    """
     return {
         "id": eid,
         "timestamp": ts,
@@ -133,6 +141,9 @@ def kill_event(
         "weapon": "M416",
         "isKnock": False,
         "headshot": headshot,
+        "headshot_confirmed": headshot,
+        "headshot_source": "spotter",
+        "source": "spotter",
     }
 
 

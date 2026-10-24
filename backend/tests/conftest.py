@@ -4,6 +4,17 @@ AEGIS AI - Test Configuration
 Shared fixtures, mock objects, and test utilities for the entire test suite.
 """
 
+# ── Integrity Fix Pack (C1/H1) — explicit TEST-ONLY credentials ──────
+# app.config no longer carries built-in SECRET_KEY / DATABASE_URL
+# defaults, so the suite must provide its own, exactly as the
+# tests/pytest.ini [pytest-env] section always intended. setdefault runs
+# before any app import in this process, never overrides a real
+# environment, and these values are test fixtures, not credentials.
+import os as _os
+
+_os.environ.setdefault("SECRET_KEY", "test-secret-key-for-testing-only")
+_os.environ.setdefault("DATABASE_URL", "sqlite+aiosqlite:///./test.db")
+
 import asyncio
 import pytest
 import pytest_asyncio

@@ -689,13 +689,15 @@ def _sqlite_friendly_metadata():
 
 
 @pytest_asyncio.fixture()
-async def api_client():
+async def api_client(monkeypatch):
     from httpx import ASGITransport, AsyncClient
     from fastapi import FastAPI
 
+    from app.api import deps
     from app.api.v1.anti_cheat.router import router
     from app.api.v1.anti_cheat.service import AntiCheatFlagService
     from app.db.base import Base
+    from app.db.models.user import User
     from app.db.session import get_db
 
     _sqlite_friendly_metadata()
@@ -703,6 +705,30 @@ async def api_client():
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     maker = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+
+    # H2 (Integrity Fix Pack): get_current_user revocation-checks JWT
+    # principals against the DB user's live is_active flag via
+    # deps.AsyncSessionLocal, and a missing DB row fails closed (401).
+    # Point that lookup at THIS test engine and seed a real (test) DB
+    # user behind every hand-minted _token() below — same pattern as
+    # tests/unit/test_integrity_credentials_auth.py's auth_env fixture.
+    # Passwords are never exercised here (tokens are minted directly);
+    # the rows exist so the is_active check has a live account to find.
+    monkeypatch.setattr(deps, "AsyncSessionLocal", maker)
+    async with maker() as session:
+        for role in ("viewer", "operator", "spotter", "observer", "director", "admin"):
+            session.add(
+                User(
+                    id=f"u-{role}",
+                    email=f"test-{role}@example.test",
+                    username=f"test-{role}",
+                    hashed_password="test-only-not-a-real-hash",
+                    full_name=f"Test {role}",
+                    role=role,
+                    is_active=True,
+                )
+            )
+        await session.commit()
 
     async def override_get_db():
         async with maker() as session:

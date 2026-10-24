@@ -661,6 +661,13 @@ class VisionCaptureService:
                         "is_knocked": knocked,
                         "was_knocked": prev_knocked,
                         "confidence": player.get("confidence"),
+                        # H20: Gen-1 confidences are unmeasured unless
+                        # the detector states an evidence basis — never
+                        # let a bare constant look like a measurement.
+                        "confidence_basis": (
+                            player.get("confidence_basis")
+                            or "unmeasured_heuristic"
+                        ),
                         "detector": self._hp.name,
                     },
                 )
@@ -710,6 +717,14 @@ class VisionCaptureService:
                         "position": [pos[0], pos[1]],
                         "position_space": "frame_pixels",
                         "confidence": det_event.get("confidence"),
+                        # Forwarded only when the detector states a
+                        # basis (smoke/molotov: Phase 23 measured
+                        # gates; grenade/stun: unmeasured — H21).
+                        **(
+                            {"confidence_basis": det_event["confidence_basis"]}
+                            if det_event.get("confidence_basis")
+                            else {}
+                        ),
                         "detector": self._utility.name,
                         # Phase 23 (W3): event-contract source tag —
                         # these are world-side CV observations, not
@@ -773,6 +788,9 @@ class VisionCaptureService:
                     },
                     "coordinate_space": "minimap_region_pixels",
                     "confidence": extra.get("confidence"),
+                    "confidence_basis": (
+                        extra.get("confidence_basis") or "unmeasured_heuristic"
+                    ),
                     "detector": self._minimap.name,
                 },
             )
@@ -811,6 +829,9 @@ class VisionCaptureService:
                     "is_shrinking": zone.get("is_shrinking"),
                     "zone_damage": zone.get("damage"),
                     "confidence": zone.get("confidence"),
+                    "confidence_basis": (
+                        zone.get("confidence_basis") or "unmeasured_heuristic"
+                    ),
                     "detector": self._zone_geom.name,
                 },
             )
@@ -843,6 +864,10 @@ class VisionCaptureService:
                                 "progress": det_event.get("progress"),
                                 "completed": True,
                                 "confidence": det_event.get("confidence"),
+                                "confidence_basis": (
+                                    det_event.get("confidence_basis")
+                                    or "unmeasured_heuristic"
+                                ),
                                 "detector": self._healing.name,
                             },
                         )
@@ -862,6 +887,10 @@ class VisionCaptureService:
                             "progress": det_event.get("progress"),
                             "completed": False,
                             "confidence": det_event.get("confidence"),
+                            "confidence_basis": (
+                                det_event.get("confidence_basis")
+                                or "unmeasured_heuristic"
+                            ),
                             "detector": self._healing.name,
                         },
                     )
@@ -923,6 +952,9 @@ class VisionCaptureService:
                         "position": [x, y],
                         "position_space": "frame_pixels",
                         "confidence": obj.get("confidence"),
+                        "confidence_basis": (
+                            obj.get("confidence_basis") or "unmeasured_heuristic"
+                        ),
                         "detector": self._loot.name,
                     },
                 )

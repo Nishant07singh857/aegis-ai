@@ -48,7 +48,13 @@ class ZoneInfo:
     
     # Detection
     confidence: float = 0.0
-    
+    # What the confidence number actually IS: the fraction of the
+    # independent signals sought that were actually found on this
+    # frame (safe circle / blue circle / timer OCR) — a coverage
+    # fraction, NOT a calibrated probability (never measured in the
+    # Phase 23 programme; H20).
+    confidence_basis: str = "signal_coverage_fraction"
+
     def get_zone_damage(self) -> int:
         """Get blue zone damage based on phase"""
         damage_per_phase = {1: 1, 2: 2, 3: 4, 4: 6, 5: 8, 6: 10, 7: 12, 8: 15}
@@ -168,6 +174,7 @@ class ZoneDetector(BaseDetector):
                     "is_shrinking": zone_info.is_shrinking if zone_info else False,
                     "damage": zone_info.get_zone_damage() if zone_info else 0,
                     "confidence": round(zone_info.confidence, 3) if zone_info else 0,
+                    "confidence_basis": zone_info.confidence_basis if zone_info else "signal_coverage_fraction",
                 },
             },
         )
@@ -185,41 +192,47 @@ class ZoneDetector(BaseDetector):
         """Detect zone circles and timer"""
         
         info = ZoneInfo()
-        
+
+        # Independent signals actually found on this frame. Confidence
+        # is their coverage fraction (see ZoneInfo.confidence_basis) —
+        # the old +0.4/+0.3/+0.2 increments presented invented weights
+        # as a measurement (H20).
+        signals_found = 0
+
         try:
             import cv2
-            
+
             mh, mw = minimap.shape[:2]
-            
+
             # Convert to HSV
             hsv = cv2.cvtColor(minimap, cv2.COLOR_BGR2HSV)
-            
+
             # Detect white circle (safe zone)
             safe_circle = self._detect_circle(hsv, (0, 0, 200), (180, 30, 255))
-            
+
             if safe_circle:
                 # Convert minimap position to world coordinates
                 # Scale based on minimap size vs map size
                 scale = info.map_size / mw
-                
+
                 info.safe_zone_center_x = safe_circle[0][0] * scale
                 info.safe_zone_center_y = safe_circle[0][1] * scale
                 info.safe_zone_radius = safe_circle[1] * scale
-                
+
                 # Determine zone phase from radius
                 info.zone_phase = self._determine_phase(info.safe_zone_radius)
-                info.confidence += 0.4
-            
+                signals_found += 1
+
             # Detect blue circle
             blue_circle = self._detect_circle(hsv, (100, 100, 100), (130, 255, 255))
-            
+
             if blue_circle:
                 scale = info.map_size / mw
                 info.blue_zone_center_x = blue_circle[0][0] * scale
                 info.blue_zone_center_y = blue_circle[0][1] * scale
                 info.blue_zone_radius = blue_circle[1] * scale
-                info.confidence += 0.3
-            
+                signals_found += 1
+
             # Read zone timer using OCR
             if timer_region.size > 0:
                 timer_text = self._read_timer(timer_region)
@@ -231,10 +244,12 @@ class ZoneDetector(BaseDetector):
                             info.zone_shrink_timer = int(parts[0]) * 60 + int(parts[1])
                         else:
                             info.zone_shrink_timer = int(timer_text)
-                        info.confidence += 0.2
+                        signals_found += 1
                     except ValueError:
                         pass
-            
+
+            info.confidence = round(signals_found / 3.0, 3)
+
             # Check if zone is shrinking
             if info.blue_zone_radius > info.safe_zone_radius:
                 info.is_shrinking = True
@@ -246,8 +261,16 @@ class ZoneDetector(BaseDetector):
             self._log.warning("OpenCV not available")
         except Exception as e:
             self._log.error(f"Zone detection error: {e}")
-        
-        return info if info.confidence > 0.3 else None
+
+        # A zone reading requires at least one GEOMETRIC signal (a
+        # circle actually seen on the minimap). A timer OCR hit alone
+        # must not fabricate a zone at radius 0 / phase-from-nothing —
+        # under the old increments gate it could not pass either
+        # (0.2 < 0.3); the safe circle alone passed at 0.4 and the
+        # blue circle alone at exactly 0.3 did not — both circles now
+        # count as one coverage signal each.
+        has_geometry = info.safe_zone_radius > 0 or info.blue_zone_radius > 0
+        return info if has_geometry else None
     
     def _detect_circle(
         self,

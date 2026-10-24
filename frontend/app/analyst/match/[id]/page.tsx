@@ -1,19 +1,22 @@
 "use client";
 
 /**
- * AEGIS AI — MATCH TIMELINE (Phase 11, W3).
+ * AEGIS AI — MATCH TIMELINE (Phase 11, W3; contract-aligned in the
+ * Integrity Fix Pack, C5a).
  *
  * Route: /analyst/match/[id] (operator + admin). Coach-facing match report:
  * schematic SVG map with per-team rotation paths, drop markers, zone-phase
- * circles and fight pins; zone phase list; per-team summary; fight list;
- * and a Download Match Report PDF button.
+ * circles and fight pins; zone phase list + per-team zone tendency; drops
+ * (events + per-team drop stats); per-team summary; fight list; and a
+ * Download Match Report PDF button.
  *
- * Data (all live, all optional):
- *   GET /api/v1/analysis/rotations?match_id=
- *   GET /api/v1/analysis/drops?match_id=
- *   GET /api/v1/analysis/zones?match_id=
+ * Data (all live, all optional) — shapes mirror
+ * backend/app/analysis/schemas.py and backend/app/dossiers/schemas.py:
+ *   GET /api/v1/analysis/rotations?match_id=   → data: RotationResponse[]
+ *   GET /api/v1/analysis/drops?match_id=       → data: { events, team_stats }
+ *   GET /api/v1/analysis/zones?match_id=       → data: { phases, tendency }
  *   GET /api/v1/analysis/grenade-trajectories?match_id=  (ESTIMATED arcs)
- *   GET /api/v1/dossiers/fights?match_id=
+ *   GET /api/v1/dossiers/fights?match_id=      → data: FightDetailOut[]
  * Anything missing renders the honest coverage note from the API meta —
  * no data is ever invented.
  */
@@ -38,20 +41,19 @@ import {
   unwrapEnvelope,
   coverageNote,
   colorFromId,
-  normCoord,
-  pointX,
-  pointY,
-  rotationTeamId,
-  rotationTeamName,
-  rotationOrder,
-  zoneRadius,
-  fightOutcome,
-  fightOpponent,
+  fitCoordScaler,
+  rotationTeamsFromEvents,
+  schematicZonesFromPhases,
+  schematicDropsFromEvents,
+  schematicFightsFromRows,
+  fightResultForTeam,
   trajectorySchematic,
+  EMPTY_DROPS,
+  EMPTY_ZONES,
   type EnvelopeMeta,
   type RotationPoint,
-  type ZonePhase,
-  type DropPoint,
+  type DropsData,
+  type ZonesData,
   type FightRow,
   type GrenadeTrajectoryRecord,
 } from "../../components/types";
@@ -78,6 +80,14 @@ interface TeamSummary {
   drop: string | null;
 }
 
+function formatMs(ts: number | undefined): string {
+  if (typeof ts !== "number" || !Number.isFinite(ts)) return "—";
+  const totalSec = Math.floor(ts / 1000);
+  const m = Math.floor(totalSec / 60);
+  const s = totalSec % 60;
+  return `${m}:${String(s).padStart(2, "0")}`;
+}
+
 function MatchTimelineInner() {
   const params = useParams<{ id: string }>();
   const matchId = decodeURIComponent(params?.id ?? "");
@@ -87,9 +97,9 @@ function MatchTimelineInner() {
   const [rotations, setRotations] =
     useState<EndpointState<RotationPoint[]>>(emptyEndpoint([]));
   const [drops, setDrops] =
-    useState<EndpointState<DropPoint[]>>(emptyEndpoint([]));
+    useState<EndpointState<DropsData>>(emptyEndpoint(EMPTY_DROPS));
   const [zones, setZones] =
-    useState<EndpointState<ZonePhase[]>>(emptyEndpoint([]));
+    useState<EndpointState<ZonesData>>(emptyEndpoint(EMPTY_ZONES));
   const [fights, setFights] =
     useState<EndpointState<FightRow[]>>(emptyEndpoint([]));
   const [trajectories, setTrajectories] =
@@ -122,8 +132,8 @@ function MatchTimelineInner() {
     const q = `match_id=${encodeURIComponent(matchId)}`;
     const [r, d, z, f, t] = await Promise.all([
       loadEndpoint<RotationPoint[]>(`/api/v1/analysis/rotations?${q}`, []),
-      loadEndpoint<DropPoint[]>(`/api/v1/analysis/drops?${q}`, []),
-      loadEndpoint<ZonePhase[]>(`/api/v1/analysis/zones?${q}`, []),
+      loadEndpoint<DropsData>(`/api/v1/analysis/drops?${q}`, EMPTY_DROPS),
+      loadEndpoint<ZonesData>(`/api/v1/analysis/zones?${q}`, EMPTY_ZONES),
       loadEndpoint<FightRow[]>(`/api/v1/dossiers/fights?${q}`, []),
       loadEndpoint<GrenadeTrajectoryRecord[]>(
         `/api/v1/analysis/grenade-trajectories?${q}`,
@@ -131,8 +141,23 @@ function MatchTimelineInner() {
       ),
     ]);
     setRotations(r);
-    setDrops(d);
-    setZones(z);
+    // Drops/zones payloads are envelope OBJECTS ({events, team_stats} /
+    // {phases, tendency}) — normalize defensively so a malformed block
+    // degrades to an honest empty state instead of a crash (C5a).
+    setDrops({
+      ...d,
+      data: {
+        events: Array.isArray(d.data?.events) ? d.data.events : [],
+        team_stats: Array.isArray(d.data?.team_stats) ? d.data.team_stats : [],
+      },
+    });
+    setZones({
+      ...z,
+      data: {
+        phases: Array.isArray(z.data?.phases) ? z.data.phases : [],
+        tendency: Array.isArray(z.data?.tendency) ? z.data.tendency : [],
+      },
+    });
     setFights(f);
     setTrajectories(t);
     setLoading(false);
@@ -144,103 +169,67 @@ function MatchTimelineInner() {
 
   // ---- transforms ---------------------------------------------------------
 
-  const rotationTeams: SchematicRotationTeam[] = useMemo(() => {
-    const byId = new Map<string, SchematicRotationTeam>();
-    const ordered = [...rotations.data].sort(
-      (a, b) => rotationOrder(a, 0) - rotationOrder(b, 0)
-    );
-    ordered.forEach((p, i) => {
-      const id = rotationTeamId(p, i);
-      const x = pointX(p);
-      const y = pointY(p);
-      if (x === null || y === null) return;
-      let team = byId.get(id);
-      if (!team) {
-        team = {
-          teamId: id,
-          teamName: rotationTeamName(p, id),
-          color: p.color || colorFromId(id),
-          points: [],
-        };
-        byId.set(id, team);
-      }
-      team.points.push({ x, y, phase: p.phase });
+  // One shared coordinate transform for everything plotted on the
+  // schematic (see fitCoordScaler in types.ts): analysis coordinates are
+  // map metres with no map extent in the payload, so the schematic is a
+  // uniform fit over this match's recorded extents — relative positions
+  // only, never per-axis stretching or corner-clamping.
+  const coordScale = useMemo(() => {
+    const values: number[] = [];
+    rotations.data.forEach((r) => {
+      (Array.isArray(r.waypoints) ? r.waypoints : []).forEach((wp) => {
+        if (Array.isArray(wp)) values.push(wp[0], wp[1]);
+      });
     });
-    return [...byId.values()];
-  }, [rotations.data]);
+    drops.data.events.forEach((d) => {
+      if (typeof d.location_x === "number") values.push(d.location_x);
+      if (typeof d.location_y === "number") values.push(d.location_y);
+    });
+    zones.data.phases.forEach((z) => {
+      values.push(z.center_x, z.center_y, z.center_x + z.radius, z.center_y + z.radius);
+    });
+    fights.data.forEach((f) => {
+      if (typeof f.location_x === "number") values.push(f.location_x);
+      if (typeof f.location_y === "number") values.push(f.location_y);
+    });
+    return fitCoordScaler(values);
+  }, [rotations.data, drops.data, zones.data, fights.data]);
 
-  const schematicZones: SchematicZone[] = useMemo(
+  const fittedFromMetres = useMemo(() => {
+    const all = [
+      ...zones.data.phases.map((z) => z.center_x + z.radius),
+      ...drops.data.events.map((d) => d.location_x ?? 0),
+    ];
+    return all.some((v) => typeof v === "number" && v > 1000);
+  }, [zones.data, drops.data]);
+
+  const rotationTeams: SchematicRotationTeam[] = useMemo(
     () =>
-      zones.data.flatMap((z, i) => {
-        const x = pointX({ location_x: z.circle_center_x ?? z.cx ?? z.x });
-        const y = pointY({ location_y: z.circle_center_y ?? z.cy ?? z.y });
-        const raw = zoneRadius(z);
-        if (x === null || y === null || raw === null) return [];
-        // Clamp to the schematic: a radius larger than the map is a
-        // different unit (meters) — treat it as full-map.
-        const r = Math.min(480, normCoord(raw) ?? 480);
-        return [
-          {
-            x,
-            y,
-            r,
-            phase: String(z.phase ?? z.stage ?? `P${i + 1}`),
-          },
-        ];
-      }),
-    [zones.data]
+      rotationTeamsFromEvents(rotations.data, coordScale, (id) => id).map(
+        (t) => ({
+          teamId: t.teamId,
+          teamName: t.teamName,
+          color: t.color,
+          points: t.points,
+        })
+      ),
+    [rotations.data, coordScale]
   );
 
-  const schematicFights: (SchematicFight & { teamId: string | null })[] =
-    useMemo(() => {
-      const out: (SchematicFight & { teamId: string | null })[] = [];
-      fights.data.forEach((f) => {
-        const x = pointX(f);
-        const y = pointY(f);
-        if (x === null || y === null) return;
-        const outcome = fightOutcome(f);
-        const rawName =
-          (f as { team_name?: unknown }).team_name ??
-          (f as { team?: unknown }).team ??
-          null;
-        const teamNameStr =
-          typeof rawName === "string" && rawName ? rawName : null;
-        const teamId =
-          typeof f.team_id === "string" && f.team_id ? f.team_id : teamNameStr;
-        const label = `${teamNameStr ? `${teamNameStr} vs ` : ""}${fightOpponent(f)}${outcome ? ` · ${outcome}` : ""}`;
-        out.push({ x, y, label, outcome, teamId });
-      });
-      return out;
-    }, [fights.data]);
+  const schematicZones: SchematicZone[] = useMemo(
+    () => schematicZonesFromPhases(zones.data.phases, coordScale),
+    [zones.data, coordScale]
+  );
 
-  const schematicDrops: (SchematicDrop & { teamId: string | null })[] =
-    useMemo(
-      () =>
-        drops.data.flatMap((d) => {
-          const x = pointX(d);
-          const y = pointY(d);
-          if (x === null || y === null) return [];
-          const teamId =
-            typeof d.team_id === "string" && d.team_id
-              ? d.team_id
-              : typeof d.team_name === "string" && d.team_name
-                ? d.team_name
-                : null;
-          const label = String(
-            d.label ?? d.team_name ?? d.team ?? teamId ?? "drop"
-          );
-          return [
-            {
-              x,
-              y,
-              label,
-              color: d.color || (teamId ? colorFromId(teamId) : "#00f0ff"),
-              teamId,
-            },
-          ];
-        }),
-      [drops.data]
-    );
+  const schematicFights = useMemo(
+    () => schematicFightsFromRows(fights.data, coordScale),
+    [fights.data, coordScale]
+  );
+
+  const schematicDrops = useMemo(
+    () => schematicDropsFromEvents(drops.data.events, coordScale),
+    [drops.data, coordScale]
+  );
 
   const summaries: TeamSummary[] = useMemo(() => {
     const map = new Map<string, TeamSummary>();
@@ -265,33 +254,49 @@ function MatchTimelineInner() {
       const s = ensure(t.teamId, t.teamName, t.color);
       s.waypoints = t.points.length;
     });
-    schematicDrops.forEach((d) => {
-      if (!d.teamId) return;
-      const s = ensure(d.teamId, d.label, d.color);
-      if (!s.drop) s.drop = d.label;
+    drops.data.events.forEach((d) => {
+      if (!d.team_id) return;
+      const s = ensure(d.team_id, d.team_id, colorFromId(d.team_id));
+      if (!s.drop && d.named_location) s.drop = d.named_location;
     });
-    schematicFights.forEach((f) => {
-      if (!f.teamId) return;
-      const s = ensure(f.teamId, f.teamId, colorFromId(f.teamId));
-      s.fights += 1;
-      const o = (f.outcome ?? "").toLowerCase();
-      if (o.includes("win")) s.won += 1;
-      else if (o.includes("loss")) s.lost += 1;
+    fights.data.forEach((f) => {
+      (Array.isArray(f.teams) ? f.teams : []).forEach((t) => {
+        const s = ensure(t.team_id, t.team_name, colorFromId(t.team_id));
+        s.name = t.team_name || s.name;
+        s.fights += 1;
+        const res = fightResultForTeam(f, t.team_id);
+        if (res === "won") s.won += 1;
+        else if (res === "lost") s.lost += 1;
+      });
     });
     return [...map.values()].sort((a, b) => b.waypoints - a.waypoints);
-  }, [rotationTeams, schematicDrops, schematicFights]);
+  }, [rotationTeams, drops.data, fights.data]);
+
+  const teamNameOf = useCallback(
+    (teamId: string): string =>
+      summaries.find((s) => s.id === teamId)?.name ?? teamId,
+    [summaries]
+  );
 
   const visibleRotations = selectedTeam
     ? rotationTeams.filter((t) => t.teamId === selectedTeam)
     : rotationTeams;
 
   const visibleFights = selectedTeam
-    ? schematicFights.filter((f) => f.teamId === selectedTeam)
+    ? schematicFights.filter((f) => f.teamIds.includes(selectedTeam))
     : schematicFights;
 
   const visibleDrops = selectedTeam
     ? schematicDrops.filter((d) => d.teamId === selectedTeam)
     : schematicDrops;
+
+  const visibleFightRows = selectedTeam
+    ? fights.data.filter((f) =>
+        (Array.isArray(f.teams) ? f.teams : []).some(
+          (t) => t.team_id === selectedTeam
+        )
+      )
+    : fights.data;
 
   // ESTIMATED grenade arcs: only records whose coordinate space maps
   // honestly onto the schematic are drawn (see trajectorySchematic);
@@ -321,9 +326,11 @@ function MatchTimelineInner() {
 
   const hasAnyData =
     rotationTeams.length > 0 ||
-    schematicZones.length > 0 ||
-    schematicFights.length > 0 ||
-    schematicDrops.length > 0 ||
+    zones.data.phases.length > 0 ||
+    zones.data.tendency.length > 0 ||
+    fights.data.length > 0 ||
+    drops.data.events.length > 0 ||
+    drops.data.team_stats.length > 0 ||
     schematicTrajectories.length > 0;
 
   const pdfUrl = `${API_BASE}/api/v1/dossiers/report/match/${encodeURIComponent(matchId)}.pdf`;
@@ -428,6 +435,13 @@ function MatchTimelineInner() {
                       trajectories={schematicTrajectories}
                       selectedTeamId={selectedTeam}
                     />
+                    {fittedFromMetres ? (
+                      <p className="mt-2 text-center font-mono text-xs text-white/40">
+                        Schematic fitted to this match&apos;s recorded
+                        coordinates (map metres) — relative positions only,
+                        not to scale.
+                      </p>
+                    ) : null}
                     {unmappableTrajectories > 0 ? (
                       <p className="mt-2 text-center font-mono text-xs text-amber-300/70">
                         {unmappableTrajectories} ESTIMATED grenade arc(s) not
@@ -437,7 +451,7 @@ function MatchTimelineInner() {
                     ) : null}
                     {selectedTeam ? (
                       <p className="mt-2 text-center font-mono text-xs text-white/40">
-                        Showing {summaries.find((s) => s.id === selectedTeam)?.name ?? selectedTeam} — other teams dimmed
+                        Showing {teamNameOf(selectedTeam)} — other teams dimmed
                       </p>
                     ) : null}
                   </div>
@@ -445,17 +459,21 @@ function MatchTimelineInner() {
                   {/* side column */}
                   <div className="space-y-4">
                     <Card title="Zone phases">
-                      {schematicZones.length > 0 ? (
+                      {zones.data.phases.length > 0 ? (
                         <ol className="space-y-2">
-                          {schematicZones.map((z, i) => (
+                          {zones.data.phases.map((z, i) => (
                             <li
-                              key={i}
+                              key={z.id ?? i}
                               className="flex items-center gap-3 rounded-lg border border-white/10 bg-white/[0.02] px-3 py-2 text-sm"
                             >
-                              <Badge tone="cyan">{z.phase}</Badge>
+                              <Badge tone="cyan">P{z.phase_number}</Badge>
                               <span className="font-mono text-xs text-white/50">
-                                ({Math.round(z.x)}, {Math.round(z.y)}) · r
-                                {Math.round(z.r)}
+                                centre ({Math.round(z.center_x)},{" "}
+                                {Math.round(z.center_y)}) m · r{" "}
+                                {Math.round(z.radius)} m
+                              </span>
+                              <span className="ml-auto font-mono text-xs text-white/40">
+                                {formatMs(z.timestamp_ms)}
                               </span>
                             </li>
                           ))}
@@ -466,6 +484,64 @@ function MatchTimelineInner() {
                             zones.meta,
                             zones.error ?? "No zone data for this match."
                           )}
+                        </p>
+                      )}
+                    </Card>
+
+                    <Card title="Zone tendency (per team)">
+                      {zones.data.tendency.length > 0 ? (
+                        <ul className="space-y-2">
+                          {zones.data.tendency
+                            .filter(
+                              (t) => !selectedTeam || t.team_id === selectedTeam
+                            )
+                            .map((t, i) => (
+                              <li
+                                key={`${t.team_id}-${i}`}
+                                className="rounded-lg border border-white/10 bg-white/[0.02] px-3 py-2"
+                              >
+                                <div className="flex items-center gap-2">
+                                  <span className="text-sm font-semibold">
+                                    {teamNameOf(t.team_id)}
+                                  </span>
+                                  <Badge tone="cyan">{t.tendency}</Badge>
+                                </div>
+                                <div className="mt-1 flex flex-wrap gap-x-4 gap-y-1 font-mono text-xs text-white/50">
+                                  <span>
+                                    position in {t.phases_with_position}/
+                                    {t.phases_recorded} phases
+                                  </span>
+                                  {typeof t.avg_normalized_distance ===
+                                  "number" ? (
+                                    <span>
+                                      avg dist from centre:{" "}
+                                      {t.avg_normalized_distance.toFixed(2)}×
+                                      radius
+                                    </span>
+                                  ) : null}
+                                  {typeof t.avg_distance_traveled_per_phase_m ===
+                                  "number" ? (
+                                    <span>
+                                      {Math.round(
+                                        t.avg_distance_traveled_per_phase_m
+                                      )}{" "}
+                                      m / phase
+                                    </span>
+                                  ) : null}
+                                </div>
+                                {t.notes && t.notes.length > 0 ? (
+                                  <ul className="mt-1 space-y-0.5 text-xs text-white/45">
+                                    {t.notes.map((n, j) => (
+                                      <li key={j}>· {n}</li>
+                                    ))}
+                                  </ul>
+                                ) : null}
+                              </li>
+                            ))}
+                        </ul>
+                      ) : (
+                        <p className="text-sm text-white/40">
+                          No zone tendency recorded for this match yet.
                         </p>
                       )}
                     </Card>
@@ -515,28 +591,48 @@ function MatchTimelineInner() {
                     </Card>
 
                     <Card title="Fights">
-                      {visibleFights.length > 0 ? (
+                      {visibleFightRows.length > 0 ? (
                         <ul className="space-y-2">
-                          {visibleFights.map((f, i) => (
+                          {visibleFightRows.map((f, i) => (
                             <li
-                              key={i}
-                              className="flex flex-wrap items-center gap-2 rounded-lg border border-white/10 bg-white/[0.02] px-3 py-2 text-sm"
+                              key={f.id ?? i}
+                              className="rounded-lg border border-white/10 bg-white/[0.02] px-3 py-2 text-sm"
                             >
-                              <Badge
-                                tone={
-                                  (f.outcome ?? "").includes("win")
-                                    ? "green"
-                                    : (f.outcome ?? "").includes("loss")
-                                      ? "red"
-                                      : "amber"
-                                }
-                              >
-                                {f.outcome || "unknown"}
-                              </Badge>
-                              <span className="min-w-0 flex-1">{f.label}</span>
-                              <span className="font-mono text-xs text-white/40">
-                                ({Math.round(f.x)}, {Math.round(f.y)})
-                              </span>
+                              <div className="flex flex-wrap items-center gap-2">
+                                <Badge
+                                  tone={
+                                    f.winner
+                                      ? "green"
+                                      : (f.outcome ?? "")
+                                            .toLowerCase()
+                                            .includes("disengag")
+                                        ? "amber"
+                                        : "slate"
+                                  }
+                                >
+                                  {f.outcome || "unknown"}
+                                </Badge>
+                                <span className="ml-auto font-mono text-xs text-white/40">
+                                  {formatMs(f.start_timestamp_ms)}
+                                  {typeof f.total_kills === "number"
+                                    ? ` · ${f.total_kills} kills`
+                                    : ""}
+                                  {typeof f.total_knocks === "number"
+                                    ? ` · ${f.total_knocks} knocks`
+                                    : ""}
+                                </span>
+                              </div>
+                              <div className="mt-1 text-white/75">
+                                {(Array.isArray(f.teams) ? f.teams : [])
+                                  .map((t) => t.team_name)
+                                  .join(" vs ") || "unknown teams"}
+                                {f.map_name ? (
+                                  <span className="text-white/40">
+                                    {" "}
+                                    · {f.map_name}
+                                  </span>
+                                ) : null}
+                              </div>
                             </li>
                           ))}
                         </ul>
@@ -550,6 +646,108 @@ function MatchTimelineInner() {
                       )}
                     </Card>
                   </div>
+                </div>
+
+                {/* drops: events + per-team stats (DropsPayload) */}
+                <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+                  <Card title="Drop events">
+                    {drops.data.events.length > 0 ? (
+                      <ul className="space-y-2">
+                        {drops.data.events
+                          .filter(
+                            (d) => !selectedTeam || d.team_id === selectedTeam
+                          )
+                          .map((d, i) => (
+                            <li
+                              key={d.id ?? i}
+                              className="flex flex-wrap items-center gap-2 rounded-lg border border-white/10 bg-white/[0.02] px-3 py-2 text-sm"
+                            >
+                              <span className="font-medium">
+                                {teamNameOf(d.team_id)}
+                              </span>
+                              <span className="text-white/60">
+                                {d.named_location ?? "unnamed location"}
+                                {d.map_name ? ` · ${d.map_name}` : ""}
+                              </span>
+                              {d.contested ? (
+                                <Badge tone="amber">
+                                  contested
+                                  {d.contested_by && d.contested_by.length > 0
+                                    ? ` by ${d.contested_by.length}`
+                                    : ""}
+                                </Badge>
+                              ) : null}
+                              {d.survived_drop === true ? (
+                                <Badge tone="green">survived drop</Badge>
+                              ) : d.survived_drop === false ? (
+                                <Badge tone="red">eliminated at drop</Badge>
+                              ) : null}
+                              <span className="ml-auto font-mono text-xs text-white/40">
+                                {formatMs(d.timestamp_ms)}
+                              </span>
+                            </li>
+                          ))}
+                      </ul>
+                    ) : (
+                      <p className="text-sm text-white/40">
+                        {coverageNote(
+                          drops.meta,
+                          drops.error ?? "No drop events for this match."
+                        )}
+                      </p>
+                    )}
+                  </Card>
+
+                  <Card title="Drop stats (per team)">
+                    {drops.data.team_stats.length > 0 ? (
+                      <ul className="space-y-2">
+                        {drops.data.team_stats
+                          .filter(
+                            (s) => !selectedTeam || s.team_id === selectedTeam
+                          )
+                          .map((s) => (
+                            <li
+                              key={s.team_id}
+                              className="rounded-lg border border-white/10 bg-white/[0.02] px-3 py-2"
+                            >
+                              <div className="text-sm font-semibold">
+                                {teamNameOf(s.team_id)}
+                              </div>
+                              <div className="mt-1 flex flex-wrap gap-x-4 gap-y-1 font-mono text-xs text-white/50">
+                                <span>{s.total_drops} drops</span>
+                                <span>{s.contested_drops} contested</span>
+                                {typeof s.survival_rate === "number" ? (
+                                  <span>
+                                    drop survival{" "}
+                                    {(s.survival_rate * 100).toFixed(0)}% (
+                                    {s.survived}/{s.known_outcomes} known)
+                                  </span>
+                                ) : (
+                                  <span>drop survival unknown</span>
+                                )}
+                              </div>
+                              {s.favorite_locations &&
+                              s.favorite_locations.length > 0 ? (
+                                <div className="mt-1.5 flex flex-wrap gap-1.5">
+                                  {s.favorite_locations.map((loc, j) => (
+                                    <Badge key={j} tone="cyan">
+                                      {loc.named_location} · {loc.drops}
+                                      {loc.contested > 0
+                                        ? ` · ${loc.contested} contested`
+                                        : ""}
+                                    </Badge>
+                                  ))}
+                                </div>
+                              ) : null}
+                            </li>
+                          ))}
+                      </ul>
+                    ) : (
+                      <p className="text-sm text-white/40">
+                        No per-team drop stats for this match yet.
+                      </p>
+                    )}
+                  </Card>
                 </div>
               </>
             )}

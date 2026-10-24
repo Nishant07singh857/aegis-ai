@@ -1,8 +1,16 @@
 # backend/tests/e2e/test_broadcast_pipeline.py
 """
-End-to-End Test: Broadcast Pipeline
-Tests the complete broadcast pipeline from event detection
-to OBS scene switching, overlay updates, and replay generation.
+⚠️ SCRIPTED DEMO — NOT an end-to-end verification of production.
+
+This file does NOT verify the production broadcast pipeline. The director
+"decision" it acts on is a dict literal invented inside the test itself
+(see the inline comment: "In production, this is handled by the actual
+agent"), OBS and the overlay server are mocks, and the components it wires
+(app.broadcast.SceneManager / ReplayController, app.overlays.DataPusher)
+are dormant packages with zero production callers (inspection H8). The
+assertions only check the mock-backed SceneManager's own scene
+bookkeeping. A green run means the demo script ran — nothing more.
+See tests/e2e/README.md.
 """
 
 import pytest

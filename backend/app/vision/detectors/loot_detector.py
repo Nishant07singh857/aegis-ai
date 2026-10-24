@@ -48,6 +48,11 @@ class LootInfo:
     
     # Detection
     confidence: float = 0.0
+    # What the confidence number actually IS: the contour fill ratio
+    # (mask pixels / bbox area) of the detected blob on this frame —
+    # an evidence quantity, NOT a calibrated probability (never
+    # measured in the Phase 23 programme; H20).
+    confidence_basis: str = "contour_fill_ratio"
 
 
 class LootDetector(BaseDetector):
@@ -125,6 +130,7 @@ class LootDetector(BaseDetector):
                         "is_looted": obj.is_looted,
                         "lifetime": round(obj.lifetime, 1),
                         "confidence": round(obj.confidence, 3),
+                        "confidence_basis": obj.confidence_basis,
                     }
                     for obj in all_detected
                 ],
@@ -168,7 +174,16 @@ class LootDetector(BaseDetector):
                     cy = int(M["m01"] / M["m00"])
                     
                     x, y, bw, bh = cv2.boundingRect(contour)
-                    
+
+                    # Confidence derived from evidence: fill ratio of
+                    # the colour mask inside the bbox (solid glow blob
+                    # high, fragmented smear low) — not a constant.
+                    blob_roi = mask[y:y + bh, x:x + bw]
+                    fill_ratio = (
+                        float(cv2.countNonZero(blob_roi)) / float(bw * bh)
+                        if bw > 0 and bh > 0 else 0.0
+                    )
+
                     box = LootInfo(
                         event_id=f"deathbox_{int(time.time()*1000)}_{cx}_{cy}",
                         loot_type="death_box",
@@ -180,7 +195,7 @@ class LootDetector(BaseDetector):
                         ),
                         marker_color=(0, 200, 100),
                         spawned_at=time.time(),
-                        confidence=0.65,
+                        confidence=round(fill_ratio, 3),
                     )
                     boxes.append(box)
             
@@ -236,7 +251,16 @@ class LootDetector(BaseDetector):
                 if M["m00"] > 0:
                     cx = int(M["m10"] / M["m00"])
                     cy = int(M["m01"] / M["m00"])
-                    
+
+                    # Confidence derived from evidence: fill ratio of
+                    # the smoke colour mask inside the bbox.
+                    x, y, bw, bh = cv2.boundingRect(contour)
+                    blob_roi = mask[y:y + bh, x:x + bw]
+                    fill_ratio = (
+                        float(cv2.countNonZero(blob_roi)) / float(bw * bh)
+                        if bw > 0 and bh > 0 else 0.0
+                    )
+
                     drop = LootInfo(
                         event_id=f"airdrop_{int(time.time()*1000)}_{cx}_{cy}",
                         loot_type="air_drop",
@@ -244,7 +268,7 @@ class LootDetector(BaseDetector):
                         position_y=float(cy),
                         marker_color=(255, 200, 0),
                         spawned_at=time.time(),
-                        confidence=0.7,
+                        confidence=round(fill_ratio, 3),
                     )
                     drops.append(drop)
             

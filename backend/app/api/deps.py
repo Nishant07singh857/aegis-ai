@@ -88,15 +88,21 @@ longer leaks a fresh key to anonymous callers, and `restart_node` /
 `stop_training` can no longer be triggered by anyone who can reach the port.
 """
 
+import logging
 import secrets
 from typing import Optional
 
 from fastapi import Depends, Header, HTTPException, WebSocket, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from sqlalchemy import select
 
 from ..config import settings
 from ..core.security import VALID_ROLES, security_manager, TokenPayload
+from ..db.base import AsyncSessionLocal
 from ..db.models.enums import UserRole
+from ..db.models.user import User
+
+logger = logging.getLogger("aegis.api.deps")
 
 _bearer_scheme = HTTPBearer(auto_error=False)
 _API_KEY_ALIAS = settings.API_KEY_HEADER  # "X-API-Key" — resolved at import
@@ -132,6 +138,13 @@ def authenticate_token_or_key(
     Shared core: validate a Bearer JWT or an X-API-Key.
 
     Returns a TokenPayload on success, None on failure (no exception).
+
+    NOTE (H2, Integrity Fix Pack): this sync core only verifies the token
+    signature. The REST dependencies below (``get_current_user`` /
+    ``get_optional_user``) use ``authenticate_checked`` instead, which
+    additionally revocation-checks JWT principals against the DB user's
+    live ``is_active`` flag. This sync function remains for callers that
+    cannot await (see ``authenticate_websocket`` — its own sync core).
     """
     if bearer and bearer.credentials:
         payload = security_manager.decode_token(bearer.credentials)
@@ -142,12 +155,78 @@ def authenticate_token_or_key(
     return None
 
 
+#: user_id of the configured operator principal (Phase 1 ADMIN_USERNAME /
+#: ADMIN_PASSWORD login in app/main.py). That account is NOT a DB user —
+#: it exists only in settings — so the DB kill-switch (which is scoped to
+#: DB accounts, per-tournament) has no row to check for it. Disabling the
+#: operator means unsetting ADMIN_PASSWORD, not a DB flag flip.
+OPERATOR_USER_ID = "operator"
+
+
+async def _db_user_is_active(user_id: str) -> Optional[bool]:
+    """Return the DB user's live ``is_active`` flag, or None if there is
+    no DB user row with that id."""
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(User.is_active).where(User.id == user_id)
+        )
+        return result.scalar_one_or_none()
+
+
+async def authenticate_checked(
+    bearer: Optional[HTTPAuthorizationCredentials],
+    api_key: Optional[str],
+) -> Optional[TokenPayload]:
+    """
+    ``authenticate_token_or_key`` + H2 kill-switch revocation check.
+
+    For JWT (Bearer) principals — the token path only; the X-API-Key path
+    is deliberately untouched and never DB-checked — the DB user row is
+    loaded and:
+
+      * ``is_active`` is False (e.g. after the Phase 16 kill switch,
+        ``UserService.deactivate_tournament``) → rejected (None → 401);
+      * no DB row exists for the token's user_id → rejected (None → 401);
+      * the DB lookup itself fails → rejected (fail closed, logged);
+      * the configured operator principal (user_id "operator", minted by
+        the settings-credential login, not a DB account) → allowed, as it
+        has no DB row by design.
+    """
+    payload = authenticate_token_or_key(bearer, api_key)
+    if payload is None:
+        return None
+    if not (bearer and bearer.credentials):
+        return payload  # X-API-Key path: unchanged, no DB check.
+    if payload.user_id == OPERATOR_USER_ID:
+        return payload
+    try:
+        is_active = await _db_user_is_active(payload.user_id)
+    except Exception:
+        logger.warning(
+            "is_active check failed for user_id=%s; failing closed",
+            payload.user_id,
+            exc_info=True,
+        )
+        return None
+    if is_active is not True:
+        logger.info(
+            "Token rejected: DB user user_id=%s is inactive or missing",
+            payload.user_id,
+        )
+        return None
+    return payload
+
+
 async def get_optional_user(
     bearer: Optional[HTTPAuthorizationCredentials] = Depends(_bearer_scheme),
     api_key: Optional[str] = Header(default=None, alias=_API_KEY_ALIAS),
 ) -> Optional[TokenPayload]:
-    """Return the authenticated principal, or None. Never raises."""
-    return authenticate_token_or_key(bearer, api_key)
+    """Return the authenticated principal, or None. Never raises.
+
+    JWT principals are revocation-checked (H2): a deactivated DB user's
+    token resolves to None here, i.e. the caller is treated as anonymous.
+    """
+    return await authenticate_checked(bearer, api_key)
 
 
 async def get_current_user(
@@ -159,8 +238,13 @@ async def get_current_user(
     obtained from POST /api/v1/auth/token) OR a valid X-API-Key from the
     static allowlist. Raises 401 when neither is valid, or when no auth is
     configured at all (closed by default).
+
+    H2 (Integrity Fix Pack): JWT principals are additionally checked
+    against the DB user's live ``is_active`` flag on every request, so
+    deactivating an account (the Phase 16 kill switch) revokes its
+    already-issued tokens immediately instead of at next login.
     """
-    user = authenticate_token_or_key(bearer, api_key)
+    user = await authenticate_checked(bearer, api_key)
     if user is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,

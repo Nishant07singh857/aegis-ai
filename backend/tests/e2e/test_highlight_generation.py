@@ -1,8 +1,14 @@
 # backend/tests/e2e/test_highlight_generation.py
 """
-End-to-End Test: Highlight Generation Pipeline
-Tests automatic highlight detection, clip creation,
-montage generation, and content publishing.
+⚠️ SCRIPTED DEMO — NOT an end-to-end verification of production.
+
+This file does NOT verify the production highlight pipeline. It drives
+dormant highlight agents (zero production callers, inspection H5) with
+hand-invented events. test_detect_all_highlight_types WARNS instead of
+failing when a detection is missed, and test_content_publishing_pipeline
+contains ZERO assertions (it only prints; ContentPublisher never
+publishes anywhere — inspection §5). A green run means the demo script
+ran — nothing more. See tests/e2e/README.md.
 """
 
 import pytest
@@ -352,6 +358,8 @@ class TestHighlightGeneration:
         
         print("\n✓ Montage generation pipeline works!")
     
+    # NOTE (honesty label): this test contains ZERO assertions — it only
+    # prints. It cannot fail on behaviour, only on an exception.
     @pytest.mark.asyncio
     async def test_content_publishing_pipeline(self, match_id):
         """

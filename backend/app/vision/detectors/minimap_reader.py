@@ -58,6 +58,12 @@ class MinimapData:
     
     # Detection quality
     confidence: float = 0.0
+    # What the confidence number actually IS: the fraction of the
+    # element categories this reader looks for that were actually
+    # found on this frame (player markers / safe zone / blue zone) —
+    # a coverage fraction, NOT a calibrated probability (never
+    # measured in the Phase 23 programme; H20).
+    confidence_basis: str = "element_coverage_fraction"
 
 
 class MinimapReader(BaseDetector):
@@ -85,22 +91,29 @@ class MinimapReader(BaseDetector):
             x=0.72, y=0.70, width=0.26, height=0.28
         )
         
-        # Player marker colors (BGR)
+        # Player marker colors — HSV. (These used to be BGR triples
+        # applied via cv2.inRange to an HSV image — the same bug class
+        # as hp_bar_detector's H20 defect: e.g. the "self" white range
+        # (255,255,255)-(255,255,255) can never match any HSV pixel.)
+        # Hue anchors: green H60, red H0, yellow H30, blue H120;
+        # white = low saturation, high value. Saturation/value floors
+        # are HIGH because minimap markers are neon UI dots — muted
+        # terrain (and random colour noise) must not read as markers.
         self.player_colors = {
-            "teammate": ((0, 255, 0), (50, 255, 50)),     # Green
-            "enemy": ((0, 0, 255), (50, 50, 255)),        # Red
-            "self": ((255, 255, 255), (255, 255, 255)),   # White
-            "knocked": ((0, 255, 255), (50, 255, 255)),   # Yellow
+            "teammate": ((35, 180, 150), (85, 255, 255)),   # Green
+            "enemy": ((0, 180, 150), (10, 255, 255)),       # Red
+            "self": ((0, 0, 220), (180, 40, 255)),          # White
+            "knocked": ((20, 180, 150), (34, 255, 255)),    # Yellow
         }
-        
-        # Zone colors
+
+        # Zone colors — HSV
         self.zone_colors = {
-            "safe_zone": ((255, 255, 255), (255, 255, 255)),  # White circle
-            "blue_zone": ((255, 0, 0), (255, 50, 50)),        # Blue/Red edge
+            "safe_zone": ((0, 0, 200), (180, 60, 255)),      # White circle
+            "blue_zone": ((100, 150, 120), (130, 255, 255)),  # Blue circle
         }
-        
-        # Vehicle marker color (yellow/white)
-        self.vehicle_color = ((0, 255, 255), (50, 255, 255))
+
+        # Vehicle marker color (yellow) — HSV
+        self.vehicle_color = ((20, 180, 150), (34, 255, 255))
         
         # Marker sizes (in pixels at 1080p)
         self.player_marker_size = 4
@@ -162,6 +175,7 @@ class MinimapReader(BaseDetector):
                 },
                 "player_positions": minimap_data.player_positions,
                 "confidence": round(minimap_data.confidence, 3),
+                "confidence_basis": minimap_data.confidence_basis,
             },
         )
         
@@ -213,15 +227,17 @@ class MinimapReader(BaseDetector):
                 self._detect_markers(hsv, {"vehicle": self.vehicle_color}, self.vehicle_marker_size).values()
             )
             
-            data.confidence = 0.7
-            
-            # Higher confidence if we found expected elements
-            if data.player_positions:
-                data.confidence += 0.1
-            if data.safe_zone_center:
-                data.confidence += 0.1
-            if data.blue_zone_center:
-                data.confidence += 0.1
+            # Confidence derived from evidence: the fraction of the
+            # element categories sought that were actually found on
+            # this frame (players / safe zone / blue zone). The old
+            # 0.7-base-plus-0.1-increments constant presented an
+            # invented number as a measurement (H20).
+            categories_found = sum([
+                bool(data.player_positions),
+                data.safe_zone_center is not None,
+                data.blue_zone_center is not None,
+            ])
+            data.confidence = round(categories_found / 3.0, 3)
             
         except ImportError:
             self._log.warning("OpenCV not available")
@@ -247,17 +263,40 @@ class MinimapReader(BaseDetector):
                 upper = np.array(upper, dtype=np.uint8)
                 
                 mask = cv2.inRange(hsv, lower, upper)
-                
-                # Find small contours
+
+                # Find small contours. RETR_LIST (not EXTERNAL): a
+                # white "self" dot INSIDE the white safe-zone ring is
+                # an inner contour and EXTERNAL would suppress it
+                # entirely; the compactness gates below reject the
+                # ring's own oversized contours.
                 contours, _ = cv2.findContours(
-                    mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+                    mask, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE
                 )
                 
                 for i, contour in enumerate(contours):
                     area = cv2.contourArea(contour)
                     if area < min_size or area > 50:
                         continue
-                    
+
+                    # Compactness gate (H20 regression guard): a real
+                    # minimap marker is a small SOLID dot. Random colour
+                    # noise forms ragged sparse clusters that pass a
+                    # pure area test — with honest HSV ranges they
+                    # produced 100+ fake "markers" on pure-noise frames
+                    # (caught by test_blank_and_noise_emit_no_cv_events).
+                    # Require >= 8 solid mask pixels in a dot-sized bbox
+                    # filled >= 50% (a filled disc fills ~52-100%).
+                    bx, by, bw, bh = cv2.boundingRect(contour)
+                    if bw > 14 or bh > 14:
+                        continue
+                    blob = mask[by:by + bh, bx:bx + bw]
+                    solid_px = float(cv2.countNonZero(blob))
+                    if solid_px < 8:
+                        continue
+                    fill = solid_px / float(bw * bh) if bw > 0 and bh > 0 else 0.0
+                    if fill < 0.5:
+                        continue
+
                     M = cv2.moments(contour)
                     if M["m00"] > 0:
                         cx = int(M["m10"] / M["m00"])
@@ -282,17 +321,38 @@ class MinimapReader(BaseDetector):
             upper = np.array(color_range[1], dtype=np.uint8)
             
             mask = cv2.inRange(hsv, lower, upper)
-            
+
             # Find circles using Hough transform
             circles = cv2.HoughCircles(
                 mask, cv2.HOUGH_GRADIENT, dp=1, minDist=50,
                 param1=50, param2=30, minRadius=30, maxRadius=200,
             )
-            
+
             if circles is not None and len(circles) > 0:
-                circle = circles[0][0]  # Take first circle
-                return ((float(circle[0]), float(circle[1])), float(circle[2]))
-                
+                # Ring-support verification (H20 regression guard):
+                # HoughCircles hallucinates circles in random point
+                # masks (it fired on pure-noise frames). A real zone
+                # circle is a DRAWN ring: most of its circumference
+                # must actually be mask pixels. Noise support is ~the
+                # mask density (a few %), a drawn ring is >= 50%.
+                mh, mw = mask.shape[:2]
+                angles = np.linspace(0, 2 * np.pi, 72, endpoint=False)
+                cos_a, sin_a = np.cos(angles), np.sin(angles)
+                for circle in circles[0][:5]:
+                    cx, cy, r = float(circle[0]), float(circle[1]), float(circle[2])
+                    # Hough's radius estimate can sit a couple of px
+                    # off a thin drawn ring: a sample counts as
+                    # supported if ANY radius within +-2px has a mask
+                    # pixel at that angle.
+                    supported = np.zeros(len(angles), dtype=bool)
+                    for rr in (r - 2, r - 1, r, r + 1, r + 2):
+                        xs = np.clip((cx + rr * cos_a).astype(int), 0, mw - 1)
+                        ys = np.clip((cy + rr * sin_a).astype(int), 0, mh - 1)
+                        supported |= mask[ys, xs] > 0
+                    if float(supported.mean()) >= 0.5:
+                        return ((cx, cy), r)
+                return None
+
         except ImportError:
             pass
         except Exception as e:

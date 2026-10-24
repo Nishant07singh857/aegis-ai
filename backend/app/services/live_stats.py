@@ -32,6 +32,16 @@ Spectator-only inputs; nothing fabricated:
 * **Knocks** accumulate per player in memory for the live payload, but
   the stats schema has no knocks column, so they are not persisted
   (the player-stats API already labels knocks ``null`` for this reason).
+* **Headshots are source-gated (Integrity C2).** The killfeed icon
+  matcher sets the same ``headshot`` flag as the spotter toggle, but
+  its measured precision is 7.7 % (docs/WEAPON_RECOGNITION.md §2.7 —
+  downstream consumption banned). Only events carrying a trusted
+  human provenance (``headshot_confirmed`` from the feed contract, or
+  an explicit spotter/manual/observer ``source``) increment the
+  persisted ``headshots`` counter. Icon-derived flags are dropped
+  from the stats with a counted, logged reason and accumulate only
+  in the separate ``headshots_unverified`` live counter, which is
+  never flushed to the DB and never feeds standings/MVP.
 * **Placement** is computed ONLY when the stream truly determines it:
   at/after ``match_end``, when every known team but one has a
   ``team_wipe_event``. Otherwise placement stays ``None`` for every row,
@@ -74,6 +84,7 @@ import structlog
 
 from app.analytics.points_calculator import PointsCalculator
 from app.core.event_bus import EventRecord
+from app.services.feed_adapter.schemas import HEADSHOT_TRUSTED_SOURCES
 
 logger = structlog.get_logger("aegis.live_stats")
 
@@ -129,7 +140,10 @@ class PlayerAccum:
     team_id: str = ""
     kills: int = 0
     knocks: int = 0  # knocks inflicted (live-only; no DB column)
-    headshots: int = 0
+    headshots: int = 0  # TRUSTED (human-confirmed) only — persisted (C2)
+    #: Icon-derived headshot flags dropped from the stats (C2). Kept
+    #: only as a live diagnostic counter; never flushed, never scored.
+    headshots_unverified: int = 0
     times_knocked: int = 0
     times_revived: int = 0  # revived BY a team-mate (performer unknown)
     death_ts: Optional[float] = None
@@ -342,6 +356,9 @@ class LiveStatsStats:
     deduped: int = 0
     handler_errors: int = 0
     flushes: int = 0
+    #: Headshot flags dropped because their source is not a trusted
+    #: human producer (Integrity C2) — counted, never silently lost.
+    headshots_dropped_unverified: int = 0
     by_type: Dict[str, int] = field(default_factory=dict)
 
 
@@ -508,6 +525,51 @@ class LiveStatsService:
         acc.ended = True
         await self._flush(acc, final=True)
 
+    @staticmethod
+    def _headshot_trusted(data: Dict[str, Any]) -> bool:
+        """Whether a flagged headshot may be persisted (Integrity C2).
+
+        Trusted iff the feed contract's confirmed marker is set, or the
+        payload carries an explicit trusted human source. The raw
+        ``headshot`` flag alone is NEVER sufficient: the vision icon
+        matcher sets it at 7.7 % measured precision
+        (docs/WEAPON_RECOGNITION.md §2.7).
+        """
+        if data.get("headshot_confirmed") is True:
+            return True
+        source = str(
+            data.get("headshot_source") or data.get("source") or ""
+        ).strip().lower()
+        return source in HEADSHOT_TRUSTED_SOURCES
+
+    def _count_headshot(
+        self, acc: MatchAccum, killer: PlayerAccum, data: Dict[str, Any]
+    ) -> None:
+        """Apply the C2 source gate to one flagged kill/knock event."""
+        if data.get("headshot") is not True:
+            return
+        if self._headshot_trusted(data):
+            killer.headshots += 1
+            return
+        # Dropped with a counted, logged reason — the same honesty
+        # pattern VisionIntelligence uses for unmapped events. The
+        # flag survives only in the unverified live counter.
+        killer.headshots_unverified += 1
+        self.stats.headshots_dropped_unverified += 1
+        self._log.info(
+            "headshot_dropped_unverified_source",
+            match_id=acc.match_id,
+            player=killer.player_id,
+            source=str(
+                data.get("headshot_source") or data.get("source") or "unknown"
+            ),
+            reason=(
+                "headshot flag is not from a trusted human producer "
+                "(spotter/manual/observer); icon-derived precision is "
+                "7.7% per docs/WEAPON_RECOGNITION.md §2.7"
+            ),
+        )
+
     async def _on_kill(
         self, acc: MatchAccum, data: Dict[str, Any], ts: Optional[float]
     ) -> None:
@@ -518,8 +580,7 @@ class LiveStatsService:
         if killer_id is not None:
             killer = acc.player(killer_id, killer_team or "")
             killer.kills += 1
-            if data.get("headshot") is True:
-                killer.headshots += 1
+            self._count_headshot(acc, killer, data)
         elif killer_team is not None:
             acc.team_extra_finishes[killer_team] = (
                 acc.team_extra_finishes.get(killer_team, 0) + 1
@@ -541,8 +602,7 @@ class LiveStatsService:
         if killer_id is not None:
             killer = acc.player(killer_id, killer_team or "")
             killer.knocks += 1
-            if data.get("headshot") is True:
-                killer.headshots += 1
+            self._count_headshot(acc, killer, data)
         if victim_id is not None:
             victim = acc.player(victim_id, victim_team or "")
             victim.times_knocked += 1
@@ -690,7 +750,12 @@ class LiveStatsService:
                 "team_id": p.team_id,
                 "finishes": p.kills,
                 "knocks": p.knocks,
+                # Trusted human-confirmed headshots only (C2) — this
+                # is the number that is persisted and scored.
                 "headshots": p.headshots,
+                # Icon-derived flags dropped from the stats (C2):
+                # diagnostic only, never persisted or scored.
+                "headshots_unverified": p.headshots_unverified,
                 "times_knocked": p.times_knocked,
                 "times_revived": p.times_revived,
                 "revives_performed": None,  # performer never observed
@@ -806,6 +871,9 @@ class LiveStatsService:
                 "deduped": self.stats.deduped,
                 "handler_errors": self.stats.handler_errors,
                 "flushes": self.stats.flushes,
+                "headshots_dropped_unverified": (
+                    self.stats.headshots_dropped_unverified
+                ),
                 "by_type": dict(self.stats.by_type),
             },
         }

@@ -54,6 +54,16 @@ class BaseFeedAdapter(ABC):
             raise RuntimeError(
                 f"Feed adapter {self.adapter_id!r} has no event bus attached."
             )
+        # Provenance stamping (Integrity C2): an event that reaches the
+        # bus without a source gets THIS adapter's identity — the vision
+        # adapter stamps "vision_killfeed" (never a trusted headshot
+        # source), the simulator stamps "simulator". Human console entry
+        # is stamped earlier, server-side, by the ingest endpoint from
+        # the caller's role, and is never overwritten here.
+        if event.source is None:
+            event.source = (
+                "vision_killfeed" if self.adapter_id == "vision" else self.adapter_id
+            )
         bus_type = BUS_EVENT_TYPE_MAP[event.event_type]
         priority = (
             EventPriority.HIGH

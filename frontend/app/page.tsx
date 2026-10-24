@@ -87,7 +87,7 @@ function LiveDashboardInner() {
           </div>
           <div className="space-y-6">
             <DirectorPanel director={socket.director} standings={socket.standings} />
-            <SystemHealth health={socket.health} />
+            <SystemHealth health={socket.health} source={socket.healthSource} />
             <AgentChatter logs={socket.agentLogs} />
           </div>
         </div>

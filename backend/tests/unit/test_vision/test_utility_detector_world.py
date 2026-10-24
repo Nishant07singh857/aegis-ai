@@ -242,7 +242,11 @@ class TestGatedDetectors:
         assert "stun" not in types_of(result)
 
     @pytest.mark.asyncio
-    async def test_stun_fires_when_enabled_and_flash_is_in_scene(self):
+    async def test_stun_fires_when_enabled_and_flash_is_in_scene(self, monkeypatch):
+        # H21 contract: the constructor bool alone no longer enables
+        # the unmeasured stun path — the operator env gate must also
+        # be set at construction time.
+        monkeypatch.setenv("AEGIS_ENABLE_UNMEASURED_UTILITY_DETECTION", "1")
         clock = FakeClock()
         det = UtilityDetector(enable_stun_detection=True, clock=clock)
         scene = gameplay_frame()
@@ -255,7 +259,11 @@ class TestGatedDetectors:
         assert "stun" in types_of(result)
 
     @pytest.mark.asyncio
-    async def test_stun_does_not_fire_across_hard_cut(self):
+    async def test_stun_does_not_fire_across_hard_cut(self, monkeypatch):
+        # Same H21 enablement as the fires-when-enabled test above:
+        # bool + env gate, so the hard-cut guard is what actually
+        # suppresses the event here (not the disabled-by-default gate).
+        monkeypatch.setenv("AEGIS_ENABLE_UNMEASURED_UTILITY_DETECTION", "1")
         clock = FakeClock()
         det = UtilityDetector(enable_stun_detection=True, clock=clock)
         scene_a = gameplay_frame(seed=7)

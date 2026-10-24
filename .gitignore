@@ -18,6 +18,15 @@ venv/
 .env.test.local
 .env.production
 .env.production.local
+# H24 (Integrity Fix Pack): widened from the exact-name list above to
+# patterns, so .env.staging, foo.env, private keys and Kaggle credentials
+# can never be committed by accident either.
+*.env
+.env.*
+!.env.example
+*.pem
+*.key
+kaggle.json
 # NOTE: .env.example is intentionally NOT ignored — it is the committed
 # template with placeholder values only (zero real secrets).
 .ruff_cache/

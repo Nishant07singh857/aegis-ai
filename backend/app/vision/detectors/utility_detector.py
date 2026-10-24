@@ -80,6 +80,14 @@ by frame area):
   Honest disabled beats false events. Enable only after calibration
   on labelled footage.
 
+INTEGRITY GATE (H21): neither path can be enabled by the constructor
+bool alone. BOTH the bool AND the environment variable
+``AEGIS_ENABLE_UNMEASURED_UTILITY_DETECTION=1`` must be set — a
+single bool flip in code review can no longer silently put
+pure-false-positive logic on the live path. When the gate does open,
+construction logs a loud WARNING, and every emitted grenade/stun
+event carries ``confidence_basis="unmeasured_heuristic"``.
+
 Attribution honesty: this detector works in screen space. It does NOT
 know who threw anything. Events carry no player/team; the runtime
 stamps the observer slot and the Phase 22 vision-intelligence
@@ -88,6 +96,7 @@ as the unidentified observer screen). Per-player utility stats are
 never credited from world detections.
 """
 
+import os
 import time
 from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass, field
@@ -101,6 +110,20 @@ logger = structlog.get_logger("aegis.vision.utility")
 #: Reference frame area (640x360 VODs) the absolute thresholds were
 #: tuned on; all area thresholds scale linearly with frame area.
 _REF_AREA = 640.0 * 360.0
+
+#: Env gate for the UNMEASURED utility paths (explosion / stun) —
+#: H21. The constructor bool alone is NOT sufficient to enable them;
+#: this variable must also be set to a truthy value at construction
+#: time. Naming follows the repo's AEGIS_* env convention.
+UNMEASURED_UTILITY_ENV_VAR = "AEGIS_ENABLE_UNMEASURED_UTILITY_DETECTION"
+
+
+def unmeasured_utility_env_enabled() -> bool:
+    """True only when the operator env gate for unmeasured utility
+    detection (explosion/stun) is explicitly set."""
+    return (
+        os.getenv(UNMEASURED_UTILITY_ENV_VAR, "") or ""
+    ).strip().lower() in ("1", "true", "yes", "on")
 
 
 @dataclass
@@ -180,8 +203,42 @@ class UtilityDetector(BaseDetector):
         }
 
         #: Honest feature gates (see module docstring for evidence).
-        self.enable_explosion_detection = enable_explosion_detection
-        self.enable_stun_detection = enable_stun_detection
+        #: H21: the constructor bool is necessary but NOT sufficient —
+        #: the operator env gate must also be set, so a silent bool
+        #: flip cannot put these pure-false-positive paths live.
+        env_gate = unmeasured_utility_env_enabled()
+        self.enable_explosion_detection = bool(
+            enable_explosion_detection and env_gate
+        )
+        self.enable_stun_detection = bool(
+            enable_stun_detection and env_gate
+        )
+        for flag_name, requested, effective in (
+            ("enable_explosion_detection", enable_explosion_detection,
+             self.enable_explosion_detection),
+            ("enable_stun_detection", enable_stun_detection,
+             self.enable_stun_detection),
+        ):
+            if requested and not env_gate:
+                logger.warning(
+                    "unmeasured_utility_detection_blocked_by_env_gate",
+                    flag=flag_name,
+                    env_var=UNMEASURED_UTILITY_ENV_VAR,
+                    reason="explosion/stun detection was measured as "
+                    "pure false positives on real footage (Phase 23); "
+                    "the constructor bool alone no longer enables it — "
+                    "set the env var as an explicit operator decision",
+                )
+            elif effective:
+                logger.warning(
+                    "UNMEASURED_UTILITY_DETECTION_ENABLED",
+                    flag=flag_name,
+                    env_var=UNMEASURED_UTILITY_ENV_VAR,
+                    reason="explosion/stun events from this detector are "
+                    "UNMEASURED and were pure false positives on real "
+                    "footage (Phase 23 audit); enable only for "
+                    "calibration on labelled footage",
+                )
         self._clock = clock or time.time
 
         # Active episodes (for get_active_smoke_positions / status).
@@ -282,6 +339,14 @@ class UtilityDetector(BaseDetector):
                         "affected_players": u.affected_players,
                         "damage": u.damage_dealt,
                         "confidence": round(u.confidence, 3),
+                        # Smoke/molotov confidences come out of the
+                        # Phase 23 measured gates; grenade/stun are
+                        # UNMEASURED heuristics (H21) and say so.
+                        "confidence_basis": (
+                            "unmeasured_heuristic"
+                            if u.utility_type in ("grenade", "stun")
+                            else "phase23_measured_gates"
+                        ),
                         "source": "world_detector",
                         "evidence": {k: round(float(v), 3) for k, v in u.evidence.items()},
                     }

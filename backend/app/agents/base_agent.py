@@ -1,9 +1,19 @@
 # backend/app/agents/base_agent.py
 """
 AEGIS AI - Base Agent Class
-Abstract base class for ALL 40+ AI agents in the system.
+Abstract base class for the 41 agent classes in the agent library.
+
+Honest status (inspection H5/H32): this library is NOT a running
+41-agent system. ``AgentOrchestrator`` is never started in
+production; only 6 agent classes run there, via direct instantiation
+(FightDetector, TeamTracker, UtilityTracker, StorytellerAgent,
+VoiceSynthesizer, LanguageManager) plus 3 function-modules (MVP
+``compute_mvp_score``, win-probability, day-reel). The remaining
+classes are dormant library code.
+
 Provides lifecycle management, error recovery, health monitoring,
-event bus integration, and inter-agent communication.
+event bus integration, and inter-agent communication for the classes
+that do run.
 """
 
 import asyncio
@@ -207,8 +217,10 @@ class BaseAgent(ABC):
     - Inter-agent messaging
     - Graceful degradation
     - Resource monitoring
-    
-    All 40+ agents inherit from this base class.
+
+    All 41 agent classes in the library inherit from this base class;
+    most of them are dormant (see the module docstring for the honest
+    list of what actually runs in production).
     """
     
     def __init__(self, config: AgentConfig, event_bus: EventBus):

@@ -1,15 +1,28 @@
 "use client";
 
 /**
- * AEGIS AI — TEAM DOSSIER (Phase 11, W3).
+ * AEGIS AI — TEAM DOSSIER (Phase 11, W3; contract-aligned in the
+ * Integrity Fix Pack, C5b).
  *
  * Route: /analyst/team/[name] (operator + admin). Coach-facing dossier:
- * header with playstyle badge, stat grid, strengths / weaknesses, tendencies,
- * head-to-head table, fight history, and a Download Dossier PDF button.
+ * header with playstyle badge, stat grid, strengths / weaknesses,
+ * tendencies, head-to-head table, fight history, and a Download Dossier
+ * PDF button.
  *
  * Data: GET /api/v1/dossiers/dossier?team_id= (+ fights endpoint for the
- * fight list). Empty responses render the honest coverage note from the
- * API meta — never fabricated.
+ * fight list). Shapes mirror backend/app/dossiers/schemas.py EXACTLY:
+ *   playstyle  — OBJECT { label, evidence, fights_per_match,
+ *                aggression_score, matches_sampled } (never a bare string)
+ *   strengths / weaknesses — list of StatEdge OBJECTS
+ *                { metric, label, team_value, tournament_avg, delta_pct }
+ *   tendencies — { drop_locations: [{location, matches}],
+ *                drop_location_note, rotation_timing: {…}, centrality: {…} }
+ *   head_to_head — [{ opponent_team_id, opponent_name, fights, won, lost,
+ *                disengaged, kills_for, kills_against }]
+ * Rendering any of those as raw React children crashes the page
+ * ("Objects are not valid as a React child") — every section below
+ * formats the real fields. Empty responses render the honest coverage
+ * note from the API meta — never fabricated.
  */
 
 import { useCallback, useEffect, useMemo, useState } from "react";
@@ -24,50 +37,74 @@ import { AnalystEmptyState } from "../../components/EmptyState";
 import {
   unwrapEnvelope,
   coverageNote,
-  teamColorOf,  dossierPlaystyle,
+  teamColorOf,
+  dossierPlaystyle,
   dossierHeadToHead,
-  dossierFights,
-  fightOutcome,
   fightOpponent,
+  fightResultForTeam,
   h2hName,
+  h2hWinRate,
   type EnvelopeMeta,
   type TeamLite,
   type DossierData,
+  type StatEdge,
   type FightRow,
 } from "../../components/types";
 
-function prettyStatKey(key: string): string {
-  return key
-    .replace(/_/g, " ")
-    .replace(/\b\w/g, (c) => c.toUpperCase());
+function formatNumber(v: number | null | undefined): string {
+  if (typeof v !== "number" || !Number.isFinite(v)) return "—";
+  return Number.isInteger(v) ? String(v) : v.toFixed(2);
 }
 
-function formatStatValue(v: string | number | null | undefined): string {
-  if (v === null || v === undefined || v === "") return "—";
-  if (typeof v === "number") {
-    return Number.isInteger(v) ? String(v) : v.toFixed(2);
-  }
-  return v;
+/** Fight timestamps are match-relative ms in feed data and epoch ms in
+ *  some producers — render each honestly instead of forcing a date. */
+function formatFightTime(ts: number | undefined): string {
+  if (typeof ts !== "number" || !Number.isFinite(ts)) return "—";
+  if (ts >= 1e11) return new Date(ts).toLocaleString();
+  const totalSec = Math.floor(ts / 1000);
+  return `${Math.floor(totalSec / 60)}:${String(totalSec % 60).padStart(2, "0")} match time`;
 }
 
-function formatTime(ts: unknown): string {
-  if (typeof ts === "number") {
-    const d = new Date(ts > 1e12 ? ts : ts * 1000);
-    return Number.isNaN(d.getTime()) ? "—" : d.toLocaleString();
-  }
-  if (typeof ts === "string") {
-    const d = new Date(ts);
-    return Number.isNaN(d.getTime()) ? ts : d.toLocaleString();
-  }
-  return "—";
+function FightResultBadge({
+  result,
+  rawOutcome,
+}: {
+  result: string;
+  rawOutcome: string;
+}) {
+  if (result === "won") return <Badge tone="green">won</Badge>;
+  if (result === "lost") return <Badge tone="red">lost</Badge>;
+  return <Badge tone="amber">{rawOutcome || "unknown"}</Badge>;
 }
 
-function FightOutcomeBadge({ outcome }: { outcome: string }) {
-  const o = outcome.toLowerCase();
-  if (!o) return <Badge tone="slate">unknown</Badge>;
-  if (o.includes("win") || o === "w") return <Badge tone="green">won</Badge>;
-  if (o.includes("loss") || o === "l") return <Badge tone="red">lost</Badge>;
-  return <Badge tone="amber">{outcome}</Badge>;
+/** One strengths/weaknesses row — a StatEdge OBJECT, formatted from its
+ *  real fields (label is the human line; the numbers sit underneath). */
+function StatEdgeRow({ edge, tone }: { edge: StatEdge; tone: "up" | "down" }) {
+  const parts: string[] = [];
+  if (edge.metric) parts.push(edge.metric);
+  if (typeof edge.team_value === "number" || typeof edge.tournament_avg === "number") {
+    parts.push(
+      `team ${formatNumber(edge.team_value)} vs avg ${formatNumber(edge.tournament_avg)}`
+    );
+  }
+  if (typeof edge.delta_pct === "number") {
+    parts.push(`Δ ${edge.delta_pct > 0 ? "+" : ""}${formatNumber(edge.delta_pct)}%`);
+  }
+  return (
+    <li className="flex gap-2 text-sm text-white/80">
+      <span className={tone === "up" ? "text-emerald-400" : "text-rose-400"}>
+        {tone === "up" ? "▲" : "▼"}
+      </span>
+      <span>
+        <span>{edge.label}</span>
+        {parts.length > 0 ? (
+          <span className="mt-0.5 block font-mono text-xs text-white/40">
+            {parts.join(" · ")}
+          </span>
+        ) : null}
+      </span>
+    </li>
+  );
 }
 
 function TeamDossierInner() {
@@ -135,7 +172,8 @@ function TeamDossierInner() {
       );
     }
 
-    // Fight history (best-effort; dossier may already carry it).
+    // Fight history (the dossier itself carries no fight list — the
+    // fights endpoint is the only source).
     try {
       const json = await apiFetch<unknown>(
         `/api/v1/dossiers/fights?team_id=${encodeURIComponent(found.id)}`,
@@ -155,23 +193,52 @@ function TeamDossierInner() {
     void load();
   }, [load]);
 
-  const fights: FightRow[] = useMemo(() => {
-    const fromDossier = dossier ? dossierFights(dossier) : [];
-    if (fromDossier.length > 0) return fromDossier;
-    return extraFights ?? [];
-  }, [dossier, extraFights]);
+  const fights: FightRow[] = extraFights ?? [];
 
   const h2h = useMemo(() => (dossier ? dossierHeadToHead(dossier) : []), [dossier]);
 
-  const statsEntries = useMemo(() => {
-    const s = dossier?.stats;
-    if (!s || typeof s !== "object") return [];
-    return Object.entries(s).filter(
-      ([, v]) => v !== null && v !== undefined && v !== ""
-    );
-  }, [dossier]);
+  const playstyle = dossier?.playstyle ?? null;
+  const playstyleLabel = dossier ? dossierPlaystyle(dossier) : null;
+
+  const statEntries = useMemo<[string, string][]>(() => {
+    if (!dossier) return [];
+    const out: [string, string][] = [];
+    if (typeof dossier.matches_sampled === "number")
+      out.push(["Matches sampled", String(dossier.matches_sampled)]);
+    if (typeof dossier.fights_sampled === "number")
+      out.push(["Fights sampled", String(dossier.fights_sampled)]);
+    if (typeof playstyle?.fights_per_match === "number")
+      out.push(["Fights / match", formatNumber(playstyle.fights_per_match)]);
+    if (typeof playstyle?.aggression_score === "number")
+      out.push(["Aggression score", formatNumber(playstyle.aggression_score)]);
+    if (dossier.data_freshness)
+      out.push(["Data freshness", dossier.data_freshness.replace(/_/g, " ")]);
+    return out;
+  }, [dossier, playstyle]);
 
   const tendencies = dossier?.tendencies;
+  const hasTendencies = Boolean(
+    tendencies &&
+      ((tendencies.drop_locations && tendencies.drop_locations.length > 0) ||
+        tendencies.drop_location_note ||
+        tendencies.rotation_timing?.label ||
+        tendencies.rotation_timing?.note ||
+        tendencies.centrality?.label ||
+        tendencies.centrality?.note)
+  );
+
+  const hasDossierContent = Boolean(
+    dossier &&
+      (statEntries.length > 0 ||
+        h2h.length > 0 ||
+        fights.length > 0 ||
+        (dossier.strengths && dossier.strengths.length > 0) ||
+        (dossier.weaknesses && dossier.weaknesses.length > 0) ||
+        (playstyleLabel && playstyleLabel !== "insufficient_data") ||
+        hasTendencies ||
+        (dossier.notes && dossier.notes.length > 0))
+  );
+
   const pdfUrl = team
     ? `${API_BASE}/api/v1/dossiers/report/team/${encodeURIComponent(team.id)}.pdf`
     : null;
@@ -211,8 +278,8 @@ function TeamDossierInner() {
                       {team.tag}
                     </span>
                   ) : null}
-                  {dossier && dossierPlaystyle(dossier) ? (
-                    <Badge tone="cyan">{dossierPlaystyle(dossier)}</Badge>
+                  {playstyleLabel ? (
+                    <Badge tone="cyan">{playstyleLabel.replace(/_/g, " ")}</Badge>
                   ) : null}
                   {team.source === "demo" ? (
                     <Badge tone="amber">demo · simulated data</Badge>
@@ -233,12 +300,7 @@ function TeamDossierInner() {
             {/* dossier body */}
             {dossierError && !dossier ? (
               <ErrorState message={dossierError} onRetry={() => void load()} />
-            ) : !dossier ||
-              (statsEntries.length === 0 &&
-                h2h.length === 0 &&
-                fights.length === 0 &&
-                (!dossier.strengths || dossier.strengths.length === 0) &&
-                (!dossier.weaknesses || dossier.weaknesses.length === 0)) ? (
+            ) : !dossier || !hasDossierContent ? (
               <AnalystEmptyState
                 title="No dossier data"
                 message={coverageNote(
@@ -254,33 +316,55 @@ function TeamDossierInner() {
                     coverage: {coverageNote(dossierMeta, "dossier loaded")}
                   </p>
                 ) : null}
+                {dossier.computed_at ? (
+                  <p className="font-mono text-xs text-white/40">
+                    computed at {dossier.computed_at}
+                  </p>
+                ) : null}
 
-                {/* stat grid */}
-                {statsEntries.length > 0 ? (
+                {/* stat grid — only fields DossierOut actually carries */}
+                {statEntries.length > 0 ? (
                   <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4">
-                    {statsEntries.map(([k, v]) => (
-                      <StatCard
-                        key={k}
-                        label={prettyStatKey(k)}
-                        value={formatStatValue(v)}
-                      />
+                    {statEntries.map(([k, v]) => (
+                      <StatCard key={k} label={k} value={v} />
                     ))}
                   </div>
                 ) : null}
 
-                {/* strengths / weaknesses */}
+                {/* playstyle — an OBJECT: label + evidence, formatted */}
+                {playstyle ? (
+                  <Card title="Playstyle">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <Badge tone="cyan">
+                        {playstyle.label.replace(/_/g, " ")}
+                      </Badge>
+                      {typeof playstyle.matches_sampled === "number" ? (
+                        <span className="font-mono text-xs text-white/40">
+                          {playstyle.matches_sampled} matches sampled
+                        </span>
+                      ) : null}
+                    </div>
+                    {playstyle.evidence ? (
+                      <p className="mt-2 text-sm text-white/75">
+                        {playstyle.evidence}
+                      </p>
+                    ) : null}
+                  </Card>
+                ) : null}
+
+                {dossier.comparison_note ? (
+                  <p className="text-sm text-white/55">
+                    {dossier.comparison_note}
+                  </p>
+                ) : null}
+
+                {/* strengths / weaknesses — lists of StatEdge objects */}
                 <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
                   <Card title="Strengths">
                     {dossier.strengths && dossier.strengths.length > 0 ? (
                       <ul className="space-y-2">
                         {dossier.strengths.map((s, i) => (
-                          <li
-                            key={i}
-                            className="flex gap-2 text-sm text-white/80"
-                          >
-                            <span className="text-emerald-400">▲</span>
-                            <span>{s}</span>
-                          </li>
+                          <StatEdgeRow key={i} edge={s} tone="up" />
                         ))}
                       </ul>
                     ) : (
@@ -293,13 +377,7 @@ function TeamDossierInner() {
                     {dossier.weaknesses && dossier.weaknesses.length > 0 ? (
                       <ul className="space-y-2">
                         {dossier.weaknesses.map((w, i) => (
-                          <li
-                            key={i}
-                            className="flex gap-2 text-sm text-white/80"
-                          >
-                            <span className="text-rose-400">▼</span>
-                            <span>{w}</span>
-                          </li>
+                          <StatEdgeRow key={i} edge={w} tone="down" />
                         ))}
                       </ul>
                     ) : (
@@ -310,58 +388,100 @@ function TeamDossierInner() {
                   </Card>
                 </div>
 
-                {/* tendencies */}
+                {/* tendencies — drop_locations / rotation_timing / centrality */}
                 <Card title="Tendencies">
-                  {tendencies &&
-                  (tendencies.favorite_drops?.length ||
-                    tendencies.rotation_timing ||
-                    tendencies.edge_vs_center ||
-                    tendencies.notes?.length) ? (
+                  {hasTendencies && tendencies ? (
                     <dl className="space-y-3 text-sm">
-                      {tendencies.favorite_drops &&
-                      tendencies.favorite_drops.length > 0 ? (
+                      {tendencies.drop_locations &&
+                      tendencies.drop_locations.length > 0 ? (
                         <div>
                           <dt className="font-mono text-xs uppercase tracking-widest text-white/40">
                             Favorite drops
                           </dt>
                           <dd className="mt-1 flex flex-wrap gap-2">
-                            {tendencies.favorite_drops.map((d, i) => (
+                            {tendencies.drop_locations.map((d, i) => (
                               <Badge key={i} tone="cyan">
-                                {d}
+                                {String(d.location ?? "unknown")}
+                                {typeof d.matches === "number"
+                                  ? ` · ${d.matches}×`
+                                  : ""}
                               </Badge>
                             ))}
                           </dd>
+                          {tendencies.drop_location_note ? (
+                            <p className="mt-1 text-xs text-white/40">
+                              {tendencies.drop_location_note}
+                            </p>
+                          ) : null}
+                        </div>
+                      ) : tendencies.drop_location_note ? (
+                        <div>
+                          <dt className="font-mono text-xs uppercase tracking-widest text-white/40">
+                            Favorite drops
+                          </dt>
+                          <dd className="mt-1 text-white/60">
+                            {tendencies.drop_location_note}
+                          </dd>
                         </div>
                       ) : null}
-                      {tendencies.rotation_timing ? (
+                      {tendencies.rotation_timing &&
+                      (tendencies.rotation_timing.label ||
+                        tendencies.rotation_timing.note) ? (
                         <div>
                           <dt className="font-mono text-xs uppercase tracking-widest text-white/40">
                             Rotation timing
                           </dt>
                           <dd className="mt-1 text-white/80">
-                            {tendencies.rotation_timing}
+                            {tendencies.rotation_timing.label ?? ""}
+                            {typeof tendencies.rotation_timing.early ===
+                              "number" ||
+                            typeof tendencies.rotation_timing.mid ===
+                              "number" ||
+                            typeof tendencies.rotation_timing.late ===
+                              "number" ? (
+                              <span className="ml-2 font-mono text-xs text-white/50">
+                                early {tendencies.rotation_timing.early ?? 0}{" "}
+                                · mid {tendencies.rotation_timing.mid ?? 0} ·
+                                late {tendencies.rotation_timing.late ?? 0}
+                              </span>
+                            ) : null}
+                            {tendencies.rotation_timing.note ? (
+                              <span className="mt-0.5 block text-xs text-white/40">
+                                {tendencies.rotation_timing.note}
+                              </span>
+                            ) : null}
                           </dd>
                         </div>
                       ) : null}
-                      {tendencies.edge_vs_center ? (
+                      {tendencies.centrality &&
+                      (tendencies.centrality.label ||
+                        tendencies.centrality.note) ? (
                         <div>
                           <dt className="font-mono text-xs uppercase tracking-widest text-white/40">
-                            Edge vs center
+                            Centrality (edge vs center)
                           </dt>
                           <dd className="mt-1 text-white/80">
-                            {tendencies.edge_vs_center}
-                          </dd>
-                        </div>
-                      ) : null}
-                      {tendencies.notes && tendencies.notes.length > 0 ? (
-                        <div>
-                          <dt className="font-mono text-xs uppercase tracking-widest text-white/40">
-                            Notes
-                          </dt>
-                          <dd className="mt-1 space-y-1 text-white/80">
-                            {tendencies.notes.map((n, i) => (
-                              <p key={i}>· {n}</p>
-                            ))}
+                            {tendencies.centrality.label ?? ""}
+                            {typeof tendencies.centrality
+                              .distance_from_tournament_centroid ===
+                            "number" ? (
+                              <span className="ml-2 font-mono text-xs text-white/50">
+                                centroid distance{" "}
+                                {formatNumber(
+                                  tendencies.centrality
+                                    .distance_from_tournament_centroid
+                                )}
+                                {typeof tendencies.centrality
+                                  .median_team_distance === "number"
+                                  ? ` · median team ${formatNumber(tendencies.centrality.median_team_distance)}`
+                                  : ""}
+                              </span>
+                            ) : null}
+                            {tendencies.centrality.note ? (
+                              <span className="mt-0.5 block text-xs text-white/40">
+                                {tendencies.centrality.note}
+                              </span>
+                            ) : null}
                           </dd>
                         </div>
                       ) : null}
@@ -373,43 +493,71 @@ function TeamDossierInner() {
                   )}
                 </Card>
 
-                {/* head to head */}
+                {/* dossier notes */}
+                {dossier.notes && dossier.notes.length > 0 ? (
+                  <Card title="Notes">
+                    <ul className="space-y-1 text-sm text-white/70">
+                      {dossier.notes.map((n, i) => (
+                        <li key={i}>· {n}</li>
+                      ))}
+                    </ul>
+                  </Card>
+                ) : null}
+
+                {/* head to head — HeadToHeadOut fields only; the backend
+                    sends no "matches"/"win_rate": fights is the match
+                    count and win rate is derived from decided fights. */}
                 <Card title="Head-to-head">
                   {h2h.length > 0 ? (
                     <div className="overflow-x-auto">
-                      <table className="w-full min-w-[480px] text-sm">
+                      <table className="w-full min-w-[560px] text-sm">
                         <thead>
                           <tr className="border-b border-white/10 font-mono text-xs uppercase tracking-widest text-white/40">
                             <th className="py-2 text-left">Opponent</th>
-                            <th className="py-2 text-right">Matches</th>
-                            <th className="py-2 text-right">Wins</th>
-                            <th className="py-2 text-right">Losses</th>
-                            <th className="py-2 text-right">Win rate</th>
+                            <th className="py-2 text-right">Fights</th>
+                            <th className="py-2 text-right">Won</th>
+                            <th className="py-2 text-right">Lost</th>
+                            <th className="py-2 text-right">Disengaged</th>
+                            <th className="py-2 text-right">Kills for</th>
+                            <th className="py-2 text-right">Kills against</th>
+                            <th className="py-2 text-right">Win rate (decided)</th>
                           </tr>
                         </thead>
                         <tbody>
-                          {h2h.map((r, i) => (
-                            <tr
-                              key={i}
-                              className="border-b border-white/5 last:border-0"
-                            >
-                              <td className="py-2 font-medium">{h2hName(r)}</td>
-                              <td className="py-2 text-right font-mono">
-                                {r.matches ?? "—"}
-                              </td>
-                              <td className="py-2 text-right font-mono text-emerald-300">
-                                {r.wins ?? "—"}
-                              </td>
-                              <td className="py-2 text-right font-mono text-rose-300">
-                                {r.losses ?? "—"}
-                              </td>
-                              <td className="py-2 text-right font-mono">
-                                {typeof r.win_rate === "number"
-                                  ? `${(r.win_rate <= 1 ? r.win_rate * 100 : r.win_rate).toFixed(0)}%`
-                                  : "—"}
-                              </td>
-                            </tr>
-                          ))}
+                          {h2h.map((r, i) => {
+                            const rate = h2hWinRate(r);
+                            return (
+                              <tr
+                                key={r.opponent_team_id ?? i}
+                                className="border-b border-white/5 last:border-0"
+                              >
+                                <td className="py-2 font-medium">{h2hName(r)}</td>
+                                <td className="py-2 text-right font-mono">
+                                  {r.fights ?? "—"}
+                                </td>
+                                <td className="py-2 text-right font-mono text-emerald-300">
+                                  {r.won ?? "—"}
+                                </td>
+                                <td className="py-2 text-right font-mono text-rose-300">
+                                  {r.lost ?? "—"}
+                                </td>
+                                <td className="py-2 text-right font-mono">
+                                  {r.disengaged ?? "—"}
+                                </td>
+                                <td className="py-2 text-right font-mono">
+                                  {r.kills_for ?? "—"}
+                                </td>
+                                <td className="py-2 text-right font-mono">
+                                  {r.kills_against ?? "—"}
+                                </td>
+                                <td className="py-2 text-right font-mono">
+                                  {rate !== null
+                                    ? `${(rate * 100).toFixed(0)}%`
+                                    : "—"}
+                                </td>
+                              </tr>
+                            );
+                          })}
                         </tbody>
                       </table>
                     </div>
@@ -420,7 +568,7 @@ function TeamDossierInner() {
                   )}
                 </Card>
 
-                {/* fight history */}
+                {/* fight history — FightDetailOut rows */}
                 <Card
                   title="Fight history"
                   action={
@@ -435,29 +583,40 @@ function TeamDossierInner() {
                     <ul className="space-y-2">
                       {fights.map((f, i) => (
                         <li
-                          key={f.fight_id ?? i}
+                          key={f.id ?? i}
                           className="flex flex-wrap items-center gap-2 rounded-lg border border-white/10 bg-white/[0.02] px-3 py-2 text-sm"
                         >
-                          <FightOutcomeBadge outcome={fightOutcome(f)} />
+                          <FightResultBadge
+                            result={fightResultForTeam(f, team.id)}
+                            rawOutcome={f.outcome ?? ""}
+                          />
                           <span className="font-medium">
-                            vs {fightOpponent(f)}
+                            vs {fightOpponent(f, team.id)}
                           </span>
-                          {typeof f.kills === "number" ? (
+                          {typeof f.total_kills === "number" ? (
                             <span className="font-mono text-xs text-white/50">
-                              {f.kills} kills
+                              {f.total_kills} kills
                             </span>
                           ) : null}
-                          {typeof f.placement === "number" ? (
+                          {typeof f.total_knocks === "number" ? (
                             <span className="font-mono text-xs text-white/50">
-                              #{f.placement}
+                              {f.total_knocks} knocks
                             </span>
                           ) : null}
-                          {f.phase ? (
-                            <Badge tone="slate">{f.phase}</Badge>
+                          {f.map_name ? (
+                            <Badge tone="slate">{f.map_name}</Badge>
+                          ) : null}
+                          {f.third_parties && f.third_parties.length > 0 ? (
+                            <Badge tone="amber">
+                              3rd party:{" "}
+                              {f.third_parties
+                                .map((t) => t.team_name)
+                                .join(", ")}
+                            </Badge>
                           ) : null}
                           <span className="ml-auto font-mono text-xs text-white/40">
                             {f.match_id ? `${f.match_id} · ` : ""}
-                            {formatTime(f.timestamp)}
+                            {formatFightTime(f.start_timestamp_ms)}
                           </span>
                         </li>
                       ))}

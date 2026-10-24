@@ -71,6 +71,24 @@ class TeamListResponse(BaseModel):
     data: List[TeamResponse]
 
 
+class TeamNameResponse(BaseModel):
+    """Names-only projection of a team: id + name (+ tag for display).
+
+    This is the ONLY team shape an observer may read for OTHER teams —
+    it carries nothing the team-scope exists to protect (no stats, no
+    roster, no colours/region), just what a dropdown needs to label its
+    options (H31).
+    """
+
+    id: str
+    name: str
+    tag: Optional[str] = None
+
+
+class TeamNameListResponse(BaseModel):
+    data: List[TeamNameResponse]
+
+
 class TeamDetailResponse(BaseModel):
     """Success envelope preserved from the original inline handlers."""
 

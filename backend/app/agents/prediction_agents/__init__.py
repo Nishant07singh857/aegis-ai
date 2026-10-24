@@ -7,7 +7,11 @@ zone prediction, and match winner prediction.
 
 from .fight_predictor import FightPredictor, FightPrediction
 from .survival_predictor import SurvivalPredictor, SurvivalPrediction
-from .zone_predictor import ZonePredictor, ZonePrediction
+from .zone_predictor import (
+    ZonePredictor,
+    ZonePrediction,
+    ZonePredictionUnavailable,
+)
 from .winner_predictor import WinnerPredictor, WinnerPrediction
 from .win_probability import (
     attach_deltas,
@@ -24,6 +28,7 @@ __all__ = [
     "SurvivalPrediction",
     "ZonePredictor",
     "ZonePrediction",
+    "ZonePredictionUnavailable",
     "WinnerPredictor",
     "WinnerPrediction",
     "attach_deltas",

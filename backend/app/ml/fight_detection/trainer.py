@@ -1,27 +1,70 @@
 # backend/app/ml/fight_detection/trainer.py
 """
-AEGIS AI - Fight Detection Trainer
-Complete training pipeline for fight detection models.
-Includes distributed training, mixed precision, logging, and checkpointing.
+AEGIS AI - Fight Detection Trainer — RETIRED (honest retire, C3).
+
+DO NOT USE this trainer. It never actually trained anything:
+
+- ``_compute_loss`` ignored the batch labels entirely
+  (``cls_loss = 0``, ``dfl_loss = 0``; "box loss" was
+  ``output.abs().mean() * 0.01`` — a function of the outputs only).
+- ``_validate_epoch`` hardcoded ``mAP50 = 0.0``.
+
+Any model "produced" by this pipeline would be fiction, so the
+training / validation entry points now raise
+:class:`FightTrainerRetiredError` on use instead of pretending to
+train. For a real training pattern, see the killfeed training stack
+(``app/ml/killfeed_detection/``): a thin honest wrapper over
+ultralytics ``YOLO.train()`` whose report carries the real measured
+metrics. Rebuild fight-detection training on that pattern; do not
+revive this loop.
+
+Dormant before retirement as well: zero production callers.
 """
+
+from __future__ import annotations
 
 import os
 import time
 import random
-from typing import Dict, List, Optional, Any, Tuple
+from typing import TYPE_CHECKING, Dict, List, Optional, Any, Tuple
 from dataclasses import dataclass, field
 from collections import defaultdict
 import structlog
 import numpy as np
-import torch
-import torch.optim as optim
-from torch.optim.lr_scheduler import CosineAnnealingLR, OneCycleLR, ReduceLROnPlateau
-from torch.cuda.amp import GradScaler, autocast
 
-from .model import FightDetectionModel
-from .dataset import FightDataset
+try:  # torch is only needed by the (retired) training loop itself.
+    import torch
+    import torch.optim as optim
+    from torch.optim.lr_scheduler import CosineAnnealingLR, OneCycleLR, ReduceLROnPlateau
+    from torch.cuda.amp import GradScaler, autocast
+except ImportError:  # pragma: no cover - torch absent in some envs
+    torch = None  # type: ignore[assignment]
+    optim = None  # type: ignore[assignment]
+    CosineAnnealingLR = OneCycleLR = ReduceLROnPlateau = None  # type: ignore[assignment]
+    GradScaler = autocast = None  # type: ignore[assignment]
+
+if TYPE_CHECKING:
+    from .model import FightDetectionModel
+    from .dataset import FightDataset
 
 logger = structlog.get_logger("aegis.ml.trainer")
+
+
+class FightTrainerRetiredError(RuntimeError):
+    """Raised on any use of the retired fight-detection trainer (C3)."""
+
+
+FIGHT_TRAINER_RETIRED_REASON = (
+    "FightTrainer is RETIRED: its loss never used the batch labels "
+    "(cls/dfl loss were hard zeros) and its validation mAP was "
+    "hardcoded to 0.0, so it cannot train a real model. Use the "
+    "killfeed training pattern (app/ml/killfeed_detection, ultralytics "
+    "wrapper with measured metrics) to build a real trainer instead."
+)
+
+
+def _raise_retired() -> None:
+    raise FightTrainerRetiredError(FIGHT_TRAINER_RETIRED_REASON)
 
 
 @dataclass
@@ -122,16 +165,15 @@ class TrainingMetrics:
 
 class FightTrainer:
     """
-    Complete training pipeline for fight detection models.
-    
-    Features:
-    - Mixed precision training (AMP)
-    - Distributed training (DDP)
-    - Multiple optimizers and schedulers
-    - Comprehensive logging
-    - Checkpointing and resumption
-    - Early stopping
-    - Metric tracking
+    RETIRED — constructing or using this class raises
+    :class:`FightTrainerRetiredError`.
+
+    The historical claim of a "complete training pipeline" (AMP, DDP,
+    checkpointing, early stopping) described scaffolding around a loss
+    that ignored labels and a validation mAP hardcoded to 0.0
+    (inspection C3). The scaffolding is kept for reference only; every
+    entry point refuses honestly rather than producing a fictional
+    model or fictional metrics.
     """
     
     def __init__(
@@ -141,6 +183,9 @@ class FightTrainer:
         val_dataset: Optional[FightDataset] = None,
         config: Optional[TrainingConfig] = None,
     ):
+        # RETIRED (C3): refuse at construction so no training or
+        # validation path can ever run from this class.
+        _raise_retired()
         self.model = model
         self.train_dataset = train_dataset
         self.val_dataset = val_dataset
@@ -231,8 +276,9 @@ class FightTrainer:
             return None
     
     def train(self) -> TrainingMetrics:
-        """Run complete training loop"""
-        
+        """RETIRED — always raises FightTrainerRetiredError (C3)."""
+        _raise_retired()
+
         logger.info("Starting training...")
         
         train_loader = self.train_dataset.get_data_loader(
@@ -327,8 +373,9 @@ class FightTrainer:
         return self.metrics
     
     def _train_epoch(self, loader, epoch: int) -> Dict[str, float]:
-        """Train for one epoch"""
-        
+        """RETIRED — always raises FightTrainerRetiredError (C3)."""
+        _raise_retired()
+
         self.model.train()
         
         total_loss = 0.0
@@ -384,8 +431,13 @@ class FightTrainer:
         }
     
     def _validate_epoch(self, loader, epoch: int) -> Dict[str, float]:
-        """Validate for one epoch"""
-        
+        """RETIRED — always raises FightTrainerRetiredError (C3).
+
+        The old body hardcoded mAP50 = 0.0; no validation metric was
+        ever computed here.
+        """
+        _raise_retired()
+
         self.model.eval()
         
         total_loss = 0.0
@@ -421,11 +473,14 @@ class FightTrainer:
         outputs: Tuple[torch.Tensor, ...],
         batch: Dict[str, Any],
     ) -> Tuple[torch.Tensor, Dict[str, float]]:
-        """Compute detection loss"""
-        
-        # Simplified loss computation
-        # In production, use YOLO loss or similar
-        
+        """RETIRED — always raises FightTrainerRetiredError (C3).
+
+        The old body never used the batch labels: cls/dfl losses were
+        hard zeros and "box loss" was ``output.abs().mean() * 0.01``.
+        That was a fiction, not a loss, and it has been disabled.
+        """
+        _raise_retired()
+
         device = outputs[0].device
         
         # Box loss (MSE for demonstration)

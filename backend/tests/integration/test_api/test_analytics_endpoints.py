@@ -1,362 +1,143 @@
 # backend/tests/integration/test_api/test_analytics_endpoints.py
 """
-Integration tests for Analytics API Endpoints.
-Tests points, leaderboards, heatmaps, reports,
-trends, and comparisons through the API layer.
+Integration tests for the REAL Analytics API surface (H30 rewrite).
+
+History: the previous version accepted **500 as a passing status at 11
+sites** and `[200, 404]` interchangeably elsewhere, against URLs that were
+never checked against the routers. A 500 can never pass here.
+
+The actual analytics surface in app.main / app.api (read from the code and
+verified by probing the app in this environment, DEMO_MODE off):
+
+* ``GET /api/v1/analytics/standings`` — demo-dataset endpoint, DEMO_MODE
+  gated: **503** with an honest detail when off (its default).
+* ``GET /api/v1/analytics/summary`` and ``GET /api/v1/analytics/kill_feed``
+  — same gate: **503**.
+* ``POST /api/v1/analytics/zone-efficiency`` — the one real analytics
+  router (app.api.v1.analytics_extra); requires authentication: **401**
+  unauthenticated.
+* Everything the old file probed — leaderboards, team/match points,
+  heatmaps, reports, trends, comparisons, dashboard — **does not exist**:
+  **404**. Those assertions are kept as explicit 404 contract tests so the
+  fiction cannot quietly come back; if someone builds those endpoints,
+  these tests go red and must be rewritten against the real contract.
+
+BACKLOG (backend divergence, not fixed here — backend is out of scope):
+there is no production analytics read API for standings/leaderboards
+outside DEMO_MODE; the frontend's analytics surfaces depend on the gated
+demo endpoints (inspection §5).
 """
 
-import pytest
-from httpx import AsyncClient, ASGITransport
+import sys
+import types
 import uuid
+from enum import Enum
 
-from app.main import app
+import pytest
+from httpx import ASGITransport, AsyncClient
+
+# --- fpdf stub: see test_live_events.py / test_main_reliability.py --------
+_fpdf_stub = types.ModuleType("fpdf")
+_fpdf_stub.__path__ = []
 
 
-@pytest.mark.integration
-@pytest.mark.api
+class _FPDF:
+    def __init__(self, *args, **kwargs):
+        pass
+
+
+class _MethodReturnValue(Enum):
+    NONE = 0
+
+
+class _XPos(Enum):
+    LEFT = 0
+    RIGHT = 1
+    LMARGIN = 2
+
+
+class _YPos(Enum):
+    TOP = 0
+    NEXT = 1
+
+
+_fpdf_stub.FPDF = _FPDF
+_enums_stub = types.ModuleType("fpdf.enums")
+_enums_stub.MethodReturnValue = _MethodReturnValue
+_enums_stub.XPos = _XPos
+_enums_stub.YPos = _YPos
+sys.modules.setdefault("fpdf", _fpdf_stub)
+sys.modules.setdefault("fpdf.enums", _enums_stub)
+
+from app.main import app  # noqa: E402
+
+pytestmark = [pytest.mark.integration, pytest.mark.api]
+
+
+@pytest.fixture()
+def transport():
+    return ASGITransport(app=app)
+
+
 class TestAnalyticsEndpoints:
-    """Test Analytics API endpoints"""
-    
-    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    # POINTS & STANDINGS
-    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    
-    @pytest.mark.asyncio
-    async def test_get_tournament_standings(self):
-        """Test getting tournament standings"""
-        transport = ASGITransport(app=app)
-        
+    """Exact status contracts — 500 is never an acceptable outcome."""
+
+    async def test_standings_demo_gated_503(self, transport):
         async with AsyncClient(transport=transport, base_url="http://test") as client:
             response = await client.get(
-                f"/api/v1/analytics/standings?tournament_id={str(uuid.uuid4())}"
+                f"/api/v1/analytics/standings?tournament_id={uuid.uuid4()}"
             )
-        
-        assert response.status_code in [200, 404]
-    
-    @pytest.mark.asyncio
-    async def test_get_team_points(self):
-        """Test getting team points"""
-        transport = ASGITransport(app=app)
-        
+        assert response.status_code == 503
+        assert "DEMO_MODE" in response.json()["detail"]
+
+    async def test_summary_demo_gated_503(self, transport):
         async with AsyncClient(transport=transport, base_url="http://test") as client:
-            response = await client.get(
-                f"/api/v1/analytics/teams/{str(uuid.uuid4())}/points"
-            )
-        
-        assert response.status_code in [200, 404]
-    
-    @pytest.mark.asyncio
-    async def test_get_match_points_breakdown(self):
-        """Test getting match points breakdown"""
-        transport = ASGITransport(app=app)
-        
+            response = await client.get("/api/v1/analytics/summary")
+        assert response.status_code == 503
+        assert "DEMO_MODE" in response.json()["detail"]
+
+    async def test_kill_feed_demo_gated_503(self, transport):
         async with AsyncClient(transport=transport, base_url="http://test") as client:
-            response = await client.get(
-                f"/api/v1/analytics/matches/{str(uuid.uuid4())}/points"
-            )
-        
-        assert response.status_code in [200, 404]
-    
-    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    # LEADERBOARDS
-    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    
-    @pytest.mark.asyncio
-    async def test_get_overall_leaderboard(self):
-        """Test getting overall leaderboard"""
-        transport = ASGITransport(app=app)
-        
-        async with AsyncClient(transport=transport, base_url="http://test") as client:
-            response = await client.get("/api/v1/analytics/leaderboard/overall")
-        
-        assert response.status_code in [200, 500]
-    
-    @pytest.mark.asyncio
-    async def test_get_kills_leaderboard(self):
-        """Test getting kills leaderboard"""
-        transport = ASGITransport(app=app)
-        
-        async with AsyncClient(transport=transport, base_url="http://test") as client:
-            response = await client.get("/api/v1/analytics/leaderboard/kills")
-        
-        assert response.status_code in [200, 500]
-    
-    @pytest.mark.asyncio
-    async def test_get_damage_leaderboard(self):
-        """Test getting damage leaderboard"""
-        transport = ASGITransport(app=app)
-        
-        async with AsyncClient(transport=transport, base_url="http://test") as client:
-            response = await client.get("/api/v1/analytics/leaderboard/damage")
-        
-        assert response.status_code in [200, 500]
-    
-    @pytest.mark.asyncio
-    async def test_get_top_teams_display(self):
-        """Test getting top teams for display"""
-        transport = ASGITransport(app=app)
-        
-        async with AsyncClient(transport=transport, base_url="http://test") as client:
-            response = await client.get("/api/v1/analytics/leaderboard/display?limit=5")
-        
-        assert response.status_code in [200, 500]
-    
-    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    # HEATMAPS
-    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    
-    @pytest.mark.asyncio
-    async def test_generate_heatmap(self):
-        """Test generating a heatmap"""
-        transport = ASGITransport(app=app)
-        
+            response = await client.get("/api/v1/analytics/kill_feed")
+        assert response.status_code == 503
+
+    async def test_zone_efficiency_requires_auth(self, transport):
+        # The one real analytics router; unauthenticated writes are 401.
         async with AsyncClient(transport=transport, base_url="http://test") as client:
             response = await client.post(
-                "/api/v1/analytics/heatmaps",
-                json={
-                    "heatmap_type": "landing",
-                    "map_name": "erangel",
-                    "resolution": 50,
-                    "title": "Test Landing Heatmap",
-                },
+                "/api/v1/analytics/zone-efficiency", json={"teams": {}}
             )
-        
-        assert response.status_code in [200, 201, 500]
-    
-    @pytest.mark.asyncio
-    async def test_get_heatmap_data(self):
-        """Test getting heatmap data"""
-        transport = ASGITransport(app=app)
-        
+        assert response.status_code == 401
+
+    @pytest.mark.parametrize(
+        "method,url,body",
+        [
+            ("GET", "/api/v1/analytics/leaderboard/overall", None),
+            ("GET", "/api/v1/analytics/leaderboard/kills", None),
+            ("GET", "/api/v1/analytics/leaderboard/damage", None),
+            ("GET", "/api/v1/analytics/leaderboard/display?limit=5", None),
+            ("GET", f"/api/v1/analytics/teams/{uuid.uuid4()}/points", None),
+            ("GET", f"/api/v1/analytics/matches/{uuid.uuid4()}/points", None),
+            ("GET", f"/api/v1/analytics/matches/{uuid.uuid4()}/overview", None),
+            ("POST", "/api/v1/analytics/heatmaps", {"heatmap_type": "landing", "map_name": "erangel"}),
+            ("GET", f"/api/v1/analytics/heatmaps/{uuid.uuid4()}", None),
+            ("GET", f"/api/v1/analytics/heatmaps/{uuid.uuid4()}/hotspots", None),
+            ("POST", "/api/v1/analytics/reports/match", {"match_id": str(uuid.uuid4())}),
+            ("GET", f"/api/v1/analytics/reports/match/{uuid.uuid4()}", None),
+            ("POST", "/api/v1/analytics/reports/player", {"player_id": str(uuid.uuid4())}),
+            ("GET", f"/api/v1/analytics/trends/{uuid.uuid4()}?metric=kills&window=5", None),
+            ("GET", "/api/v1/analytics/trends/hot-players?limit=5", None),
+            ("POST", "/api/v1/analytics/compare/teams", {"team_a": {}, "team_b": {}}),
+            ("POST", "/api/v1/analytics/compare/players", {"player_a": {}, "player_b": {}}),
+            ("GET", f"/api/v1/analytics/dashboard?tournament_id={uuid.uuid4()}", None),
+        ],
+    )
+    async def test_invented_analytics_routes_are_404(self, transport, method, url, body):
+        """Routes the old suite probed do not exist — exact 404, not [200, 500]."""
         async with AsyncClient(transport=transport, base_url="http://test") as client:
-            response = await client.get(
-                f"/api/v1/analytics/heatmaps/{str(uuid.uuid4())}"
-            )
-        
-        assert response.status_code in [200, 404]
-    
-    @pytest.mark.asyncio
-    async def test_get_heatmap_hotspots(self):
-        """Test getting heatmap hotspots"""
-        transport = ASGITransport(app=app)
-        
-        async with AsyncClient(transport=transport, base_url="http://test") as client:
-            response = await client.get(
-                f"/api/v1/analytics/heatmaps/{str(uuid.uuid4())}/hotspots"
-            )
-        
-        assert response.status_code in [200, 404]
-    
-    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    # REPORTS
-    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    
-    @pytest.mark.asyncio
-    async def test_generate_match_report(self):
-        """Test generating a match report"""
-        transport = ASGITransport(app=app)
-        
-        async with AsyncClient(transport=transport, base_url="http://test") as client:
-            response = await client.post(
-                "/api/v1/analytics/reports/match",
-                json={
-                    "match_id": str(uuid.uuid4()),
-                    "match_data": {
-                        "match_name": "Test Match",
-                        "map_name": "Erangel",
-                        "duration": 1800,
-                        "winner_team": "Team A",
-                    },
-                },
-            )
-        
-        assert response.status_code in [200, 201, 500]
-    
-    @pytest.mark.asyncio
-    async def test_get_match_report(self):
-        """Test retrieving a match report"""
-        transport = ASGITransport(app=app)
-        
-        async with AsyncClient(transport=transport, base_url="http://test") as client:
-            response = await client.get(
-                f"/api/v1/analytics/reports/match/{str(uuid.uuid4())}"
-            )
-        
-        assert response.status_code in [200, 404]
-    
-    @pytest.mark.asyncio
-    async def test_generate_player_report(self):
-        """Test generating a player report"""
-        transport = ASGITransport(app=app)
-        
-        async with AsyncClient(transport=transport, base_url="http://test") as client:
-            response = await client.post(
-                "/api/v1/analytics/reports/player",
-                json={
-                    "player_id": str(uuid.uuid4()),
-                    "player_name": "TestPlayer",
-                    "team_name": "TestTeam",
-                    "match_id": str(uuid.uuid4()),
-                    "player_stats": {"kills": 5, "damage": 1200},
-                },
-            )
-        
-        assert response.status_code in [200, 201, 500]
-    
-    @pytest.mark.asyncio
-    async def test_get_player_reports(self):
-        """Test getting player reports"""
-        transport = ASGITransport(app=app)
-        
-        async with AsyncClient(transport=transport, base_url="http://test") as client:
-            response = await client.get(
-                f"/api/v1/analytics/reports/player/{str(uuid.uuid4())}?limit=5"
-            )
-        
-        assert response.status_code in [200, 404]
-    
-    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    # TRENDS
-    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    
-    @pytest.mark.asyncio
-    async def test_analyze_trend(self):
-        """Test analyzing performance trends"""
-        transport = ASGITransport(app=app)
-        
-        async with AsyncClient(transport=transport, base_url="http://test") as client:
-            response = await client.get(
-                f"/api/v1/analytics/trends/{str(uuid.uuid4())}?metric=kills&window=5"
-            )
-        
-        assert response.status_code in [200, 404]
-    
-    @pytest.mark.asyncio
-    async def test_get_moving_averages(self):
-        """Test getting moving averages"""
-        transport = ASGITransport(app=app)
-        
-        async with AsyncClient(transport=transport, base_url="http://test") as client:
-            response = await client.get(
-                f"/api/v1/analytics/trends/{str(uuid.uuid4())}/moving-averages?metric=kills"
-            )
-        
-        assert response.status_code in [200, 404]
-    
-    @pytest.mark.asyncio
-    async def test_project_performance(self):
-        """Test projecting next performance"""
-        transport = ASGITransport(app=app)
-        
-        async with AsyncClient(transport=transport, base_url="http://test") as client:
-            response = await client.get(
-                f"/api/v1/analytics/trends/{str(uuid.uuid4())}/projection?metric=kills"
-            )
-        
-        assert response.status_code in [200, 404]
-    
-    @pytest.mark.asyncio
-    async def test_get_hot_players(self):
-        """Test getting hot players"""
-        transport = ASGITransport(app=app)
-        
-        async with AsyncClient(transport=transport, base_url="http://test") as client:
-            response = await client.get("/api/v1/analytics/trends/hot-players?limit=5")
-        
-        assert response.status_code in [200, 500]
-    
-    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    # COMPARISONS
-    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    
-    @pytest.mark.asyncio
-    async def test_compare_teams(self):
-        """Test comparing two teams"""
-        transport = ASGITransport(app=app)
-        
-        async with AsyncClient(transport=transport, base_url="http://test") as client:
-            response = await client.post(
-                "/api/v1/analytics/compare/teams",
-                json={
-                    "team_a": {
-                        "team_id": "team_001",
-                        "team_name": "Team A",
-                        "total_kills": 45,
-                        "total_damage": 12000,
-                    },
-                    "team_b": {
-                        "team_id": "team_002",
-                        "team_name": "Team B",
-                        "total_kills": 38,
-                        "total_damage": 10500,
-                    },
-                },
-            )
-        
-        assert response.status_code in [200, 201, 500]
-    
-    @pytest.mark.asyncio
-    async def test_compare_players(self):
-        """Test comparing two players"""
-        transport = ASGITransport(app=app)
-        
-        async with AsyncClient(transport=transport, base_url="http://test") as client:
-            response = await client.post(
-                "/api/v1/analytics/compare/players",
-                json={
-                    "player_a": {
-                        "player_id": "player_001",
-                        "player_name": "Player A",
-                        "avg_kills": 6.5,
-                        "avg_damage": 1800,
-                    },
-                    "player_b": {
-                        "player_id": "player_002",
-                        "player_name": "Player B",
-                        "avg_kills": 5.8,
-                        "avg_damage": 1650,
-                    },
-                },
-            )
-        
-        assert response.status_code in [200, 201, 500]
-    
-    @pytest.mark.asyncio
-    async def test_get_comparison(self):
-        """Test retrieving a comparison"""
-        transport = ASGITransport(app=app)
-        
-        async with AsyncClient(transport=transport, base_url="http://test") as client:
-            response = await client.get(
-                f"/api/v1/analytics/compare/{str(uuid.uuid4())}"
-            )
-        
-        assert response.status_code in [200, 404]
-    
-    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    # DASHBOARD SUMMARY
-    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    
-    @pytest.mark.asyncio
-    async def test_get_analytics_dashboard(self):
-        """Test getting analytics dashboard summary"""
-        transport = ASGITransport(app=app)
-        
-        async with AsyncClient(transport=transport, base_url="http://test") as client:
-            response = await client.get(
-                f"/api/v1/analytics/dashboard?tournament_id={str(uuid.uuid4())}"
-            )
-        
-        assert response.status_code in [200, 404]
-    
-    @pytest.mark.asyncio
-    async def test_get_match_analytics_overview(self):
-        """Test getting match analytics overview"""
-        transport = ASGITransport(app=app)
-        
-        async with AsyncClient(transport=transport, base_url="http://test") as client:
-            response = await client.get(
-                f"/api/v1/analytics/matches/{str(uuid.uuid4())}/overview"
-            )
-        
-        assert response.status_code in [200, 404]
+            if body is None:
+                response = await client.request(method, url)
+            else:
+                response = await client.request(method, url, json=body)
+        assert response.status_code == 404, f"{method} {url}"
+        assert response.status_code != 500

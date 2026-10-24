@@ -6,8 +6,17 @@ pushes events into the real event bus, where the replay buffer,
 highlight detector, and kill feed consume them.
 
 Auth model:
-  * POST /feed/ingest   — operator+ (mutates broadcast state)
+  * POST /feed/ingest   — broadcast-control roles (operator+), plus
+    SCOPED observer ingest (Integrity H31b): an observer may ingest
+    only events whose killer team is their own assigned team
+    (server-side check against the observer's team assignment).
   * GET  /feed/status   — any authenticated user (which adapter is live)
+
+Provenance (Integrity C2): every event accepted here is human console
+entry, so the endpoint stamps ``event.source`` SERVER-SIDE from the
+caller's role ("spotter" / "manual" / "observer") — the trusted
+headshot producers. A client-supplied source is always overwritten:
+trust is never taken from the request body.
 
 Ingesting an event requires the backend process to have attached a live
 event bus (done in app/main.py lifespan); otherwise 503.
@@ -19,9 +28,17 @@ from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import TokenPayload, get_current_user, require_operator
-from app.services.feed_adapter import NormalizedEvent, feed_service
+from app.api.deps import (
+    BROADCAST_CONTROL_ROLES,
+    TokenPayload,
+    get_current_user,
+    principal_role,
+    require_operator,
+)
+from app.db.session import get_db
+from app.services.feed_adapter import FeedEventType, NormalizedEvent, feed_service
 
 router = APIRouter(prefix="/feed", tags=["Feed"])
 
@@ -45,11 +62,100 @@ async def feed_status(
     return feed_service.status()
 
 
+async def _assigned_team_name(db: AsyncSession, team_id: str) -> Optional[str]:
+    """Resolve an observer's assigned team id to its name.
+
+    Observer clients identify teams by NAME (the console locks the
+    killer side to the team name it loaded), while the assignment is a
+    team id — the scope check must accept either form. Returns None
+    when the team cannot be resolved (the id form still applies).
+    """
+    try:
+        from sqlalchemy import select
+
+        from app.db.models.team import Team
+
+        result = await db.execute(select(Team.name).where(Team.id == team_id))
+        name = result.scalars().first()
+        return str(name) if name else None
+    except Exception:
+        return None
+
+
+def _observer_scope_violation(
+    events: List[NormalizedEvent],
+    assigned_team_id: Optional[str],
+    assigned_team_name: Optional[str],
+) -> Optional[str]:
+    """First out-of-scope event description, or None when all pass.
+
+    Route-local scoped check (H31b) — the global role constants in
+    api/deps.py are untouched. An observer's events are in scope ONLY
+    when the killer side (``event.team``) is their own assigned team,
+    by id or by resolved name. Kill/knock events with no killer team
+    cannot be verified and are out of scope.
+    """
+    if not assigned_team_id:
+        return "observer account has no team assignment"
+    allowed = {str(assigned_team_id)}
+    if assigned_team_name:
+        allowed.add(str(assigned_team_name))
+    for event in events:
+        killer_team = str(event.team) if event.team else None
+        if event.event_type in (FeedEventType.KILL, FeedEventType.KNOCK):
+            if killer_team is None or killer_team not in allowed:
+                return (
+                    f"{event.event_type.value} event killer team "
+                    f"{killer_team!r} is not the observer's assigned team"
+                )
+        elif killer_team is not None and killer_team not in allowed:
+            return (
+                f"{event.event_type.value} event team {killer_team!r} "
+                "is not the observer's assigned team"
+            )
+    return None
+
+
 @router.post("/ingest", response_model=IngestResponse)
 async def ingest_events(
     body: IngestRequest,
-    _user: TokenPayload = Depends(require_operator),
+    user: TokenPayload = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
 ) -> IngestResponse:
+    role = principal_role(user)
+    if role in BROADCAST_CONTROL_ROLES:
+        # Human console entry by a broadcast-control principal: the
+        # spotter toggle is the trusted headshot producer (C2); other
+        # control roles are manual-confirmed entry.
+        stamp = "spotter" if role == "spotter" else "manual"
+    elif role == "observer":
+        # H31b scoped ingest: own-team events only, checked server-side
+        # against the observer's assignment (JWT team_id claim, backed
+        # by the User.team_id assignment; name resolved from teams).
+        team_name = None
+        if user.team_id:
+            team_name = await _assigned_team_name(db, str(user.team_id))
+        violation = _observer_scope_violation(
+            body.events, user.team_id, team_name
+        )
+        if violation is not None:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Observer ingest out of scope: {violation}.",
+            )
+        stamp = "observer"
+    else:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=(
+                "Insufficient role: feed ingest requires a broadcast-"
+                "control role, or an observer ingesting for their own "
+                "assigned team."
+            ),
+        )
+    # Server-side provenance stamp (C2) — overwrites any client claim.
+    for event in body.events:
+        event.source = stamp
     adapter = feed_service.active
     if adapter is None:
         raise HTTPException(

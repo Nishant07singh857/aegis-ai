@@ -1,8 +1,15 @@
 # backend/tests/e2e/test_full_match_flow.py
 """
-End-to-End Test: Complete Match Flow
-Simulates an entire BGMI match from creation to completion.
-Tests all systems working together: agents, vision, analytics, broadcast.
+⚠️ SCRIPTED DEMO — NOT an end-to-end verification of production.
+
+This file does NOT verify a real match flow. Phases 2–6 contain ZERO
+assertions, and every phase builds a fresh EventBus / AgentOrchestrator
+state, so no state carries between phases — the "complete flow" is
+fictional; the phases only publish invented events and print. Only
+phase 1 (orchestrator initialisation) and phase 7 (points / leaderboard /
+report arithmetic on hand-fed results) assert anything at all. The
+AgentOrchestrator driven here has zero production callers (inspection
+H5). See tests/e2e/README.md.
 """
 
 import pytest
@@ -107,6 +114,8 @@ class TestFullMatchFlow:
         
         return orchestrator, event_bus
     
+    # NOTE (honesty label): phases 2–6 below contain ZERO assertions and
+    # each rebuilds fresh state — they are scripted narration, not checks.
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     # MATCH START - PLANE PHASE
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

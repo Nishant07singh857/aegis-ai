@@ -141,6 +141,90 @@ def _live_teams() -> list:
     """
     return MATCH_STATE["teams"] if DEMO_MODE else []
 
+
+# ── Integrity Fix Pack (C6/H4): fabricated operator state ─────────────
+# DEVICES, MATCH_STATE["agents_state"], MATCH_STATE["system_health"],
+# MATCH_STATE["social_config"], MATCH_STATE["training_models"] and the
+# seeded MATCH_STATE["render_jobs"] entries are a hardcoded DEMO dataset:
+# no process measures them. Shared contract with the frontend (Worker C2):
+#   * DEMO_MODE OFF — these blocks are NEVER served: no WS connect frame,
+#     no broadcast and no REST response may carry them.
+#   * DEMO_MODE ON — they may be served, but every such payload block
+#     carries the marker "source": "demo" (on the frame envelope, on the
+#     REST envelope, and inside dict payloads / dict list items).
+#   * WS action acks carry "status": "success" ONLY when the action
+#     actually happened; otherwise "status": "error" plus a reason.
+
+def _demo_marked(data):
+    """Copy of a demo payload block carrying the contract marker."""
+    if isinstance(data, dict):
+        return {**data, "source": "demo"}
+    if isinstance(data, (list, deque)):
+        return [
+            _demo_marked(item) if isinstance(item, dict) else item
+            for item in data
+        ]
+    return data
+
+
+def _demo_frame(frame_type: str, data) -> dict:
+    """A WS frame whose payload block is demo data, marked as such."""
+    return {"type": frame_type, "data": _demo_marked(data), "source": "demo"}
+
+
+def _demo_operator_frames() -> Dict[str, dict]:
+    """Connect frames for the fabricated operator blocks (DEMO_MODE only).
+
+    Keyed by frame type. Empty when DEMO_MODE is off — the blocks are
+    absent from the connect payload, never sent with fake numbers.
+    """
+    if not DEMO_MODE:
+        return {}
+    return {
+        "system_health": _demo_frame(
+            "system_health", MATCH_STATE["system_health"]
+        ),
+        "agents_state": _demo_frame(
+            "agents_state", MATCH_STATE["agents_state"]
+        ),
+        "devices_state": _demo_frame(
+            "devices_state", MATCH_STATE["devices"]
+        ),
+        "agent_assignments": _demo_frame(
+            "agent_assignments", MATCH_STATE["agent_assignments"]
+        ),
+        "render_jobs": _demo_frame(
+            "render_jobs", list(MATCH_STATE["render_jobs"])
+        ),
+        "social_config": _demo_frame(
+            "social_config", MATCH_STATE["social_config"]
+        ),
+        "training_models": _demo_frame(
+            "training_models", MATCH_STATE["training_models"]
+        ),
+    }
+
+
+def _system_status_payload() -> dict:
+    """Real minimal system status (C6).
+
+    Only facts this process actually knows: it is up, its version, the
+    DEMO_MODE flag, the operator-set production modes and whether the
+    event bus is running. The fabricated health numbers are included
+    ONLY in DEMO_MODE, marked "source": "demo".
+    """
+    payload: dict = {
+        "status": "online",
+        "version": "2.0.0",
+        "demo_mode": DEMO_MODE,
+        "modes": MATCH_STATE["modes_state"],
+        "event_bus": "connected" if event_bus._running else "disconnected",
+    }
+    if DEMO_MODE:
+        payload["health"] = _demo_marked(MATCH_STATE["system_health"])
+    return payload
+
+
 DEVICES = [
     {"id": "gpu1", "name": "Node-GPU-1", "type": "RTX 4090", "load": 92, "status": "online", "task": "Vision CV Pipeline", "assigned_agent": "vision"},
     {"id": "gpu2", "name": "Node-GPU-2", "type": "RTX 3090", "load": 45, "status": "online", "task": "Highlight Rendering", "assigned_agent": "commentary"},
@@ -253,17 +337,37 @@ class ConnectionManager:
         await websocket.send_json({"type": "zone.tick", "data": zone_service.snapshot()})
         await websocket.send_json({"type": "rundown.state", "data": rundown_service.snapshot()})
         await websocket.send_json({"type": "pip.state", "data": pip_service.snapshot()})
-        await websocket.send_json({"type": "system_health", "data": MATCH_STATE["system_health"]})
-        await websocket.send_json({"type": "agents_state", "data": MATCH_STATE["agents_state"]})
+        # C6: the fabricated operator blocks (system_health, agents_state,
+        # devices, agent_assignments, render_jobs, social_config,
+        # training_models) are sent ONLY in DEMO_MODE, each marked
+        # "source": "demo". With DEMO_MODE off the frames are absent —
+        # no invented device loads, agent stats or health numbers.
+        _demo_frames = _demo_operator_frames()
+        if "system_health" in _demo_frames:
+            await websocket.send_json(_demo_frames["system_health"])
+        if "agents_state" in _demo_frames:
+            await websocket.send_json(_demo_frames["agents_state"])
         await websocket.send_json({"type": "modes_state", "data": MATCH_STATE["modes_state"]})
         # New state
-        await websocket.send_json({"type": "devices_state", "data": MATCH_STATE["devices"]})
-        await websocket.send_json({"type": "agent_assignments", "data": MATCH_STATE["agent_assignments"]})
-        await websocket.send_json({"type": "agent_logs", "data": list(MATCH_STATE["agent_logs"])[-100:]})
+        if "devices_state" in _demo_frames:
+            await websocket.send_json(_demo_frames["devices_state"])
+        if "agent_assignments" in _demo_frames:
+            await websocket.send_json(_demo_frames["agent_assignments"])
+        # Agent logs are written only by the DEMO_MODE chatter simulator,
+        # so in DEMO_MODE the frame carries the demo marker too.
+        if DEMO_MODE:
+            await websocket.send_json(
+                _demo_frame("agent_logs", list(MATCH_STATE["agent_logs"])[-100:])
+            )
+        else:
+            await websocket.send_json({"type": "agent_logs", "data": list(MATCH_STATE["agent_logs"])[-100:]})
         await websocket.send_json({"type": "scrim_state", "data": MATCH_STATE["scrim_state"]})
-        await websocket.send_json({"type": "render_jobs", "data": list(MATCH_STATE["render_jobs"])[-100:]})
-        await websocket.send_json({"type": "social_config", "data": MATCH_STATE["social_config"]})
-        await websocket.send_json({"type": "training_models", "data": MATCH_STATE["training_models"]})
+        if "render_jobs" in _demo_frames:
+            await websocket.send_json(_demo_frames["render_jobs"])
+        if "social_config" in _demo_frames:
+            await websocket.send_json(_demo_frames["social_config"])
+        if "training_models" in _demo_frames:
+            await websocket.send_json(_demo_frames["training_models"])
 
     def disconnect(self, websocket: WebSocket):
         if websocket in self.active_connections:
@@ -312,11 +416,37 @@ director_hold_task = None
 
 
 def _active_agent_count() -> int:
-    """Agents THIS process reports as running (same source as the Control
-    Room 'Agents' card). Pushed into the Redis node hash on every cluster
-    heartbeat so the cluster view shows per-node load."""
+    """Agents/services THIS process reports as running. Pushed into the
+    Redis node hash on every cluster heartbeat so the cluster view shows
+    per-node load.
+
+    C6: MATCH_STATE["agents_state"] is hardcoded demo data, so counting
+    it would publish fabricated load. In DEMO_MODE it is the demo count;
+    otherwise count the real lifespan services actually running on
+    app.state (live director, vision intelligence, multi-feed monitor,
+    observer pilot, live stats, replay queue, ISO recorder).
+    """
+    if DEMO_MODE:
+        try:
+            return sum(1 for a in MATCH_STATE.get("agents_state", []) if a.get("status") == "active")
+        except Exception:
+            return 0
     try:
-        return sum(1 for a in MATCH_STATE.get("agents_state", []) if a.get("status") == "active")
+        state = getattr(globals().get("app"), "state", None)
+        if state is None:
+            return 0
+        keys = (
+            "live_director",
+            "vision_intelligence",
+            "multi_feed_monitor",
+            "observer_pilot",
+            "live_stats",
+            "replay_queue",
+            "iso_recorder",
+            "director_learning",
+            "outcome_labeler",
+        )
+        return sum(1 for k in keys if getattr(state, k, None) is not None)
     except Exception:
         return 0
 
@@ -331,6 +461,38 @@ def _active_agent_count() -> int:
 # frames are dropped with an "unauthorized" ack — this closes revoke_key /
 # restart_node / stop_training / etc. to anonymous callers AND to viewers.
 # Passive subscriptions (state pushes, ping/pong) intentionally stay open.
+async def _action_ack(action, status: str, **extra) -> dict:
+    """Broadcast one action_ack frame and return its payload.
+
+    Contract (C6/H4): ``status`` is "success" ONLY when the action
+    actually happened; failures use "error" (or the pre-existing
+    "unauthorized") plus a human-readable ``message``/``reason``.
+    """
+    payload = {"action": action, "status": status, **extra}
+    await manager.broadcast({"type": "action_ack", "data": payload})
+    return payload
+
+
+async def _action_error(action, message: str, **extra) -> dict:
+    """Honest failure ack: the action did NOT happen, and here is why."""
+    return await _action_ack(
+        action, "error", message=message, reason=message, **extra
+    )
+
+
+_NO_SOCIAL_SERVICE = (
+    "No social publishing service is connected on this server, so nothing "
+    "was posted. Publishing integrations are not configured; this action "
+    "is not implemented."
+)
+
+_DEMO_ONLY_DEVICES = (
+    "No real device/node registry is connected on this server. The device "
+    "list is demo data and is only available with DEMO_MODE=1; nothing "
+    "was changed."
+)
+
+
 async def handle_action(data: dict, user: Optional[TokenPayload] = None):
     action = data.get("action")
 
@@ -367,44 +529,65 @@ async def handle_action(data: dict, user: Optional[TokenPayload] = None):
         device_id = data.get("device_id")
         team_id = data.get("team_id")
 
+        # C6: assignments target the demo device list. With DEMO_MODE off
+        # there is no real device registry, so there is nothing honest to
+        # assign to — refuse instead of mutating fabricated state.
+        if not DEMO_MODE:
+            return await _action_error("assign_agent", _DEMO_ONLY_DEVICES)
+        if not agent_id or not device_id:
+            return await _action_error(
+                "assign_agent", "Missing agent_id or device_id; nothing was assigned."
+            )
+
         device = next((d for d in MATCH_STATE["devices"] if d["id"] == device_id), None)
+        if device is None:
+            return await _action_error(
+                "assign_agent",
+                f"No device with id {device_id!r}; nothing was assigned.",
+            )
         # Phase 13: resolve the display name from the demo-gated team list —
         # None (honest unassigned) when DEMO_MODE is off.
         team = next((t for t in _live_teams() if t["id"] == team_id), None)
 
-        if agent_id and device:
-            MATCH_STATE["agent_assignments"][agent_id] = {
-                "device_id": device_id,
-                "device_name": device["name"],
-                "team_id": team_id,
-                "team_name": team["name"] if team else None,
-            }
-            # Update device's assigned agent
-            for d in MATCH_STATE["devices"]:
-                if d["id"] == device_id:
-                    d["assigned_agent"] = agent_id
-            
-            await manager.broadcast({"type": "agent_assignments", "data": MATCH_STATE["agent_assignments"]})
-            await manager.broadcast({"type": "devices_state", "data": MATCH_STATE["devices"]})
-            await manager.broadcast({
-                "type": "action_ack",
-                "data": {"action": "assign_agent", "status": "success", "agent_id": agent_id, "device": device["name"]}
-            })
+        MATCH_STATE["agent_assignments"][agent_id] = {
+            "device_id": device_id,
+            "device_name": device["name"],
+            "team_id": team_id,
+            "team_name": team["name"] if team else None,
+        }
+        # Update device's assigned agent
+        for d in MATCH_STATE["devices"]:
+            if d["id"] == device_id:
+                d["assigned_agent"] = agent_id
+
+        await manager.broadcast(_demo_frame("agent_assignments", MATCH_STATE["agent_assignments"]))
+        await manager.broadcast(_demo_frame("devices_state", MATCH_STATE["devices"]))
+        return await _action_ack(
+            "assign_agent", "success",
+            agent_id=agent_id, device=device["name"], source="demo",
+        )
 
     elif action == "lock_pov":
         team_id = data.get("team_id")
         team = next((t for t in _live_teams() if t["id"] == team_id), None)
-        if team:
-            decision = {
-                "action": "LOCK_POV",
-                "target_team": team_id,
-                "current_pov": team_id,
-                "reason": {"event_type": "manual_lock", "description": f"Director locked to {team['name']}"},
-                "timestamp": time.time()
-            }
-            MATCH_STATE["director_state"] = decision
-            await manager.broadcast({"type": "director_state", "data": decision})
-            await manager.broadcast({"type": "action_ack", "data": {"action": "lock_pov", "status": "success", "team": team["name"]}})
+        if not team:
+            return await _action_error(
+                "lock_pov",
+                f"Team {team_id!r} is not in the live team list "
+                "(DEMO_MODE is off or the id is unknown); POV was not locked.",
+            )
+        decision = {
+            "action": "LOCK_POV",
+            "target_team": team_id,
+            "current_pov": team_id,
+            "reason": {"event_type": "manual_lock", "description": f"Director locked to {team['name']}"},
+            "timestamp": time.time()
+        }
+        MATCH_STATE["director_state"] = decision
+        await manager.broadcast({"type": "director_state", "data": decision})
+        return await _action_ack(
+            "lock_pov", "success", team=team["name"]
+        )
 
     elif action == "start_scrim":
         lobby_id = f"LOBBY-{random.randint(1000, 9999)}"
@@ -419,87 +602,278 @@ async def handle_action(data: dict, user: Optional[TokenPayload] = None):
             "status": "lobby_open"
         }
         await manager.broadcast({"type": "scrim_state", "data": MATCH_STATE["scrim_state"]})
-        await manager.broadcast({"type": "action_ack", "data": {"action": "start_scrim", "status": "success", "lobby_id": lobby_id}})
+        return await _action_ack(
+            "start_scrim", "success", lobby_id=lobby_id
+        )
 
     elif action == "generate_recap":
+        # The recap "render job" is a simulation over demo state — there
+        # is no recap renderer wired to this action. DEMO_MODE only, and
+        # marked demo; otherwise an honest error.
+        if not DEMO_MODE:
+            return await _action_error(
+                "generate_recap",
+                "No recap render service is wired to this action. Recap "
+                "jobs are a DEMO_MODE simulation only; nothing was rendered.",
+            )
         fmt = data.get("format", "YouTube Shorts")
         job_id = str(uuid.uuid4())[:6]
         new_job = {"id": job_id, "title": f"Match 4 Recap — {fmt}", "status": "RENDERING", "progress": 0, "format": fmt}
         MATCH_STATE["render_jobs"].append(new_job)
-        await manager.broadcast({"type": "render_jobs", "data": list(MATCH_STATE["render_jobs"])})
-        await manager.broadcast({"type": "action_ack", "data": {"action": "generate_recap", "status": "success", "job_id": job_id}})
-        # Simulate progress
+        await manager.broadcast(_demo_frame("render_jobs", list(MATCH_STATE["render_jobs"])))
+        ack = await _action_ack(
+            "generate_recap", "success", job_id=job_id, source="demo"
+        )
+        # Simulate progress (demo only — see gate above)
         asyncio.create_task(simulate_render_progress(job_id))
+        return ack
 
     elif action == "restart_node":
+        if not DEMO_MODE:
+            return await _action_error("restart_node", _DEMO_ONLY_DEVICES)
         node_name = data.get("node")
+        node_id = data.get("node_id")
+        matched = None
         for d in MATCH_STATE["devices"]:
-            if d["name"] == node_name or d["id"] == data.get("node_id"):
+            if d["name"] == node_name or d["id"] == node_id:
                 d["status"] = "restarting"
-        await manager.broadcast({"type": "devices_state", "data": MATCH_STATE["devices"]})
-        asyncio.create_task(simulate_node_restart(node_name or data.get("node_id")))
+                matched = d
+        if matched is None:
+            return await _action_error(
+                "restart_node",
+                f"No device matching {node_name or node_id!r}; nothing was restarted.",
+            )
+        await manager.broadcast(_demo_frame("devices_state", MATCH_STATE["devices"]))
+        asyncio.create_task(simulate_node_restart(node_name or node_id))
+        return None
 
     elif action == "toggle_node":
+        if not DEMO_MODE:
+            return await _action_error("toggle_node", _DEMO_ONLY_DEVICES)
         node_id = data.get("node_id")
         for d in MATCH_STATE["devices"]:
             if d["id"] == node_id:
                 d["status"] = "offline" if d["status"] == "online" else "online"
-                await manager.broadcast({"type": "devices_state", "data": MATCH_STATE["devices"]})
-                await manager.broadcast({"type": "action_ack", "data": {"action": "toggle_node", "status": "success", "node": d["name"], "new_status": d["status"]}})
-                break
+                await manager.broadcast(_demo_frame("devices_state", MATCH_STATE["devices"]))
+                return await _action_ack(
+                    "toggle_node", "success",
+                    node=d["name"], new_status=d["status"], source="demo",
+                )
+        return await _action_error(
+            "toggle_node",
+            f"No device with id {node_id!r}; nothing was toggled.",
+        )
 
     elif action == "test_post":
         platform = data.get("plat", data.get("platform", "Unknown"))
-        await manager.broadcast({"type": "action_ack", "data": {"action": "test_post", "status": "success", "platform": platform}})
+        return await _action_error(
+            "test_post", _NO_SOCIAL_SERVICE, platform=platform
+        )
 
     elif action == "toggle_autopost":
+        if not DEMO_MODE:
+            return await _action_error(
+                "toggle_autopost",
+                "No social accounts are connected on this server. The "
+                "social config is demo data and is only available with "
+                "DEMO_MODE=1; nothing was changed.",
+            )
         platform = data.get("platform")
-        if platform and platform in MATCH_STATE["social_config"]:
-            current = MATCH_STATE["social_config"][platform]["auto_post"]
-            MATCH_STATE["social_config"][platform]["auto_post"] = not current
-            await manager.broadcast({"type": "social_config", "data": MATCH_STATE["social_config"]})
-            await manager.broadcast({"type": "action_ack", "data": {"action": "toggle_autopost", "platform": platform, "auto_post": not current}})
+        if not platform or platform not in MATCH_STATE["social_config"]:
+            return await _action_error(
+                "toggle_autopost",
+                f"Unknown social platform {platform!r}; nothing was changed.",
+            )
+        current = MATCH_STATE["social_config"][platform]["auto_post"]
+        MATCH_STATE["social_config"][platform]["auto_post"] = not current
+        await manager.broadcast(_demo_frame("social_config", MATCH_STATE["social_config"]))
+        return await _action_ack(
+            "toggle_autopost", "success",
+            platform=platform, auto_post=not current, source="demo",
+        )
 
     elif action == "upload_sponsor":
-        await manager.broadcast({"type": "action_ack", "data": {"action": "upload_sponsor", "status": "success", "file": "Sponsor_Asset.png"}})
+        # No sponsor-asset upload service exists and this WS frame carries
+        # no file data — never claim an upload happened.
+        return await _action_error(
+            "upload_sponsor",
+            "No sponsor upload service is wired to this action and no "
+            "file was received over this channel; nothing was uploaded.",
+        )
 
     elif action == "revoke_key":
-        new_key = f"sk_live_{''.join(random.choices('abcdefghijklmnopqrstuvwxyz0123456789', k=24))}"
-        await manager.broadcast({"type": "action_ack", "data": {"action": "revoke_key", "status": "success", "new_key": new_key}})
+        # H4 (critical): this handler used to broadcast a freshly invented
+        # "sk_live_…" key and claim success while revoking nothing. API
+        # keys here are a static allowlist (settings.ADMIN_API_KEYS) plus
+        # JWTs — there is no runtime revocation service. Honest error,
+        # and NEVER a fabricated key in any frame.
+        return await _action_error(
+            "revoke_key",
+            "API keys cannot be revoked at runtime on this server: keys "
+            "are the static ADMIN_API_KEYS allowlist (and JWTs expire on "
+            "their own). Remove the key from ADMIN_API_KEYS and restart "
+            "the server to revoke it. No key was revoked and no new key "
+            "was issued.",
+        )
 
     elif action == "stop_training":
+        if not DEMO_MODE:
+            return await _action_error(
+                "stop_training",
+                "No training jobs are managed by this server. The "
+                "training model list is demo data and is only available "
+                "with DEMO_MODE=1; nothing was stopped.",
+            )
         model_name = data.get("model")
+        matched = None
         for m in MATCH_STATE["training_models"]:
             if m["name"] == model_name:
                 m["status"] = "Stopped"
                 m["active"] = False
-        await manager.broadcast({"type": "training_models", "data": MATCH_STATE["training_models"]})
-        await manager.broadcast({"type": "action_ack", "data": {"action": "stop_training", "status": "success", "model": model_name}})
+                matched = m
+        if matched is None:
+            return await _action_error(
+                "stop_training",
+                f"No training model named {model_name!r}; nothing was stopped.",
+            )
+        await manager.broadcast(_demo_frame("training_models", MATCH_STATE["training_models"]))
+        return await _action_ack(
+            "stop_training", "success", model=model_name, source="demo"
+        )
 
     elif action == "post_now":
         platform = data.get("platform")
-        await manager.broadcast({"type": "action_ack", "data": {"action": "post_now", "status": "success", "platform": platform}})
+        return await _action_error(
+            "post_now", _NO_SOCIAL_SERVICE, platform=platform
+        )
 
     elif action == "create_tournament":
-        name = data.get("name", "New Tournament")
-        await manager.broadcast({"type": "action_ack", "data": {"action": "create_tournament", "status": "success", "name": name}})
+        # Wired to the real TournamentService (DB-backed, same service as
+        # POST /api/v1/tournament). Validation or DB failures are honest
+        # errors — a tournament is claimed only when a row was created.
+        name = data.get("name")
+        if not isinstance(name, str) or not name.strip():
+            return await _action_error(
+                "create_tournament",
+                "A non-empty tournament 'name' is required; nothing was created.",
+            )
+        try:
+            from fastapi import HTTPException
+
+            from app.api.v1.tournament.schemas import TournamentCreate
+            from app.api.v1.tournament.service import TournamentService
+
+            _allowed = {
+                "slug", "description", "status", "start_date", "end_date",
+                "total_matches", "points_per_kill", "placement_points",
+                "rules", "prize_pool", "organizer", "is_public",
+            }
+            payload_data = {k: data[k] for k in _allowed if k in data}
+            payload_data["name"] = name.strip()
+            payload = TournamentCreate(**payload_data)
+            async with get_db_context() as db:
+                created = await TournamentService(db).create_tournament(payload)
+        except HTTPException as e:
+            return await _action_error(
+                "create_tournament",
+                f"Tournament was not created: {e.detail}",
+            )
+        except Exception as e:
+            return await _action_error(
+                "create_tournament",
+                f"Tournament was not created: {e}",
+            )
+        return await _action_ack(
+            "create_tournament", "success",
+            name=created.name,
+            tournament=created.model_dump(mode="json"),
+        )
 
     elif action == "clip_highlight":
-        clip_id = data.get("clip_id")
-        await manager.broadcast({"type": "action_ack", "data": {"action": "clip_highlight", "status": "success", "clip_id": clip_id}})
+        # Wired to the real replay stack: render a video cut of a scored
+        # highlight moment from the replay buffer. Unknown moments and
+        # moments with no recorded source video are honest errors.
+        clip_id = data.get("clip_id") or data.get("moment_id")
+        if not clip_id:
+            return await _action_error(
+                "clip_highlight",
+                "Missing clip_id (a highlight moment_id); nothing was clipped.",
+            )
+        try:
+            record = await asyncio.to_thread(
+                replay_service.request_render, clip_id
+            )
+        except KeyError:
+            return await _action_error(
+                "clip_highlight",
+                f"No highlight moment with id {clip_id!r} in the current "
+                "replay buffer; nothing was clipped.",
+            )
+        except Exception as e:
+            return await _action_error(
+                "clip_highlight", f"Highlight clip failed: {e}"
+            )
+        if getattr(record, "status", None) in ("no_source", "failed", "error"):
+            return await _action_error(
+                "clip_highlight",
+                "No clip was produced: "
+                + (getattr(record, "error", None) or f"render status is {record.status!r} (no recorded source video for this moment)."),
+                clip_id=clip_id,
+            )
+        return await _action_ack(
+            "clip_highlight", "success",
+            clip_id=clip_id, render_status=getattr(record, "status", None),
+        )
 
     elif action == "generate_all_highlights":
-        await manager.broadcast({"type": "action_ack", "data": {"action": "generate_all_highlights", "status": "success"}})
+        # Real computation: the replay service scores the current replay
+        # buffer into a highlight reel. An empty buffer is an honest
+        # error (no qualifying events yet), never a fake success.
+        try:
+            highlights = replay_service.get_highlights(limit=50)
+        except Exception as e:
+            return await _action_error(
+                "generate_all_highlights", f"Highlight generation failed: {e}"
+            )
+        if not highlights:
+            return await _action_error(
+                "generate_all_highlights",
+                "No highlights were generated: the replay buffer has no "
+                "qualifying events yet. Highlights are computed from "
+                "recorded match events only and are never synthesised.",
+            )
+        extra = {"highlight_count": len(highlights)}
+        if DEMO_MODE:
+            extra["source"] = "demo"
+        return await _action_ack(
+            "generate_all_highlights", "success", **extra
+        )
 
     elif action == "toggle_broadcaster_seat":
         seat = data.get("seat")
-        await manager.broadcast({"type": "action_ack", "data": {"action": "toggle_broadcaster_seat", "status": "success", "seat": seat}})
+        return await _action_error(
+            "toggle_broadcaster_seat",
+            "No broadcaster-seat service exists on this server; seat "
+            "state is not managed here and nothing was toggled.",
+            seat=seat,
+        )
 
     elif action == "test_webhook":
-        await manager.broadcast({"type": "action_ack", "data": {"action": "test_webhook", "status": "success"}})
+        return await _action_error(
+            "test_webhook",
+            "No webhook is configured on this server and no webhook "
+            "delivery service is wired to this action; nothing was sent.",
+        )
+
+    else:
+        return await _action_error(
+            action,
+            f"Unknown action {action!r}; nothing was done.",
+        )
 
 async def simulate_render_progress(job_id: str):
-    """Simulate a render job progressing from 0 to 100%."""
+    """Simulate a render job progressing from 0 to 100% (DEMO_MODE only —
+    the sole caller, the generate_recap action, is demo-gated)."""
     for progress in range(5, 101, 5):
         await asyncio.sleep(0.5)
         for job in MATCH_STATE["render_jobs"]:
@@ -507,17 +881,18 @@ async def simulate_render_progress(job_id: str):
                 job["progress"] = progress
                 if progress >= 100:
                     job["status"] = "COMPLETED"
-        await manager.broadcast({"type": "render_jobs", "data": list(MATCH_STATE["render_jobs"])})
+        await manager.broadcast(_demo_frame("render_jobs", list(MATCH_STATE["render_jobs"])))
 
 async def simulate_node_restart(node_identifier: str):
-    """Simulate a node restarting and coming back online."""
+    """Simulate a node restarting and coming back online (DEMO_MODE only —
+    the sole caller, the restart_node action, is demo-gated)."""
     await asyncio.sleep(3)
     for d in MATCH_STATE["devices"]:
         if d["name"] == node_identifier or d["id"] == node_identifier:
             d["status"] = "online"
             d["load"] = random.randint(10, 30)
-    await manager.broadcast({"type": "devices_state", "data": MATCH_STATE["devices"]})
-    await manager.broadcast({"type": "action_ack", "data": {"action": "restart_node", "status": "success", "node": node_identifier}})
+    await manager.broadcast(_demo_frame("devices_state", MATCH_STATE["devices"]))
+    await manager.broadcast({"type": "action_ack", "data": {"action": "restart_node", "status": "success", "node": node_identifier, "source": "demo"}})
 
 # ==========================================
 # SIMULATOR TASK — Match Events
@@ -643,8 +1018,10 @@ async def match_simulator():
             
         await manager.broadcast({"type": "kill", "data": kill_event})
         await manager.broadcast({"type": "standings", "data": MATCH_STATE["teams"]})
-        await manager.broadcast({"type": "system_health", "data": MATCH_STATE["system_health"]})
-        await manager.broadcast({"type": "devices_state", "data": MATCH_STATE["devices"]})
+        # C6: simulator-only frames (this task runs only in DEMO_MODE)
+        # carry the demo marker.
+        await manager.broadcast(_demo_frame("system_health", MATCH_STATE["system_health"]))
+        await manager.broadcast(_demo_frame("devices_state", MATCH_STATE["devices"]))
         
         if event_bus._running:
             await event_bus.publish(
@@ -707,6 +1084,8 @@ async def agent_chatter_simulator():
             "to_id": to_id,
             "message": message,
             "level": log_type,
+            # Chatter is generated only by this DEMO_MODE simulator.
+            "source": "demo",
         }
         
         MATCH_STATE["agent_logs"].append(log_entry)
@@ -1533,12 +1912,14 @@ async def websocket_monitor(websocket: WebSocket):
 # ==========================================
 @app.get("/api/v1/system/status")
 async def get_system_status():
-    return JSONResponse({
-        "status": "online",
-        "health": MATCH_STATE["system_health"],
-        "modes": MATCH_STATE["modes_state"],
-        "event_bus": "connected" if event_bus._running else "disconnected",
-    })
+    # C6 BREAKING CHANGE: this endpoint used to serve the fabricated
+    # MATCH_STATE["system_health"] numbers to UNAUTHENTICATED callers.
+    # It now returns only real minimal health (status / version /
+    # demo_mode / operator modes / event-bus state). The fabricated
+    # "health" block is present ONLY in DEMO_MODE, marked
+    # "source": "demo". Known caller: frontend/app/broadcast/page.tsx
+    # reads only `modes`, which is unchanged.
+    return JSONResponse(_system_status_payload())
 
 @app.get("/api/v1/players/mvp")
 async def get_mvp():
@@ -1753,8 +2134,71 @@ async def switch_camera(request: Request, _user: TokenPayload = Depends(require_
     return JSONResponse({"status": "error", "message": "Missing team_id"}, status_code=400)
 
 @app.post("/api/v1/broadcast/replay")
-async def trigger_replay(_user: TokenPayload = Depends(require_admin)):
-    return JSONResponse({"status": "success", "message": "Replay triggered"})
+async def trigger_replay(request: Request, _user: TokenPayload = Depends(require_admin)):
+    """Trigger an EVENT replay through the real replay stack (H4).
+
+    This used to return "Replay triggered" while doing nothing. Now it
+    plays, via app/services/replay (replay_service.play_mark /
+    play_clip, which re-emit the segment as WS ``replay.play``):
+      * the mark named by ``mark_id`` in the JSON body, or
+      * the ``from_ts``/``to_ts`` epoch-second window in the body, or
+      * the most recent saved replay mark (the frontend's body-less
+        Replay button).
+    With no mark and no window there is nothing real to play: an honest
+    409 error, never a fake success.
+    """
+    body: dict = {}
+    try:
+        parsed = await request.json()
+        if isinstance(parsed, dict):
+            body = parsed
+    except Exception:
+        body = {}
+
+    mark_id = body.get("mark_id")
+    from_ts = body.get("from_ts")
+    to_ts = body.get("to_ts")
+    try:
+        if mark_id:
+            clip = await replay_service.play_mark(str(mark_id))
+        elif from_ts is not None and to_ts is not None:
+            clip = await replay_service.play_clip(float(from_ts), float(to_ts))
+        else:
+            marks = replay_service.list_marks()
+            if not marks:
+                return JSONResponse(
+                    {
+                        "status": "error",
+                        "message": (
+                            "No replay available: no saved replay marks exist "
+                            "yet and no time window was provided. Capture a "
+                            "mark first (POST /api/v1/replay/capture) — "
+                            "nothing was played."
+                        ),
+                    },
+                    status_code=409,
+                )
+            clip = await replay_service.play_mark(marks[0].id)
+    except KeyError:
+        return JSONResponse(
+            {
+                "status": "error",
+                "message": f"No replay mark with id {mark_id!r}; nothing was played.",
+            },
+            status_code=404,
+        )
+    except (TypeError, ValueError) as e:
+        return JSONResponse(
+            {"status": "error", "message": f"Invalid replay window: {e}"},
+            status_code=400,
+        )
+    return JSONResponse(
+        {
+            "status": "success",
+            "message": "Replay played",
+            "data": clip.model_dump(),
+        }
+    )
 
 @app.get("/api/v1/broadcast/status")
 async def get_broadcast_status():
@@ -1775,43 +2219,145 @@ async def get_latest_commentary():
 
 @app.get("/api/v1/highlights")
 async def get_highlights():
-    return JSONResponse({"data": []})
+    """Highlights from the real replay stack (H4).
+
+    This used to always return {"data": []}. It now serves
+    replay_service.get_highlights() — scored moments computed from the
+    replay buffer's recorded events. When the buffer has produced no
+    qualifying events the list is honestly empty and the payload says
+    why. Known caller: frontend/app/commentary/page.tsx (reads `data`).
+    In DEMO_MODE the buffer is fed by the demo simulator, so the block
+    is marked "source": "demo".
+    """
+    try:
+        highlights = replay_service.get_highlights(limit=50)
+    except Exception as e:
+        logger.warning("highlights unavailable", error=str(e))
+        return JSONResponse(
+            {
+                "data": [],
+                "source": "replay_buffer",
+                "detail": f"Highlights unavailable: {e}",
+            },
+            status_code=503,
+        )
+    payload: dict = {
+        "data": [h.model_dump() for h in highlights],
+        "source": "demo" if DEMO_MODE else "replay_buffer",
+    }
+    if not highlights:
+        payload["detail"] = (
+            "No highlights yet: the replay buffer has no qualifying "
+            "recorded events. Highlights are computed from real match "
+            "events only and are never synthesised."
+        )
+    return JSONResponse(payload)
 
 @app.get("/api/v1/admin/system")
 async def get_admin_system(_user: TokenPayload = Depends(require_admin)):
-    return JSONResponse({
-        "status": "online",
-        "health": MATCH_STATE["system_health"],
-        "modes": MATCH_STATE["modes_state"],
-        "event_bus": "connected" if event_bus._running else "disconnected",
-    })
+    # C6: same honest payload as /api/v1/system/status — the fabricated
+    # health block appears only in DEMO_MODE, marked "source": "demo".
+    return JSONResponse(_system_status_payload())
 
 @app.get("/api/v1/admin/agents")
 @app.get("/api/v1/agents")
 async def get_admin_agents(_user: TokenPayload = Depends(require_admin)):
-    return JSONResponse({"data": MATCH_STATE["agents_state"]})
+    # C6: agents_state is hardcoded demo data. DEMO_MODE off → honest
+    # empty (there is no real per-agent telemetry registry); on → the
+    # demo rows, each marked "source": "demo".
+    if not DEMO_MODE:
+        return JSONResponse({
+            "data": [],
+            "source": "none",
+            "detail": (
+                "No real agent telemetry is available: the agent list is "
+                "demo data and is only served with DEMO_MODE=1."
+            ),
+        })
+    return JSONResponse({
+        "data": _demo_marked(MATCH_STATE["agents_state"]),
+        "source": "demo",
+    })
 
 # --- NEW REST ENDPOINTS ---
 @app.get("/api/v1/devices")
 async def get_devices(_user: TokenPayload = Depends(require_admin)):
-    return JSONResponse({"data": MATCH_STATE["devices"]})
+    # C6: DEVICES is a hardcoded demo list. Same gating as agents above.
+    if not DEMO_MODE:
+        return JSONResponse({
+            "data": [],
+            "source": "none",
+            "detail": (
+                "No real device registry is connected: the device list "
+                "is demo data and is only served with DEMO_MODE=1."
+            ),
+        })
+    return JSONResponse({
+        "data": _demo_marked(MATCH_STATE["devices"]),
+        "source": "demo",
+    })
 
 @app.get("/api/v1/agent-assignments")
 async def get_agent_assignments(_user: TokenPayload = Depends(require_admin)):
-    return JSONResponse({"data": MATCH_STATE["agent_assignments"]})
+    # C6: assignments point at the demo device list, so they are served
+    # only in DEMO_MODE (marked demo); otherwise an honest empty map.
+    if not DEMO_MODE:
+        return JSONResponse({
+            "data": {},
+            "source": "none",
+            "detail": (
+                "Agent assignments target the demo device list and are "
+                "only served with DEMO_MODE=1."
+            ),
+        })
+    return JSONResponse({
+        "data": _demo_marked(MATCH_STATE["agent_assignments"]),
+        "source": "demo",
+    })
 
 @app.get("/api/v1/agent-logs")
 async def get_agent_logs(_user: TokenPayload = Depends(require_admin)):
-    return JSONResponse({"data": list(MATCH_STATE["agent_logs"])})
+    # Agent logs are written only by the DEMO_MODE chatter simulator;
+    # with DEMO_MODE off the buffer is empty (honest). In DEMO_MODE the
+    # block is marked demo.
+    payload: dict = {"data": list(MATCH_STATE["agent_logs"])}
+    if DEMO_MODE:
+        payload["source"] = "demo"
+    return JSONResponse(payload)
 
 @app.post("/api/v1/scrims/start")
 async def start_scrim(request: Request, _user: TokenPayload = Depends(require_admin)):
     data = await request.json()
-    await handle_action({"action": "start_scrim", **data}, user=_user)
+    ack = await handle_action({"action": "start_scrim", **data}, user=_user)
+    # H4: mirror the action's real outcome instead of unconditional
+    # success. start_scrim mutates scrim_state, so its ack is success;
+    # any error ack is surfaced as-is.
+    if ack and ack.get("status") != "success":
+        return JSONResponse(
+            {"status": "error", "message": ack.get("message", "Scrim was not started.")},
+            status_code=400,
+        )
     return JSONResponse({"status": "success", "scrim": MATCH_STATE["scrim_state"]})
 
 @app.post("/api/v1/content/generate-recap")
 async def generate_recap(request: Request, _user: TokenPayload = Depends(require_admin)):
     data = await request.json()
-    await handle_action({"action": "generate_recap", **data}, user=_user)
-    return JSONResponse({"status": "success", "jobs": list(MATCH_STATE["render_jobs"])})
+    ack = await handle_action({"action": "generate_recap", **data}, user=_user)
+    # H4: generate_recap is a DEMO_MODE-only simulation. With DEMO_MODE
+    # off the action errors and so does this endpoint (503) — it must
+    # not claim a render job exists.
+    if not ack or ack.get("status") != "success":
+        return JSONResponse(
+            {
+                "status": "error",
+                "message": (ack or {}).get(
+                    "message", "Recap was not generated."
+                ),
+            },
+            status_code=503,
+        )
+    return JSONResponse({
+        "status": "success",
+        "source": "demo",
+        "jobs": _demo_marked(list(MATCH_STATE["render_jobs"])),
+    })

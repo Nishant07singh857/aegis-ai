@@ -34,7 +34,9 @@ class HPBarInfo:
     armor_current: int = 100
     armor_max: int = 100
     armor_percentage: float = 100.0
-    armor_type: str = "level3"  # level1, level2, level3
+    # Honest default: no armor bar observed yet -> "unknown", NOT an
+    # invented "level3" classification (Integrity Fix Pack, H20).
+    armor_type: str = "unknown"  # level1, level2, level3, unknown
     
     # Boost
     boost_level: int = 0  # 0-3 bars
@@ -53,6 +55,12 @@ class HPBarInfo:
     
     # Detection confidence
     confidence: float = 0.0
+    # What the confidence number actually IS. For this detector it is
+    # the contour fill ratio (mask pixels / bbox area) of the detected
+    # bar — an evidence quantity measured on this frame, NOT a
+    # calibrated probability (this detector was never in the Phase 23
+    # measurement programme; H20).
+    confidence_basis: str = "contour_fill_ratio"
     timestamp: float = field(default_factory=time.time)
 
 
@@ -79,26 +87,53 @@ class HPBarDetector(BaseDetector):
             x=0.02, y=0.15, width=0.08, height=0.60
         )
         
-        # HP color ranges (BGR)
+        # HP color ranges — HSV (OpenCV H: 0-179, S/V: 0-255).
+        #
+        # H20 BUG FIX: these ranges were previously defined as BGR
+        # triples but applied via cv2.inRange to an HSV-converted
+        # image, so a pure-green (full HP) bar matched NOTHING and a
+        # dark-red bar matched nothing either. The hue bands below are
+        # the BGR->HSV conversions of the original endpoint colours
+        # (green (0,255,0)->H60, yellow (0,255,255)->H30,
+        # red (0,0,255)->H0, dark red (0,0,150)->H0/V150), with
+        # saturation/value floors widened so dim/dull bars still read
+        # (cf. the dark-bar runtime end-to-end case, BGR (0,50,50) ->
+        # HSV (30,255,50)). Red hues wrap around H=0/179; the wrap
+        # halves for "low"/"critical" live in _hp_hue_wrap below.
+        # "low" vs "critical" are split on value (bright vs dark red).
         self.hp_colors = {
-            "full": ((0, 200, 0), (50, 255, 50)),      # Green
-            "medium": ((0, 200, 200), (50, 255, 255)),  # Yellow
-            "low": ((0, 0, 200), (50, 50, 255)),        # Red
-            "critical": ((0, 0, 150), (30, 30, 200)),   # Dark red
+            "full": ((35, 80, 50), (85, 255, 255)),       # Green
+            "medium": ((20, 80, 50), (34, 255, 255)),     # Yellow
+            "low": ((0, 80, 181), (10, 255, 255)),       # Bright red
+            "critical": ((0, 80, 50), (10, 255, 180)),   # Dark red
         }
-        
-        # Armor color ranges
+        # Red hue wrap-around halves (H near 179), same S/V splits.
+        self._hp_hue_wrap = {
+            "low": ((170, 80, 181), (179, 255, 255)),
+            "critical": ((170, 80, 50), (179, 255, 180)),
+        }
+        # Representative BGR colours for each HP class (display only —
+        # hp_bar_color is a BGR triple everywhere it is consumed).
+        self.hp_display_colors = {
+            "full": (0, 255, 0),
+            "medium": (0, 255, 255),
+            "low": (0, 0, 255),
+            "critical": (0, 0, 150),
+        }
+
+        # Armor color ranges — HSV (same BGR-on-HSV bug as hp_colors:
+        # gold (0,200,255)BGR -> H24, purple -> H~150, gray = low S).
         self.armor_colors = {
-            "level3": ((200, 150, 0), (255, 200, 50)),   # Gold/Yellow
-            "level2": ((150, 100, 150), (200, 150, 200)), # Purple
-            "level1": ((100, 100, 100), (180, 180, 180)), # Gray
+            "level3": ((18, 100, 100), (35, 255, 255)),   # Gold/Yellow
+            "level2": ((135, 60, 80), (165, 255, 255)),   # Purple
+            "level1": ((0, 0, 90), (179, 60, 200)),       # Gray
         }
-        
-        # Boost bar colors (orange/yellow)
-        self.boost_color = ((0, 150, 200), (50, 200, 255))
-        
-        # Knock indicators (red overlay)
-        self.knock_color = ((0, 0, 180), (30, 30, 255))
+
+        # Boost bar colors (orange/yellow) — HSV (orange -> H~21)
+        self.boost_color = ((10, 120, 120), (30, 255, 255))
+
+        # Knock indicators (red overlay) — HSV
+        self.knock_color = ((0, 120, 120), (10, 255, 255))
         
         self._log = logger.bind(detector=self.name)
     
@@ -160,6 +195,7 @@ class HPBarDetector(BaseDetector):
                         "boost": info.boost_level,
                         "is_knocked": info.is_knocked,
                         "confidence": round(info.confidence, 3),
+                        "confidence_basis": info.confidence_basis,
                     }
                     for info in hp_infos
                 ],
@@ -188,13 +224,23 @@ class HPBarDetector(BaseDetector):
             # Convert to HSV for better color detection
             hsv = cv2.cvtColor(region, cv2.COLOR_BGR2HSV)
             
-            # Detect green bars (full HP)
+            # Detect bars per HP colour class (HSV ranges — see __init__)
             for color_name, (lower, upper) in self.hp_colors.items():
                 lower = np.array(lower, dtype=np.uint8)
                 upper = np.array(upper, dtype=np.uint8)
-                
+
                 mask = cv2.inRange(hsv, lower, upper)
-                
+
+                # Red hues wrap around H=0/179: OR in the wrap half.
+                wrap = self._hp_hue_wrap.get(color_name)
+                if wrap is not None:
+                    wrap_mask = cv2.inRange(
+                        hsv,
+                        np.array(wrap[0], dtype=np.uint8),
+                        np.array(wrap[1], dtype=np.uint8),
+                    )
+                    mask = cv2.bitwise_or(mask, wrap_mask)
+
                 # Find contours
                 contours, _ = cv2.findContours(
                     mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
@@ -216,22 +262,29 @@ class HPBarDetector(BaseDetector):
                     # Full HP bar is typically ~200px wide
                     hp_pct = min(100, (bw / 200) * 100)
                     hp_current = int(hp_pct)
-                    
+
+                    # Confidence is DERIVED from evidence on this frame:
+                    # the fraction of the bounding box actually filled by
+                    # bar-coloured pixels (a solid bar ~= 1.0, a fragmented
+                    # colour smear much less). It is a fill ratio, not a
+                    # calibrated probability — see HPBarInfo.confidence_basis.
+                    bar_roi = mask[y:y + bh, x:x + bw]
+                    fill_ratio = (
+                        float(cv2.countNonZero(bar_roi)) / float(bw * bh)
+                        if bw > 0 and bh > 0 else 0.0
+                    )
+
                     info = HPBarInfo(
                         player_name=f"Player_{len(hp_infos)+1}",
                         hp_current=hp_current,
                         hp_percentage=hp_pct,
                         hp_bar_width_px=bw,
-                        hp_bar_color=(
-                            self.hp_colors[color_name][0][0],
-                            self.hp_colors[color_name][0][1],
-                            self.hp_colors[color_name][0][2],
-                        ),
+                        hp_bar_color=self.hp_display_colors[color_name],
                         bar_x=offset_x + x,
                         bar_y=offset_y + y,
                         bar_width=bw,
                         bar_height=bh,
-                        confidence=0.7,
+                        confidence=round(fill_ratio, 3),
                     )
                     
                     # Check if HP is critical
