@@ -22,6 +22,19 @@ input exists for a team the result is exactly
 The multiplier is applied by the caller as ``score = base * W`` over
 the fight-signal base only (see config.py for the bound argument).
 This module never sees or produces a camera decision.
+
+Phase 31 (audit item 3): the championship close-gap uplift. The caller
+computes the #1–#2 points gap from the standings table BEFORE scoring
+(:func:`championship_gap_from_standings`) and passes it in; when the
+gap is at most 5 points BOTH top-2 teams (rank 1 and rank 2 only) get
++0.05 inside W. The spec's 2x multiplier is REJECTED — it cannot fit
+the 1.35 cap — and no "drop everything" override exists anywhere here:
+a championship-fight challenger takes the director's existing
+clutch-challenger margin path (margin 5 in service.py), never a
+bypass. The uplift lives in config-independent module constants
+because LiveDirectorConfig is owned outside this worker's files;
+a future move of these two numbers into config.py changes no
+behaviour as long as the values stay 5.0 / 0.05.
 """
 
 from __future__ import annotations
@@ -30,11 +43,79 @@ from typing import Any, Dict, List, Optional, Sequence
 
 from .config import LiveDirectorConfig
 
+#: Championship close-gap threshold (points). Gap <= this value counts
+#: as a close championship race. Design choice from the audit's
+#: adapted item 3 — NOT a measured number.
+CHAMPIONSHIP_GAP_MAX_POINTS = 5.0
+#: Uplift inside W for each top-2 team when the gap is close. The
+#: spec's 2x is rejected: this small additive uplift respects the
+#: 1.35 cap and the base-0 => score-0 rule.
+CHAMPIONSHIP_GAP_UPLIFT = 0.05
+
+
+def _coerce_rank(value: Any) -> Optional[int]:
+    """A standings rank as an int, or None when it is not one."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    if isinstance(value, str):
+        text = value.strip()
+        if text.lstrip("-").isdigit():
+            return int(text)
+    return None
+
+
+def _coerce_points(value: Any) -> Optional[float]:
+    """A standings points total as a float, or None when it is not one."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            return float(value.strip())
+        except ValueError:
+            return None
+    return None
+
+
+def championship_gap_from_standings(
+    rows: Optional[Sequence[Dict[str, Any]]],
+) -> Optional[float]:
+    """The #1–#2 points gap from a standings table, or None.
+
+    Needs a row with rank 1 AND a row with rank 2, each carrying a
+    numeric ``total_points``. Any missing leg -> None (missing input
+    -> no output, never an estimated gap). The gap is the absolute
+    difference, so a mis-ordered table still yields its true gap
+    rather than a negative one.
+    """
+    if not rows:
+        return None
+    points_by_rank: Dict[int, float] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        rank = _coerce_rank(row.get("rank"))
+        if rank not in (1, 2) or rank in points_by_rank:
+            continue
+        points = _coerce_points(row.get("total_points"))
+        if points is None:
+            continue
+        points_by_rank[rank] = points
+    if 1 not in points_by_rank or 2 not in points_by_rank:
+        return None
+    return abs(points_by_rank[1] - points_by_rank[2])
+
 
 def compute_storyline(
     team_id: str,
     *,
     standings_row: Optional[Dict[str, Any]] = None,
+    championship_gap_points: Optional[float] = None,
     on_match_point: bool = False,
     recent_finishes: int = 0,
     narrative_flags: Sequence[str] = (),
@@ -76,6 +157,31 @@ def compute_storyline(
                 {"factor": rank_factor, "detail": detail, "uplift": rank_uplift}
             )
             uplift += rank_uplift
+
+    # ── championship close gap (Phase 31, audit item 3) ──────────
+    # Rank 1 or 2 only, gap <= 5 pts only. The gap itself must come
+    # from the caller (championship_gap_from_standings over the same
+    # table the rank came from); this module never recomputes a
+    # table it was not given. Rank 3+ never gets this uplift, and a
+    # missing gap contributes nothing.
+    if (
+        standings_row is not None
+        and isinstance(standings_row.get("rank"), int)
+        and standings_row.get("rank") in (1, 2)
+        and championship_gap_points is not None
+        and championship_gap_points <= CHAMPIONSHIP_GAP_MAX_POINTS
+    ):
+        factors.append(
+            {
+                "factor": "championship_close_gap",
+                "detail": (
+                    f"#1-#2 gap {championship_gap_points:g} pts "
+                    f"(<= {CHAMPIONSHIP_GAP_MAX_POINTS:g})"
+                ),
+                "uplift": CHAMPIONSHIP_GAP_UPLIFT,
+            }
+        )
+        uplift += CHAMPIONSHIP_GAP_UPLIFT
 
     # ── match point / Smash ──────────────────────────────────────
     if on_match_point:

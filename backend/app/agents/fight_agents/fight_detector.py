@@ -58,6 +58,130 @@ class FightSignal(str, Enum):
     ALIVE_DELTA = "alive_delta"
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# PHASE 31B — CLUTCH DERIVATION (pure helpers)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#
+# The live FightDetector path NEVER set is_clutch (its clutch check in
+# _determine_fight_type was literally ``pass``), so the director's
+# clutch mechanism (+25, margin 5, CLUTCH state) was dormant. The
+# derivation below is the producer, built from spectator-observable
+# signals ONLY:
+#
+# * team alive count — but strictly ALIVE-only. VI's combined
+#   alive_count (vision_intelligence/service.py _on_team_status:
+#   ``alive`` + ``knocked`` slots) is NOT an input here: a team whose
+#   sole remaining player is KNOCKED would read as "1" on the combined
+#   count, and a knocked player cannot fight a clutch. Callers must
+#   pass per-slot statuses (note_team_roster) or an attested ALIVE-only
+#   count (note_team_alive). Unknown slots fail CLOSED: an unread slot
+#   means the exact alive count is unproven, so no clutch fires.
+# * nearest-enemy distance — MINIMAP PIXELS ONLY. The audit's "40m"
+#   stays px: metres are accepted only with a calibrated
+#   AEGIS_VISION_MINIMAP_PX_PER_METER scale, and metres WITHOUT a scale
+#   are dropped (stored as unknown), never converted on a guess.
+#
+# False-positive discipline is the whole point: is_clutch is True ONLY
+# when the exact ALIVE count is 1 AND (the team is in an active fight
+# OR a near enemy is observed). A solo player NOT in a fight and NOT
+# near an enemy is just surviving, not clutching. 2vN, full-team and
+# unknown-count cases can never fire — see the adversarial tests.
+#
+# The flag is LIVE-RECOMPUTED, not sticky: if a teammate revives (alive
+# 1 -> 2) the detector clears is_clutch on the next recompute. Caveat
+# for the director consumer (service.py _on_fight_detected ORs
+# is_clutch): the director keeps a promotion-time True even if the
+# detector later clears it — that OR lives in service.py, not here.
+
+#: Minimap-pixel proximity at/below which a lone survivor counts as
+#: "near an enemy" (route B). Same 60px as the director's
+#: precombat_proximity_threshold_px — one shared pixel language, not
+#: two thresholds that can drift apart.
+CLUTCH_NEAREST_ENEMY_PX = 60.0
+
+#: Basis strings recorded on DetectedFight.clutch_basis (debugging /
+#: decision-log honesty — never a score input).
+CLUTCH_BASIS_IN_FIGHT = "lone_survivor_in_fight"
+CLUTCH_BASIS_NEAR_ENEMY = "lone_survivor_near_enemy_px"
+
+
+def _exact_int(value: Any) -> Optional[int]:
+    """int(value) for exact ints / integral floats, else None.
+
+    bool is rejected (True is not "1 alive"), non-integral floats and
+    non-numeric values are rejected — a guessed count is worse than
+    an unknown one.
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    return None
+
+
+def parse_nearest_enemy_px(
+    distance_px: Any = None,
+    distance_m: Any = None,
+    px_per_meter: Any = None,
+) -> Optional[float]:
+    """Normalise a nearest-enemy reading to minimap pixels or None.
+
+    Pixels win when valid (>= 0, finite). Metres convert ONLY with a
+    positive calibrated scale; metres without a scale return None —
+    the distance is unknown in px, never estimated. Invalid/negative
+    readings also return None (absent evidence, never a guess).
+    """
+    if isinstance(distance_px, (int, float)) and not isinstance(
+        distance_px, bool
+    ):
+        px = float(distance_px)
+        if math.isfinite(px) and px >= 0:
+            return px
+    if (
+        isinstance(distance_m, (int, float))
+        and not isinstance(distance_m, bool)
+        and isinstance(px_per_meter, (int, float))
+        and not isinstance(px_per_meter, bool)
+    ):
+        metres = float(distance_m)
+        scale = float(px_per_meter)
+        if math.isfinite(metres) and metres >= 0 and math.isfinite(scale) and scale > 0:
+            return metres * scale
+    return None
+
+
+def evaluate_clutch(
+    alive_exact: Any,
+    fight_active: bool,
+    nearest_enemy_px: Optional[float] = None,
+    threshold_px: float = CLUTCH_NEAREST_ENEMY_PX,
+) -> tuple:
+    """Pure clutch verdict: (is_clutch, basis_or_None).
+
+    ``alive_exact`` must be EXACTLY 1 (ALIVE-only, no UNKNOWN slots) —
+    every other value (0, 2+, None, non-integral) returns False on
+    both routes. Route A: in an active fight. Route B (only when NOT
+    in a fight): a nearest enemy at/below ``threshold_px``. Proximity
+    never VETOES route A: a lone survivor in a fight is clutch even
+    when the enemy distance is unobserved or far — distance unknown
+    is not disproof of a fight the detector already promoted.
+    """
+    if _exact_int(alive_exact) != 1:
+        return False, None
+    if fight_active:
+        return True, CLUTCH_BASIS_IN_FIGHT
+    if (
+        nearest_enemy_px is not None
+        and isinstance(threshold_px, (int, float))
+        and not isinstance(threshold_px, bool)
+        and math.isfinite(float(threshold_px))
+        and float(nearest_enemy_px) <= float(threshold_px)
+    ):
+        return True, CLUTCH_BASIS_NEAR_ENEMY
+    return False, None
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # DATA MODELS
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -293,6 +417,11 @@ class DetectedFight:
     predicted_winner: Optional[str] = None
     predicted_duration: float = 0.0
     is_clutch: bool = False
+    # Phase 31B: which team is the lone survivor + why (None when the
+    # fight is not currently a clutch — the flag is live-recomputed,
+    # see the module-level clutch note, not sticky).
+    clutch_team_id: Optional[str] = None
+    clutch_basis: Optional[str] = None
     
     def get_duration(self) -> float:
         """Get fight duration in seconds"""
@@ -331,6 +460,16 @@ class FightDetector(BaseAgent):
         # event-bus I/O (Redis down => publish is a no-op, never raises).
         self._pending_fight_events: List[Dict[str, Any]] = []
 
+        # Phase 31B — clutch inputs (spectator-observable only).
+        # _team_alive_exact: team_id -> EXACT ALIVE-only count, or None
+        # when unknown (never proven). Deliberately NOT fed by
+        # process_squad_size_delta: that signal's count is VI's combined
+        # alive+knocked count, which would false-flag a knocked-only
+        # team as a lone survivor. _team_nearest_enemy_px: team_id ->
+        # minimap pixels, or None when unknown / uncalibrated-metres.
+        self._team_alive_exact: Dict[str, Optional[int]] = {}
+        self._team_nearest_enemy_px: Dict[str, Optional[float]] = {}
+
         # Detection thresholds
         self.thresholds = {
             "hp_drop_min_damage": 20,        # Minimum HP lost inside the velocity window
@@ -344,6 +483,9 @@ class FightDetector(BaseAgent):
             "stalemate_timeout": 30.0,        # Time before stalemate
             "resolution_inactivity": 8.0,      # Inactivity before fight resolved
             "min_fight_duration": 2.0,         # Minimum fight duration
+            # Phase 31B: minimap-pixel proximity for the clutch
+            # near-enemy route (evaluate_clutch route B). Pixels only.
+            "clutch_nearest_enemy_px": CLUTCH_NEAREST_ENEMY_PX,
         }
         
         # Signal weights for confidence calculation
@@ -632,6 +774,163 @@ class FightDetector(BaseAgent):
         return self.process_signal(signal)
     
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    # PHASE 31B — CLUTCH INPUTS & RECOMPUTE
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+    def note_team_roster(
+        self, team_id: str, statuses: Any
+    ) -> None:
+        """Record a team's per-slot statuses for clutch derivation.
+
+        ``statuses`` is the spectator team-status reader's slot list
+        (``"alive"`` / ``"knocked"`` / ``"dead"`` / ``"unknown"``, any
+        case). Only ALIVE slots count. ANY slot outside the known
+        three (including ``"unknown"``) makes the exact count
+        unprovable, so the stored count becomes None (fail-closed) —
+        a roster of [alive, dead, dead, unknown] is NOT a lone
+        survivor. An empty/unreadable roster also stores None.
+        Recomputes clutch for every active fight involving the team.
+        """
+        if not team_id:
+            return
+        try:
+            raw = list(statuses)
+        except TypeError:
+            return
+        normalised = [str(s).strip().lower() for s in raw]
+        known = {"alive", "knocked", "dead"}
+        if not normalised or any(s not in known for s in normalised):
+            self._team_alive_exact[str(team_id)] = None
+        else:
+            self._team_alive_exact[str(team_id)] = sum(
+                1 for s in normalised if s == "alive"
+            )
+        self._refresh_clutch_for_team(str(team_id))
+
+    def note_team_alive(self, team_id: str, alive_count: Any) -> None:
+        """Record an attested EXACT ALIVE-only count for a team.
+
+        The caller guarantees this counts ALIVE players only — VI's
+        combined alive+knocked count must NEVER be passed here (see
+        the module-level clutch note). ``None`` withdraws knowledge
+        (unknown). Invalid values (bool, negative, non-integral) are
+        ignored and previous knowledge is kept.
+        Recomputes clutch for every active fight involving the team.
+        """
+        if not team_id:
+            return
+        if alive_count is None:
+            self._team_alive_exact[str(team_id)] = None
+            self._refresh_clutch_for_team(str(team_id))
+            return
+        exact = _exact_int(alive_count)
+        if exact is None or exact < 0:
+            return
+        self._team_alive_exact[str(team_id)] = exact
+        self._refresh_clutch_for_team(str(team_id))
+
+    def note_nearest_enemy(
+        self,
+        team_id: str,
+        distance_px: Any = None,
+        distance_m: Any = None,
+        px_per_meter: Any = None,
+    ) -> None:
+        """Record a team's nearest-enemy distance (pixels, honestly).
+
+        See :func:`parse_nearest_enemy_px`: pixels win, metres convert
+        only with a positive calibrated scale, metres without a scale
+        are stored as unknown (None). Recomputes clutch for every
+        active fight involving the team.
+        """
+        if not team_id:
+            return
+        self._team_nearest_enemy_px[str(team_id)] = parse_nearest_enemy_px(
+            distance_px, distance_m, px_per_meter
+        )
+        self._refresh_clutch_for_team(str(team_id))
+
+    def evaluate_team_clutch(
+        self, team_id: str, *, fight_active: bool
+    ) -> tuple:
+        """(is_clutch, basis_or_None) for one team from stored inputs."""
+        alive = self._team_alive_exact.get(str(team_id))
+        nearest = self._team_nearest_enemy_px.get(str(team_id))
+        threshold = self.thresholds.get(
+            "clutch_nearest_enemy_px", CLUTCH_NEAREST_ENEMY_PX
+        )
+        return evaluate_clutch(
+            alive,
+            bool(fight_active),
+            nearest_enemy_px=nearest,
+            threshold_px=threshold,
+        )
+
+    def _refresh_clutch_for_team(self, team_id: str) -> None:
+        """Recompute clutch on every active fight involving ``team_id``."""
+        for fight in list(self.detection_state.active_fights.values()):
+            if team_id in fight.teams_involved:
+                self._recompute_fight_clutch(fight, publish_update=True)
+
+    def _recompute_fight_clutch(
+        self, fight: DetectedFight, *, publish_update: bool = False
+    ) -> bool:
+        """Live-recompute one fight's clutch flag from stored inputs.
+
+        Deterministic: involved teams in sorted order, first team
+        qualifying wins. When the flag transitions False -> True and
+        ``publish_update`` is set, a ``fight.detected`` update event
+        (same fight_id) is queued so LiveDirector — which ORs
+        is_clutch on receipt — learns of a fight that BECAME a clutch
+        mid-fight. Promotion passes publish_update=False because it
+        queues its own event right after. A True -> False transition
+        publishes nothing: the director's OR keeps promotion-time
+        True, a known consumer-side stickiness documented in
+        live_director/payoff.py's hook note.
+        """
+        previous = fight.is_clutch
+        found = None
+        for team_id in sorted(fight.teams_involved):
+            ok, basis = self.evaluate_team_clutch(team_id, fight_active=True)
+            if ok:
+                found = (team_id, basis)
+                break
+        if found is not None:
+            fight.is_clutch = True
+            fight.clutch_team_id, fight.clutch_basis = found
+        else:
+            fight.is_clutch = False
+            fight.clutch_team_id = None
+            fight.clutch_basis = None
+        if publish_update and not previous and fight.is_clutch:
+            self._queue_fight_event(fight)
+        return fight.is_clutch
+
+    def _queue_fight_event(self, fight: DetectedFight) -> None:
+        """Queue the ``fight.detected`` payload LiveDirector consumes.
+
+        This is the real payload service.py reads ``data.get(
+        "is_clutch")`` from — so is_clutch / clutch_team_id /
+        clutch_basis ride on it, not on a side channel.
+        """
+        self._pending_fight_events.append(
+            {
+                "fight_id": fight.fight_id,
+                "teams_involved": sorted(fight.teams_involved),
+                "intensity": round(fight.current_intensity, 1),
+                "fight_type": fight.fight_type.value,
+                "location": {
+                    "x": round(fight.location_x, 1),
+                    "y": round(fight.location_y, 1),
+                },
+                "match_id": self.config.match_id,
+                "is_clutch": bool(fight.is_clutch),
+                "clutch_team_id": fight.clutch_team_id,
+                "clutch_basis": fight.clutch_basis,
+            }
+        )
+
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     # FIGHT MANAGEMENT
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     
@@ -819,6 +1118,12 @@ class FightDetector(BaseAgent):
         
         self.detection_state.active_fights[active_fight_id] = active_fight
         self.detection_state.total_fights_detected += 1
+
+        # Phase 31B: derive clutch BEFORE the event is queued, so the
+        # fight.detected payload LiveDirector consumes carries the
+        # real flag (promotion-time roster knowledge only — later
+        # transitions re-publish via _recompute_fight_clutch).
+        self._recompute_fight_clutch(active_fight, publish_update=False)
         
         # Set cooldowns
         for team_id in potential.teams_involved:
@@ -840,19 +1145,9 @@ class FightDetector(BaseAgent):
         )
 
         # Queue the chain event; tick() flushes it to the bus.
-        self._pending_fight_events.append(
-            {
-                "fight_id": active_fight_id,
-                "teams_involved": sorted(active_fight.teams_involved),
-                "intensity": round(active_fight.current_intensity, 1),
-                "fight_type": fight_type.value,
-                "location": {
-                    "x": round(active_fight.location_x, 1),
-                    "y": round(active_fight.location_y, 1),
-                },
-                "match_id": self.config.match_id,
-            }
-        )
+        # (Phase 31B: _queue_fight_event carries is_clutch — the field
+        # LiveDirector reads — plus clutch team/basis.)
+        self._queue_fight_event(active_fight)
 
         return active_fight_id
 
@@ -873,13 +1168,14 @@ class FightDetector(BaseAgent):
     
     def _determine_fight_type(self, fight: PotentialFight) -> FightType:
         """Determine the type of fight"""
-        
-        # Check for clutch situation
-        if fight.knocks > 0 and len(fight.teams_involved) >= 2:
-            # If one team has taken significant damage
-            pass
-        
-        # Check utility usage
+
+        # Phase 31B note: the old code had a "clutch situation" check
+        # here that was literally ``pass`` — it could never fire
+        # because a PotentialFight carries no per-team alive counts.
+        # Clutch is NOT a fight_type derivation: it is the is_clutch
+        # flag derived from roster inputs at promotion/update time
+        # (_recompute_fight_clutch). The tactical type below is
+        # unchanged by clutch status.
         if fight.utility_used >= 3:
             return FightType.UTILITY_FIGHT
         
@@ -968,10 +1264,16 @@ class FightDetector(BaseAgent):
         
         # Update peak intensity
         fight.peak_intensity = max(fight.peak_intensity, fight.current_intensity)
-        
+
         # Update phase
         self._update_fight_phase(fight)
-        
+
+        # Phase 31B: roster knowledge may have changed since promotion
+        # (teammates dying mid-fight) — recompute clutch live. A
+        # False -> True transition queues a fight.detected update so
+        # LiveDirector learns the fight became a clutch.
+        self._recompute_fight_clutch(fight, publish_update=True)
+
         # Track players
         player_id = data.get("player_id")
         team_id = data.get("team_id")
@@ -1058,6 +1360,8 @@ class FightDetector(BaseAgent):
                 "resolved": time.time(),
             },
             "is_clutch": fight.is_clutch,
+            "clutch_team_id": fight.clutch_team_id,
+            "clutch_basis": fight.clutch_basis,
         }
         
         self._log.warning(
@@ -1128,6 +1432,8 @@ class FightDetector(BaseAgent):
                 "total_knocks": f.total_knocks,
                 "location": (round(f.location_x, 1), round(f.location_y, 1)),
                 "is_clutch": f.is_clutch,
+                "clutch_team_id": f.clutch_team_id,
+                "clutch_basis": f.clutch_basis,
             }
             for f in self.detection_state.active_fights.values()
         ]
@@ -1161,6 +1467,8 @@ class FightDetector(BaseAgent):
             "zone_phase": fight.zone_phase,
             "players": len(fight.players_involved),
             "is_clutch": fight.is_clutch,
+            "clutch_team_id": fight.clutch_team_id,
+            "clutch_basis": fight.clutch_basis,
             "predicted_winner": fight.predicted_winner,
         }
     
@@ -1202,6 +1510,8 @@ class FightDetector(BaseAgent):
         self.detection_state = FightDetectionState()
         self.hp_velocity.clear()
         self._pending_fight_events.clear()
+        self._team_alive_exact.clear()
+        self._team_nearest_enemy_px.clear()
         self._log.info("Fight detector reset")
 
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

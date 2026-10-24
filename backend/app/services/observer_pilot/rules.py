@@ -25,7 +25,7 @@ exists it is used and the fallback is dead code. The fallback is
 removed at final integration if it ever diverges — the contract in
 ``types.py`` wins for the input types.
 
-Rule order (first match wins) — R0, R1, R4, R2, R3, R5
+Rule order (first match wins) — R0, R1, R3b, R4, R2, R3, R5
 ------------------------------------------------------
 The brief's natural listing is R0–R5, but evaluation order differs in
 one place, deliberately:
@@ -36,6 +36,14 @@ one place, deliberately:
 * R1 SPECTATED_DEAD before the fight lock: a dead player's camera is
   useless even mid-fight, and this is the ONLY rule that bypasses the
   dwell gate.
+* R3b SOLO_LOCK (Phase 31B) after R1, before R4: the spectated player
+  is the team's lone survivor in an active fight — the camera locks
+  on them until the fight ends or they die. It precedes R4 because it
+  is the more specific lock (it also holds a lone survivor who is
+  repositioning without a fresh personal fight signal, whom R4 alone
+  would not lock), and because its note names the reason. Death
+  releases it via R1 (evaluated first); fight end releases it because
+  the rule re-evaluates statelessly on every call.
 * R4 FIGHT_LOCK before R2/R3: if the spectated player is themselves
   fighting, the camera never moves — checking this before the
   "teammate in fight" rules prevents the quiet-check from being read
@@ -140,6 +148,8 @@ RULE_SPECTATED_KNOCKED = "R2_SPECTATED_KNOCKED"
 RULE_TEAMMATE_IN_FIGHT = "R3_TEAMMATE_IN_FIGHT"
 RULE_FIGHT_LOCK = "R4_FIGHT_LOCK"
 RULE_RETURN_PRIMARY = "R5_RETURN_PRIMARY"
+#: Phase 31B: spectated lone survivor in an active fight — lock on.
+RULE_SOLO_LOCK = "R3b_SOLO_LOCK"
 
 #: Phase spellings that count as the final zone for the dwell
 #: multiplier. ``final_circle`` is the canonical PhaseTracker /
@@ -578,6 +588,59 @@ class POVPilotRules:
                 signals,
             ), None
 
+        # ── R3b SOLO LOCK (Phase 31B) ─────────────────────────────
+        # Spectated player is the team's lone survivor in an active
+        # fight: ALIVE, no other roster player ALIVE, no other roster
+        # player UNKNOWN (an unread slot cannot prove lone-survivor
+        # status — fail-closed), and the team fight flag is active.
+        # The camera stays: no auto-switch off until the fight ends
+        # (flag clears, re-evaluated next call — this engine is
+        # stateless) or the player dies (R1 above fires first).
+        # KNOCKED teammates do NOT break the lock — they cannot fight
+        # — and a revive back to ALIVE releases it automatically on
+        # the next evaluation. Placed before R4: R4 would also lock a
+        # fighting spectated player, but R3b is the specific rule —
+        # it also locks a lone survivor repositioning without a fresh
+        # personal signal, whom R4 alone would not lock — and its
+        # note names the reason for the status surface.
+        if (
+            spectated.status == POVPlayerStatus.ALIVE
+            and signals.fight_active_on_feed
+        ):
+            others = [
+                p
+                for p in ordered
+                if p.roster_index != spectated.roster_index
+            ]
+            if all(
+                p.status
+                in (POVPlayerStatus.DEAD, POVPlayerStatus.KNOCKED)
+                for p in others
+            ):
+                return None, self._note(
+                    state, signals,
+                    f"No action: spectated {_label(spectated)} is the "
+                    "team's lone survivor in an active fight (solo "
+                    "lock); the camera stays until the fight ends or "
+                    "the player dies.",
+                    blocked_rule=RULE_SOLO_LOCK,
+                    evidence={
+                        **base,
+                        "lone_survivor": True,
+                        "other_statuses": [
+                            {
+                                "roster_index": p.roster_index,
+                                "status": (
+                                    p.status.value
+                                    if isinstance(p.status, Enum)
+                                    else str(p.status)
+                                ),
+                            }
+                            for p in others
+                        ],
+                    },
+                )
+
         # ── R4 FIGHT_LOCK (before R2/R3 — see module docstring) ──
         # ALIVE-only: a knocked player's "victim" entry must not lock
         # the camera (that is R2's case, evaluated next).
@@ -842,4 +905,5 @@ __all__ = [
     "RULE_TEAMMATE_IN_FIGHT",
     "RULE_FIGHT_LOCK",
     "RULE_RETURN_PRIMARY",
+    "RULE_SOLO_LOCK",
 ]

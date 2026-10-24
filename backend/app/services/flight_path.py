@@ -286,6 +286,7 @@ class FlightPathService:
         self,
         drop_rows: List[Dict[str, Any]],
         corridor_half_width: float = DEFAULT_CORRIDOR_HALF_WIDTH,
+        history_rows: Optional[List[Dict[str, Any]]] = None,
     ) -> List[Dict[str, Any]]:
         """Drop clashes in recorded drop data — pure, no emission.
 
@@ -296,6 +297,15 @@ class FlightPathService:
           pre-drop, from the flight corridor + drop history.
         * ``observed`` — 2+ distinct teams with recorded drops at the
           same named POI in ``drop_rows`` itself.
+
+        Phase 31: ``history_rows`` (default: ``drop_rows``) feeds the
+        predicted basis, while ``drop_rows`` feeds the observed basis.
+        Splitting them matters in production: history spans past
+        matches (the right input for "where do teams usually drop"),
+        but observed clashes must come from THIS match's drops only —
+        feeding all history as observed rows would alert on old
+        matches' contests. Omitting ``history_rows`` preserves the
+        exact pre-Phase-31 behaviour (both bases over ``drop_rows``).
 
         Distances are corridor / normalized map units only — no metre
         figure is ever stated (no calibrated scale exists here).
@@ -343,9 +353,12 @@ class FlightPathService:
             )
 
         # Predicted basis (needs a set path; predicted_drops enforces).
+        # Phase 31: predicted over history_rows (past matches' usual
+        # drops), observed over this match's drop_rows.
         by_poi: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
         for entry in self.predicted_drops(
-            drop_rows, corridor_half_width=corridor_half_width
+            history_rows if history_rows is not None else drop_rows,
+            corridor_half_width=corridor_half_width,
         ):
             if entry.get("usual_poi"):
                 by_poi[str(entry["usual_poi"])].append(entry)
@@ -370,6 +383,7 @@ class FlightPathService:
         self,
         drop_rows: List[Dict[str, Any]],
         corridor_half_width: float = DEFAULT_CORRIDOR_HALF_WIDTH,
+        history_rows: Optional[List[Dict[str, Any]]] = None,
     ) -> List[Dict[str, Any]]:
         """Detect clashes and emit NEW ones as bus ``intel_alert``s.
 
@@ -380,10 +394,16 @@ class FlightPathService:
         Returns only the alerts emitted by THIS call. With no
         publisher wired the alerts are still recorded and returned —
         detection never depends on the bus.
+
+        Phase 31: ``history_rows`` is forwarded to
+        :meth:`detect_drop_clashes` (predicted basis over history,
+        observed basis over ``drop_rows``).
         """
         fresh: List[Dict[str, Any]] = []
         for alert in self.detect_drop_clashes(
-            drop_rows, corridor_half_width=corridor_half_width
+            drop_rows,
+            corridor_half_width=corridor_half_width,
+            history_rows=history_rows,
         ):
             signature = (
                 alert["poi"],
@@ -411,6 +431,58 @@ class FlightPathService:
     def drop_clash_snapshot(self) -> List[Dict[str, Any]]:
         """Every drop-clash alert emitted for the current path."""
         return list(self.drop_clash_alerts)
+
+
+async def fetch_drop_rows(
+    db: Any,
+    *,
+    match_id: Optional[str] = None,
+    map_id: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """Phase 31: read recorded ``drop_events`` rows for clash checks.
+
+    Same row shape and scoping as the flight API's predicted-drops
+    read (``GET /api/v1/flight/predicted-drops``): team names joined
+    from the Team table, rows scoped to ``map_id`` when both sides
+    name one, and to ``match_id`` when given. Any DB failure yields
+    an honest empty list — the caller then checks nothing, rather
+    than alerting on partial data.
+    """
+    rows: List[Dict[str, Any]] = []
+    try:
+        from sqlalchemy import select
+
+        from app.analysis.models import DropEvent
+        from app.db.models.team import Team
+
+        stmt = select(DropEvent)
+        if match_id:
+            stmt = stmt.where(DropEvent.match_id == match_id)
+        rows_db = (await db.execute(stmt)).scalars().all()
+        team_names: Dict[str, str] = {}
+        team_ids = {str(r.team_id) for r in rows_db}
+        if team_ids:
+            teams = (
+                await db.execute(select(Team).where(Team.id.in_(team_ids)))
+            ).scalars().all()
+            team_names = {str(t.id): t.name for t in teams}
+        for r in rows_db:
+            if r.map_name and map_id:
+                if str(r.map_name).strip().lower() != str(map_id).strip().lower():
+                    continue
+            rows.append(
+                {
+                    "team_id": str(r.team_id),
+                    "team_name": team_names.get(str(r.team_id)),
+                    "named_location": r.named_location,
+                    "location_x": r.location_x,
+                    "location_y": r.location_y,
+                    "contested_by": list(r.contested_by or []),
+                }
+            )
+    except Exception:
+        rows = []
+    return rows
 
 
 #: Process-wide singleton (wired in app/main.py lifespan).

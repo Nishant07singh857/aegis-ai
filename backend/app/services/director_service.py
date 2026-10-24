@@ -122,6 +122,10 @@ LOWER_THIRD_TEMPLATES = (
     "lowerthird-slide",
     "lowerthird-rise",
     "lowerthird-banner",
+    # Phase 31: ELIMINATED banner template (frontend registry
+    # already carries this id; the backend contract must too, or
+    # set_graphics validation would reject the operator's choice).
+    "lowerthird-eliminated",
 )
 STANDINGS_TEMPLATES = (
     "standings-table",
@@ -452,6 +456,11 @@ class DirectorService:
         #: All suggestions ever proposed, keyed by id (pending + decided
         #: history, capped at MAX_SUGGESTION_HISTORY).
         self._suggestions: Dict[str, Dict[str, Any]] = {}
+        #: Phase 31: last phase for which phase suggestions were
+        #: proposed (edge trigger for the production caller in
+        #: app/main.py — a phase proposes once, on entry, not on
+        #: every ticker tick).
+        self._last_phase_suggestion_phase: Optional[str] = None
 
     # ── listeners ──────────────────────────────────────────────
 
@@ -1169,6 +1178,37 @@ class DirectorService:
             if suggestion is not None:
                 created.append(suggestion)
         return created
+
+    async def propose_phase_suggestions_on_change(
+        self, phase_snapshot: Optional[Dict[str, Any]] = None
+    ) -> List[Dict[str, Any]]:
+        """Phase 31 production entry point for phase suggestions.
+
+        Proposes exactly once per phase ENTRY: when the current phase
+        differs from the last phase this method proposed for, it
+        delegates to :meth:`propose_phase_suggestions` and records the
+        phase; a repeat call for the same phase returns ``[]`` without
+        touching the suggestion queue. Phases with no plan are still
+        recorded (so a plan-less phase never re-fires either), and a
+        phase the tracker re-derives identically across ticks stays
+        silent. Outside SEMI_AUTO the delegate is already a no-op, so
+        this method is safe to call on any ticker cadence in any mode.
+        """
+        phase = None
+        if isinstance(phase_snapshot, dict):
+            phase = phase_snapshot.get("phase")
+        if not phase:
+            try:
+                from app.services.phase_tracker import phase_tracker
+
+                phase = phase_tracker.current_phase()
+            except Exception:  # pragma: no cover - defensive
+                phase = None
+        phase = str(phase or "")
+        if phase == self._last_phase_suggestion_phase:
+            return []
+        self._last_phase_suggestion_phase = phase
+        return await self.propose_phase_suggestions({"phase": phase})
 
     # ── scene hold enforcement (Phase 18, W3) ────────────────────
 

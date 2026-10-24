@@ -24,6 +24,7 @@ import ScorebugMinimal from './templates/scorebug-minimal';
 import LowerThirdSlide from './templates/lowerthird-slide';
 import LowerThirdRise from './templates/lowerthird-rise';
 import LowerThirdBanner from './templates/lowerthird-banner';
+import LowerThirdEliminated from './templates/lowerthird-eliminated';
 import StandingsTable from './templates/standings-table';
 import StandingsCards from './templates/standings-cards';
 import StandingsMvp from './templates/standings-mvp';
@@ -219,6 +220,14 @@ export const TEMPLATES: TemplateDef[] = [
     description:
       'Full-width top banner with a gradient wash: event label on the left, commentary line beside it.',
     component: LowerThirdBanner,
+  },
+  {
+    id: 'lowerthird-eliminated',
+    name: 'Lower-third — Eliminated',
+    type: 'lower-third',
+    description:
+      'Phase 31B payoff banner for the team.eliminated event: red ELIMINATED pill with the team line. Renders only the publisher-supplied team line — no placement or finishes unless the event carried them. Graphic only; it never moves a camera.',
+    component: LowerThirdEliminated,
   },
   {
     id: 'standings-table',

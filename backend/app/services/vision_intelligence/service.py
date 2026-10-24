@@ -258,6 +258,12 @@ class VisionIntelligenceService:
         self._team_alive: Dict[str, int] = {}
         self._team_downs: Dict[str, int] = {}
         self._known_fight_ids: set = set()
+        # Phase 31: last emitted confidence per not-yet-promoted
+        # PotentialFight id (first sight + >=0.1 rises only, so the
+        # director hears about a converging fight without per-tick
+        # spam; promoted fights leave potential_fights and are
+        # pruned here).
+        self._potential_fight_emitted: Dict[str, float] = {}
         # Per-team counters the trackers don't model (loot episodes,
         # healing events — amounts are never invented, counts are real).
         self._team_counters: Dict[str, Dict[str, int]] = {}
@@ -413,6 +419,148 @@ class VisionIntelligenceService:
         alert = {**alert, "match_id": match_id}
         self.derivations.add_alert(alert)
         await self._emit_bus("intel_alert", alert, match_id)
+
+    def _rotation_event_extras(
+        self,
+        team_id: str,
+        centroid: Any,
+        map_id: Optional[str],
+        coordinate_space: Optional[str],
+        now: float,
+    ) -> Dict[str, Any]:
+        """Phase 31 enrichment for a rotation-start bus event.
+
+        Adds only what the tracker already measured: rotation mode
+        (vehicle/on_foot, inferred), bearing, speed in px/s, the
+        rotating team's current area POI (normalized map coordinates
+        only — minimap-region pixels never name a POI), and, when
+        another team's latest known position context resolves to the
+        SAME area POI, ``occupied_by`` + ``occupancy_basis``.
+
+        Honest limits, stated not hidden: the rotation's DESTINATION
+        is not observed, so occupancy is shared-current-area
+        convergence, not a measured arrival; and position contexts
+        carry no timestamp, so no staleness bound can be claimed for
+        the other team's context — the director-side PRE_COMBAT TTL
+        bounds the effect instead. Any failure here degrades to an
+        unenriched (still valid) rotation event, never to a crash.
+        """
+        extras: Dict[str, Any] = {}
+        try:
+            state = self.derivations.rotations.teams.get(team_id)
+            if state is not None:
+                mode = self.derivations.rotations.rotation_mode(state, now)
+                if mode:
+                    extras["rotation_mode"] = mode
+                bearing = self.derivations.rotations.current_bearing(state)
+                if bearing is not None:
+                    extras["bearing_deg"] = round(float(bearing), 1)
+                speed = self.derivations.rotations.current_speed(state)
+                if speed is not None:
+                    extras["speed_px_s"] = round(float(speed), 2)
+        except Exception:
+            pass
+        poi: Optional[str] = None
+        try:
+            poi = self.derivations.poi_name_for(
+                map_id,
+                float(centroid[0]),
+                float(centroid[1]),
+                coordinate_space,
+            )
+        except Exception:
+            poi = None
+        if not poi:
+            return extras
+        extras["poi"] = poi
+        contexts = getattr(self.derivations, "_position_context", None) or {}
+        for other_id in sorted(str(k) for k in contexts):
+            if other_id == team_id:
+                continue
+            ctx = contexts.get(other_id) or {}
+            ctx_map = ctx.get("map_id")
+            if map_id and ctx_map and str(ctx_map) != str(map_id):
+                continue  # same POI name on another map is not occupancy
+            try:
+                other_poi = self.derivations.poi_name_for(
+                    ctx_map or map_id,
+                    float(ctx["x"]),
+                    float(ctx["y"]),
+                    ctx.get("coordinate_space"),
+                )
+            except Exception:
+                other_poi = None
+            if other_poi and other_poi == poi:
+                extras["occupied_by"] = other_id
+                extras["occupancy_basis"] = "shared_current_area_poi"
+                break
+        return extras
+
+    async def _emit_potential_fights(self, match_id: Optional[str]) -> None:
+        """Phase 31: surface not-yet-promoted PotentialFight readings.
+
+        The fight detector's potential fights previously never left
+        the detector, so ``LiveDirector.note_potential_fight()`` — the
+        PRE_COMBAT convergence intake — had no production caller.
+        Each new potential fight is emitted once as a ``potential_fight``
+        bus event (teams + the detector's own fight_probability as
+        confidence), then again only when its probability rises by
+        >= 0.1, so the director hears convergence build without
+        per-tick spam. Promoted fights are popped from
+        ``potential_fights`` by the detector itself and pruned here.
+        The director's own threshold decides PRE_COMBAT; this method
+        never filters by confidence and never invents a team.
+        """
+        try:
+            state = getattr(self.fight_detector, "detection_state", None)
+            fights = (
+                getattr(state, "potential_fights", None)
+                if state is not None
+                else None
+            )
+        except Exception:
+            return
+        if not isinstance(fights, dict):
+            return
+        live_ids = set()
+        for fight_id, fight in list(fights.items()):
+            live_ids.add(fight_id)
+            teams = [
+                str(t)
+                for t in (getattr(fight, "teams_involved", None) or [])
+                if t
+            ]
+            if not teams:
+                continue
+            try:
+                conf = float(getattr(fight, "fight_probability", 0.0) or 0.0)
+            except (TypeError, ValueError):
+                continue
+            last = self._potential_fight_emitted.get(str(fight_id))
+            if last is not None and conf - last < 0.1:
+                continue
+            self._potential_fight_emitted[str(fight_id)] = conf
+            signal_types = getattr(fight, "signal_types", None) or []
+            try:
+                signals = [str(s) for s in signal_types]
+            except TypeError:
+                signals = []
+            await self._emit_bus(
+                "potential_fight",
+                {
+                    "fight_id": str(fight_id),
+                    "teams": teams,
+                    "confidence": conf,
+                    "signals": signals,
+                    "signal_count": getattr(fight, "signal_count", None),
+                    "source": "fight_detector_potential_fight",
+                    "match_id": match_id,
+                },
+                match_id,
+            )
+        for fid in list(self._potential_fight_emitted):
+            if fid not in live_ids:
+                del self._potential_fight_emitted[fid]
 
     def _note_observed(
         self,
@@ -721,9 +869,19 @@ class VisionIntelligenceService:
                 coordinate_space=coordinate_space,
             )
             if started is not None:
-                await self._emit_bus(
-                    "rotation_event", {**started, "match_id": match_id}, match_id
+                # Phase 31: enrich the rotation start for the director
+                # intake (mode / bearing / speed px/s / current area
+                # POI / shared-area occupancy). Without this the
+                # director's note_rotation() could never derive
+                # PRE_COMBAT from a rotation — the raw start event
+                # carries no occupancy at all.
+                payload = {**started, "match_id": match_id}
+                payload.update(
+                    self._rotation_event_extras(
+                        team_id, centroid, map_id, coordinate_space, now
+                    )
                 )
+                await self._emit_bus("rotation_event", payload, match_id)
             self.derivations.note_position_context(
                 team_id, float(centroid[0]), float(centroid[1]),
                 map_id, coordinate_space,
@@ -782,6 +940,16 @@ class VisionIntelligenceService:
                         "team_name": attribution.team_name,
                         "marker": iso_marker,
                         "distance_to_squad_px": iso["distance_to_squad_px"],
+                        # Phase 31: join the isolated marker to the
+                        # nearest ENEMY marker (minimap px, team-level
+                        # only). The marker key is anonymous — it is
+                        # never a named player — and the director's
+                        # existing team-level precombat weight for
+                        # "isolated" now carries this proximity
+                        # context. No metre conversion: the calibrated
+                        # scale is unset unless the operator sets it.
+                        "nearest_enemy_px": snapshot.get("nearest_enemy_px"),
+                        "nearest_enemy_units": "minimap_pixels",
                         "inferred": False,
                         "source": "minimap_marker_positions",
                         "timestamp": now,
@@ -827,6 +995,65 @@ class VisionIntelligenceService:
                 },
                 match_id,
             )
+            # Phase 31 (H4 producer): centre-compound holds. Only
+            # teams with a NORMALIZED position can resolve a POI
+            # (poi_name_for rejects minimap-region pixels, correctly
+            # — naming a POI from pixels would name a wrong place).
+            # Missing POI / zone entry / tracker state -> no alert.
+            try:
+                from app.services.live_director.center_hold import (
+                    evaluate_center_hold,
+                    stationary_dwell_from_tracker,
+                )
+                _contexts = getattr(
+                    self.derivations, "_position_context", None) or {}
+                for _entry in pull.get("teams") or []:
+                    if not isinstance(_entry, dict):
+                        continue
+                    _tid = _entry.get("team_id")
+                    if not _tid:
+                        continue
+                    _ctx = _contexts.get(str(_tid)) or {}
+                    _poi = None
+                    try:
+                        _db = self.derivations.poi_database()
+                        if _ctx.get("map_id") and _ctx.get("x") is not None \
+                                and _ctx.get("y") is not None:
+                            from app.services.vision_intelligence.geometry import (  # noqa: E501
+                                is_normalized_map_space,
+                            )
+                            if is_normalized_map_space(
+                                    _ctx.get("coordinate_space")):
+                                _poi = _db.nearest(
+                                    _ctx["map_id"], float(_ctx["x"]),
+                                    float(_ctx["y"]))
+                    except Exception:
+                        _poi = None
+                    # NOTE: team_zone_distances entries carry NO
+                    # safe_radius key (verified against zone_state),
+                    # so the radius comes from zone_state itself —
+                    # the from_zone_entry wrapper would read None
+                    # and silently return no alert.
+                    _zentry = self.zone_state.team_zone_distances(
+                        str(_tid)) or {}
+                    _alert = evaluate_center_hold(
+                        team_id=str(_tid),
+                        distance_to_centre_px=_zentry.get(
+                            "distance_to_centre_px"),
+                        distance_to_edge_px=_zentry.get(
+                            "distance_to_edge_px"),
+                        inside_zone=_zentry.get("inside_zone"),
+                        safe_radius_px=self.zone_state.safe_radius,
+                        dwell_s=stationary_dwell_from_tracker(
+                            self.derivations.rotations.teams.get(str(_tid)),
+                            self._now(ts)),
+                        poi=_poi,
+                        favoured_team_id=self.zone_state.favoured_team_id,
+                    )
+                    if _alert is not None:
+                        await self._emit_intel_alert(_alert, match_id)
+            except Exception:  # pragma: no cover - defensive
+                pass
         if changed and self.story_flagger is not None:
             await self.story_flagger.on_zone_swing(
                 match_id, self.zone_state.favoured_team_id
@@ -957,6 +1184,17 @@ class VisionIntelligenceService:
             return
         team_id = attribution.team_id
         slots = data.get("slots") or []
+        # Phase 31 (B hook D): feed the FightDetector's clutch
+        # derivation the RAW per-slot statuses. The combined
+        # alive_count below counts alive+knocked and must NEVER be
+        # passed as an alive-only count (a knocked-only team would
+        # read as a lone survivor). Unknown slots fail closed inside
+        # note_team_roster (stored count -> None).
+        if slots:
+            _fd = getattr(self, "fight_detector", None)
+            _note = getattr(_fd, "note_team_roster", None)
+            if callable(_note):
+                _note(team_id, [str(s) for s in slots])
         alive_count = data.get("alive_count")
         if alive_count is None and slots:
             alive_count = sum(1 for s in slots if s in ("alive", "knocked"))
@@ -1184,6 +1422,9 @@ class VisionIntelligenceService:
         )
         if tp_alert is not None:
             await self._emit_intel_alert(tp_alert, match_id)
+        # Phase 31: surface not-yet-promoted potential fights so the
+        # director's PRE_COMBAT intake has a production caller.
+        await self._emit_potential_fights(match_id)
         if self.story_flagger is None:
             return
         for fight in active:

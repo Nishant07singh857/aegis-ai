@@ -116,9 +116,17 @@ from app.services.vision_intelligence.attribution import (
     TeamAttribution,
 )
 
+from .center_hold import CENTER_HOLD_ZONE_PRESSURE
 from .config import LiveDirectorConfig
 from .engagement import EngagementState, EngagementTracker
-from .storyline import compute_storyline
+from .lull import LullLoop
+from .payoff import (
+    WinnerPreference,
+    apply_winner_preference,
+    build_elimination_banner,
+)
+from .storyline import championship_gap_from_standings, compute_storyline
+from .zone_beat import decide_zone_beat, zone_pull_terms
 
 logger = structlog.get_logger("aegis.live_director")
 
@@ -131,6 +139,9 @@ LIVE_DIRECTOR_EVENT_TYPES = [
     "knock_event",
     "intel_alert",
     "alive_count_update",
+    # Phase 31: team wipe events feed the elimination banner and
+    # the wipe-inference winner preference (see _on_team_wipe).
+    "team_wipe_event",
 ]
 
 #: Bus topic published for the simultaneous-fight hand-off (W3 consumes).
@@ -347,6 +358,21 @@ class LiveDirector:
         self._drop_clash_watch: Dict[str, Dict[str, Any]] = {}
         #: Pending context-first beat (see _context_beat_decision).
         self._pending_beat: Optional[Dict[str, Any]] = None
+        #: Phase 31: pending zone-reveal map beat (distinct from the
+        #: context beat — nothing follows a zone beat but normal
+        #: evaluation; it never cuts to a team slot afterwards).
+        self._pending_zone_beat: Optional[Dict[str, Any]] = None
+        #: Phase 31: championship #1-#2 gap (points) for this tick,
+        #: rebuilt in _refresh_storyline_context; None = unknown.
+        self._story_championship_gap: Optional[float] = None
+        #: Phase 31: lull loop state (semi_auto suggestions only).
+        self._lull_loop = LullLoop()
+        #: Phase 31: one-shot winner preference from the last
+        #: director-resolved fight (tie-break only, see payoff.py).
+        self._payoff_preference = None
+        #: Phase 31: teams observed wiped (team_wipe_event), used
+        #: ONLY for wipe-inference winner preference + banner.
+        self._eliminated_teams: set = set()
 
         self._started = False
         self._eval_lock = asyncio.Lock()
@@ -628,6 +654,9 @@ class LiveDirector:
                     await self._on_intel_alert(data)
                 elif raw_type == "alive_count_update":
                     self._on_alive_count(data)
+                elif raw_type in ("team_wipe_event", "team.eliminated") \
+                        or event_type == "team.eliminated":
+                    await self._on_team_wipe(data)
                 else:
                     return
                 await self._evaluate(trigger=raw_type)
@@ -639,6 +668,58 @@ class LiveDirector:
                 event_type=raw_type,
                 error=self._last_error,
             )
+
+    async def _on_team_wipe(self, data: Dict[str, Any]) -> None:
+        """Phase 31: record an observed wipe + elimination banner.
+
+        The wiped team is recorded for wipe-inference winner
+        preference only (see _prune). The banner is built from the
+        event payload alone — no placement/kills are invented. In
+        semi_auto it becomes a lower_third suggestion for operator
+        approval; in every other mode it is logged only, because
+        DirectorService.set_lower_third is manual-gated by design
+        and full_auto has no direct graphics-write path (ledger
+        backlog, not something to sneak past the mode contract)."""
+        raw = (
+            data.get("eliminated_team") or data.get("team_id")
+            or data.get("victimTeam") or data.get("victim_team_id")
+        )
+        resolved = await self._resolve_team(raw)
+        if resolved is None:
+            self.stats["dropped_unknown_team"] += 1
+            return
+        team_id, _slot = resolved
+        self._eliminated_teams.add(team_id)
+        banner = build_elimination_banner({
+            **data, "team_id": team_id,
+            "team_tag": (self._slot_to_attr.get(_slot).team_name
+                         if self._slot_to_attr.get(_slot) else None),
+        })
+        if banner is None:
+            return
+        payload = banner.to_lower_third_payload()
+        _snap = self._director.snapshot()
+        if (_snap.get("mode") or default_director_mode()) == "semi_auto":
+            await self._director.propose_suggestion(
+                suggestion_type="lower_third",
+                payload={"visible": True,
+                         "title": payload.get("title", ""),
+                         "subtitle": payload.get("subtitle", "")},
+                reason=f"Elimination banner: {payload.get('subtitle', '')}.",
+                confidence=0.9,
+                created_by="live_director",
+            )
+        self._log_decision({
+            "timestamp": _utcnow_iso(), "trigger": "team_wipe_event",
+            "mode": _snap.get("mode"), "phase": self._phase(),
+            "candidates": [], "incumbent": {}, "challenger": {},
+            "outcome": "elimination_banner",
+            "rule": "team_eliminated_banner",
+            "margin_required": None, "margin_actual": None,
+            "reason": f"Team {team_id} eliminated; banner payload "
+            f"ready (template lowerthird-eliminated).",
+            "elimination_banner": payload,
+        })
 
     async def _on_fight_detected(self, data: Dict[str, Any]) -> None:
         fight_id = _clean_team(data.get("fight_id")) or ""
@@ -782,15 +863,124 @@ class LiveDirector:
                 await note_precombat(raw, PRECOMBAT_GATEKEEP_OUTSIDE)
                 await note_convergence(raw)
         elif kind == "zone_pull":
-            for raw in data.get("winners") or []:
-                await note_zone_pressure(
-                    raw.get("team_id") if isinstance(raw, dict) else raw,
-                    ZONE_PRESSURE_PULL,
+            # Phase 31 (H2c): winners keep +10 zone_pressure; losers
+            # move to +10 precombat (same magnitude, different term —
+            # the old code flattened both to zone_pressure +10).
+            for term in zone_pull_terms(data)["terms"]:
+                if term["term"] == "zone_pressure":
+                    await note_zone_pressure(term["team_id"], term["points"])
+                else:
+                    await note_precombat(term["team_id"], term["points"])
+                    await note_convergence(term["team_id"])
+            # Phase 31 (H2a/H2b): on-screen answer to the new circle.
+            # Fight or final circle -> graphic data only, never a cut.
+            # No fight + not final -> 15s map beat (Bible 15-30s).
+            beat = decide_zone_beat(
+                data,
+                fight_active=bool(self._fights),
+                is_final_circle=(self._phase() == "final_circle"),
+            )
+            if beat["action"] == "map_beat":
+                _snap = self._director.snapshot()
+                _mode = _snap.get("mode") or default_director_mode()
+                _grabbed = bool(_snap.get("clone_grabbed")) if _mode == "clone" else False
+                _reason = (
+                    "New circle: 15s map beat. Winners: "
+                    + ", ".join(beat["graphic"]["winners"])
+                    + "; Losers: "
+                    + ", ".join(beat["graphic"]["losers"])
+                    + "."
                 )
-            for raw in data.get("losers") or []:
+                if _mode == "semi_auto":
+                    await self._director.propose_suggestion(
+                        suggestion_type="scene",
+                        payload={"scene": "map_cam"},
+                        reason=_reason,
+                        confidence=0.8,
+                        created_by="live_director",
+                    )
+                    self._log_decision({
+                        "timestamp": _utcnow_iso(), "trigger": "zone_pull",
+                        "mode": _mode, "phase": self._phase(),
+                        "candidates": [], "incumbent": {}, "challenger": {},
+                        "outcome": "zone_beat_suggestion",
+                        "rule": "zone_reveal_map_beat_15s",
+                        "margin_required": None, "margin_actual": None,
+                        "reason": _reason, "zone_beat": beat,
+                    })
+                elif _mode in ("full_auto", "clone") and not _grabbed \
+                        and self._pending_beat is None \
+                        and self._pending_zone_beat is None:
+                    try:
+                        await self._director.system_publish(
+                            scene="map_cam", updated_by="live_director"
+                        )
+                    except Exception:  # pragma: no cover - defensive
+                        pass
+                    self._pending_zone_beat = {
+                        "scene": "map_cam",
+                        "started_at": now,
+                        "completes_at": now + float(beat["duration_s"]),
+                        "duration_s": float(beat["duration_s"]),
+                        "graphic": beat["graphic"],
+                    }
+                    self.stats["zone_beats_taken"] = (
+                        self.stats.get("zone_beats_taken", 0) + 1
+                    )
+                    self._log_decision({
+                        "timestamp": _utcnow_iso(), "trigger": "zone_pull",
+                        "mode": _mode, "phase": self._phase(),
+                        "candidates": [], "incumbent": {}, "challenger": {},
+                        "outcome": "zone_beat", "rule": "zone_reveal_map_beat_15s",
+                        "margin_required": None, "margin_actual": None,
+                        "reason": _reason, "zone_beat": beat,
+                    })
+                # manual / grabbed / another beat pending: log only,
+                # never force a scene change.
+            elif beat["action"] == "graphic_only":
+                self.stats["zone_beat_graphics"] = (
+                    self.stats.get("zone_beat_graphics", 0) + 1
+                )
+                self._log_decision({
+                    "timestamp": _utcnow_iso(), "trigger": "zone_pull",
+                    "mode": self._director.snapshot().get("mode"),
+                    "phase": self._phase(),
+                    "candidates": [], "incumbent": {}, "challenger": {},
+                    "outcome": "zone_beat_graphic_only",
+                    "rule": "zone_reveal_graphic_only_no_cut",
+                    "margin_required": None, "margin_actual": None,
+                    "reason": (
+                        "New circle during a fight / final circle: "
+                        "winners/losers graphic only, no cut. Winners: "
+                        + ", ".join(beat["graphic"]["winners"])
+                        + "; Losers: "
+                        + ", ".join(beat["graphic"]["losers"])
+                        + ". (Dedicated graphic template is a "
+                        "frontend backlog item; the data rides here.)"
+                    ),
+                    "zone_beat": beat,
+                })
+        elif kind == "center_hold":
+            # Phase 31 (H4): centre-compound hold -> zone pressure
+            # + a semi_auto-only suggestion (propose_suggestion is a
+            # no-op in every other mode, so this can never auto-cut).
+            resolved = await self._resolve_team(data.get("team_id"))
+            if resolved is None:
+                self.stats["dropped_unknown_team"] += 1
+            else:
                 await note_zone_pressure(
-                    raw.get("team_id") if isinstance(raw, dict) else raw,
-                    ZONE_PRESSURE_PULL,
+                    resolved[0], CENTER_HOLD_ZONE_PRESSURE
+                )
+                _sugg = data.get("suggestion") or {}
+                await self._director.propose_suggestion(
+                    suggestion_type="scene",
+                    payload={"scene": "main",
+                             "active_camera": resolved[1],
+                             "team_id": resolved[0]},
+                    reason=str(_sugg.get("reason") or
+                               f"Center hold: {resolved[0]}."),
+                    confidence=0.6,
+                    created_by="live_director",
                 )
         elif kind in ("split", "isolated"):
             if data.get("team_id"):
@@ -863,6 +1053,31 @@ class LiveDirector:
         """Expire resolved fights / stale heat / stale intel."""
         for fight_id, fight in list(self._fights.items()):
             if now - fight["last_activity_at"] > FIGHT_RESOLVE_IDLE_S:
+                # Phase 31 (payoff): wipe-inference winner preference.
+                # A winner is ONLY the sole fight team NOT observed
+                # wiped, when at least one other fight team WAS
+                # observed wiped (team_wipe_event). This is elimination
+                # inference, not an exact alive count: if no wipe was
+                # observed, or two+ teams remain unwiped, there is no
+                # preference (fail-closed). It is a first-place
+                # tie-break only — scores are never modified.
+                _teams = list(fight.get("teams") or [])
+                _survivors = [t for t in _teams
+                              if t not in self._eliminated_teams]
+                _wiped = [t for t in _teams
+                          if t in self._eliminated_teams]
+                if len(_survivors) == 1 and _wiped:
+                    try:
+                        _ttl = float(
+                            self._eval_config.payoff_preference_ttl_s
+                        )
+                    except Exception:
+                        _ttl = 60.0
+                    self._payoff_preference = WinnerPreference(
+                        fight_id=fight_id,
+                        preferred_team_id=_survivors[0],
+                        created_at=now, ttl_s=_ttl,
+                    )
                 del self._fights[fight_id]
                 # P1-5: the engagement tracker leaves ACTIVE_COMBAT /
                 # CLUTCH for this fight's teams in step with the
@@ -899,6 +1114,7 @@ class LiveDirector:
         self._story_match_point = set()
         self._story_win_prob = {}
         self._story_win_leader = None
+        self._story_championship_gap = None
         try:
             raw = self._standings_provider() if self._standings_provider else None
             rows = raw.get("standings") if isinstance(raw, dict) else raw
@@ -907,6 +1123,15 @@ class LiveDirector:
                     self._story_standings[str(row["team_id"])] = row
         except Exception:  # pragma: no cover - defensive
             self._story_standings = {}
+        # Phase 31 (H1): championship #1-#2 gap for this tick.
+        try:
+            self._story_championship_gap = (
+                championship_gap_from_standings(
+                    list(self._story_standings.values())
+                )
+            )
+        except Exception:  # pragma: no cover - defensive
+            self._story_championship_gap = None
         try:
             raw = (
                 self._match_point_provider() if self._match_point_provider else None
@@ -1199,6 +1424,9 @@ class LiveDirector:
         storyline = compute_storyline(
             team_id,
             standings_row=self._story_standings.get(team_id),
+            championship_gap_points=getattr(
+                self, "_story_championship_gap", None
+            ),
             on_match_point=team_id in self._story_match_point,
             recent_finishes=self._recent_finishes(team_id, now),
             narrative_flags=self._narrative_flags_for(team_id, now),
@@ -1333,6 +1561,14 @@ class LiveDirector:
             if self._pending_beat is not None:
                 return None  # beat still running; PGM stays on the beat
 
+        # Phase 31: a pending zone-reveal map beat holds PGM for
+        # its 15s unless a promoted fight aborts it (then normal
+        # evaluation makes the hot cut). On expiry it simply
+        # clears — unlike the context beat, NOTHING follows it.
+        if self._pending_zone_beat is not None:
+            if not self._service_zone_beat(now, mode, grabbed):
+                return None  # beat still running; PGM stays on map
+
         # Score every team with a live signal.
         signalled = (
             set(self._combat_heat)
@@ -1365,6 +1601,15 @@ class LiveDirector:
         # Deterministic tie-break (score, then team_id): the director
         # must never flip a coin between equal challengers.
         challengers.sort(key=lambda e: (-e["score"], e["team_id"]))
+        # Phase 31 (payoff): a just-resolved fight's winner breaks
+        # a FIRST-PLACE tie only (scores untouched). One-shot: it
+        # is consumed by this evaluation whether or not it applied.
+        if getattr(self, "_payoff_preference", None) is not None:
+            challengers, _pref_applied = apply_winner_preference(
+                challengers, self._payoff_preference, now
+            )
+            self._payoff_preference.mark_consumed()
+            self._payoff_preference = None
         best = challengers[0] if challengers else None
 
         # PVW preview: the top challenger, updated whenever it changes —
@@ -1374,6 +1619,58 @@ class LiveDirector:
             await self._update_preview(best, now)
 
         if best is None:
+            # Phase 31 (H3): lull loop — semi_auto suggestions only,
+            # never an auto-cut. Any other mode resets the loop.
+            if mode != "semi_auto":
+                self._lull_loop.reset()
+                return None  # idle: no candidate, no decision
+            _top_team = None
+            _top_slot = None
+            for _row in self._story_standings.values():
+                if isinstance(_row, dict) and _row.get("rank") == 1:
+                    _top_team = str(_row["team_id"])
+                    break
+            if _top_team is None and self._story_standings:
+                try:
+                    _top_team = max(
+                        self._story_standings,
+                        key=lambda t: float(
+                            self._story_standings[t].get(
+                                "total_points", 0) or 0),
+                    )
+                except Exception:  # pragma: no cover - defensive
+                    _top_team = None
+            if _top_team is not None:
+                _top_slot = _team_to_slot.get(_top_team)
+            _lull = self._lull_loop.tick(
+                now, phase=phase,
+                fight_active=bool(self._fights),
+                precombat_active=bool(
+                    self.engagement.precombat_teams()),
+                top_team_id=_top_team, top_team_slot=_top_slot,
+            )
+            if _lull["action"] == "suggest":
+                if not (_lull["leg"] == "top_team_pov"
+                        and _lull.get("active_camera") is None):
+                    await self._director.propose_suggestion(
+                        suggestion_type="scene",
+                        payload={"scene": _lull["scene"],
+                                 "active_camera": _lull.get("active_camera"),
+                                 "team_id": _lull.get("team_id")},
+                        reason=_lull["reason"], confidence=0.6,
+                        created_by="live_director",
+                    )
+                    return self._log_decision(
+                        {"timestamp": _utcnow_iso(), "trigger": trigger,
+                         "mode": mode, "phase": phase,
+                         "candidates": [], "incumbent": {},
+                         "challenger": {},
+                         "outcome": "lull_suggestion",
+                         "rule": "lull_loop_15_30s",
+                         "margin_required": None, "margin_actual": None,
+                         "reason": _lull["reason"],
+                         "lull": _lull}
+                    )
             return None  # idle: no candidate, no decision, nothing invented
 
         base_entry = {
@@ -1511,7 +1808,27 @@ class LiveDirector:
             and scene_age < min_fight_hold_s(phase)
             and not challenger_same_fight
         )
-        if in_hold_window:
+        # Phase 31 (B hook A): incumbent-clutch lock — a clutch
+        # incumbent cannot be snatched by the cheap margin-5 path.
+        # It is a final-zone-style block rule, FIRST among margin
+        # branches: challengers need the full hold margin (40).
+        incumbent_fight = (
+            self._fights.get(self._current_fight_id)
+            if self._current_fight_id else None
+        )
+        incumbent_is_clutch = bool(
+            incumbent_fight and incumbent_fight.get("is_clutch")
+        )
+        if (
+            getattr(self._eval_config, "clutch_incumbent_lock_enabled", True)
+            and incumbent_is_clutch
+            and not challenger_same_fight
+        ):
+            margin_required = self._margin(
+                "margin_fight_hold", MARGIN_FIGHT_HOLD, learned
+            )
+            rule = "margin_clutch_incumbent_lock_40"
+        elif in_hold_window:
             margin_required = self._margin(
                 "margin_fight_hold", MARGIN_FIGHT_HOLD, learned
             )
@@ -1728,6 +2045,43 @@ class LiveDirector:
             "scene": view,
             "duration_s": self.config.context_beat_duration_s,
         }
+
+    def _service_zone_beat(
+        self, now: float, mode: str, clone_grabbed: bool = False
+    ) -> bool:
+        """Advance a pending zone-reveal map beat.
+
+        Returns True to fall through to normal evaluation, False
+        to hold (PGM stays on the map beat). A promoted fight or a
+        mode change out of full_auto/clone aborts the beat; expiry
+        clears it with NO follow-up cut (that is the whole point
+        of a zone beat, and why _service_pending_beat is not reused
+        here — it cuts to a team slot afterwards)."""
+        pending = self._pending_zone_beat
+        if pending is None:
+            return True
+        if mode not in ("full_auto", "clone") or clone_grabbed \
+                or bool(self._fights):
+            self._pending_zone_beat = None
+            self.stats["zone_beats_aborted"] = (
+                self.stats.get("zone_beats_aborted", 0) + 1
+            )
+            self._log_decision({
+                "timestamp": _utcnow_iso(), "trigger": "zone_beat",
+                "mode": mode, "phase": self._phase(),
+                "candidates": [], "incumbent": {}, "challenger": {},
+                "outcome": "hold", "rule": "zone_beat_aborted_hot_fight",
+                "margin_required": None, "margin_actual": None,
+                "reason": "Zone map beat aborted: a promoted fight "
+                "is hot (or the mode left full_auto/clone); normal "
+                "evaluation makes the hot cut.",
+                "zone_beat": pending,
+            })
+            return True
+        if now < pending["completes_at"]:
+            return False
+        self._pending_zone_beat = None
+        return True
 
     async def _service_pending_beat(
         self,

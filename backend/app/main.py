@@ -1304,6 +1304,37 @@ async def lifespan(app: FastAPI):
     else:
         app.state.live_director = None
 
+    # Phase 31 (Worker A): rotation / potential-fight intake bridge.
+    # Vision intelligence publishes rotation_event (enriched with
+    # mode / bearing / speed px/s / area POI / shared-area occupancy)
+    # and potential_fight (not-yet-promoted detector readings), but
+    # the live director subscribes to neither topic — so this bridge
+    # feeds both straight into LiveDirector.note_rotation() /
+    # note_potential_fight(). PVW pre-position only: the director's
+    # own evaluation decides cuts under normal margins; this bridge
+    # never cuts PGM itself. Failure-isolated: with it down, the
+    # director simply never hears rotations (its prior behaviour).
+    app.state.rotation_intake_bridge = None
+    _ld_for_intake = getattr(app.state, "live_director", None)
+    if event_bus._running and _ld_for_intake is not None:
+        try:
+            from app.services.live_director.rotation_intake import (
+                BRIDGE_EVENT_TYPES,
+                BRIDGE_SUBSCRIBER_ID,
+                build_rotation_bridge,
+            )
+
+            _rotation_bridge = build_rotation_bridge(_ld_for_intake)
+            event_bus.subscribe(
+                subscriber_id=BRIDGE_SUBSCRIBER_ID,
+                callback=_rotation_bridge,
+                event_types=list(BRIDGE_EVENT_TYPES),
+            )
+            app.state.rotation_intake_bridge = _rotation_bridge
+            logger.info("Rotation intake bridge started (Phase 31)")
+        except Exception as e:
+            logger.warning(f"Rotation intake bridge unavailable: {e}")
+
     # Phase 27 (W1): director learning loop foundation — decision
     # journal + suggestion-fate capture + manual-mode shadow
     # reconciliation (app/services/director_learning). Registers the
@@ -1624,6 +1655,60 @@ async def lifespan(app: FastAPI):
             pass
 
     director_hold_task = asyncio.create_task(_director_scene_hold_enforcer())
+    # Phase 31 (Worker A): production callers for the dormant
+    # producers — phase suggestions (edge-triggered on phase entry)
+    # and drop-clash checks (predicted over map history, observed
+    # over this match's drops). 30 s cadence: phases last minutes
+    # and drop rows land once per team per match, so polling is
+    # timely enough without hammering the DB; both calls dedupe
+    # internally (phase edge state / clash signature set), so most
+    # ticks are cheap no-ops. Skips entirely when no flight path is
+    # set or the bus is down — alerts cannot reach the director
+    # then, and marking them emitted would lose them. Failure-
+    # isolated: any tick error is swallowed, never fatal.
+    async def _phase31_drop_clash_check() -> None:
+        path = flight_path_service.snapshot()
+        if not path.get("is_set"):
+            return
+        try:
+            from app.db.session import AsyncSessionLocal
+            from app.services.flight_path import fetch_drop_rows
+
+            async with AsyncSessionLocal() as db:
+                history = await fetch_drop_rows(
+                    db, map_id=path.get("map_id")
+                )
+                if path.get("match_id"):
+                    current = await fetch_drop_rows(
+                        db,
+                        match_id=path.get("match_id"),
+                        map_id=path.get("map_id"),
+                    )
+                else:
+                    current = history
+            await flight_path_service.check_drop_clashes(
+                current, history_rows=history
+            )
+        except Exception as e:
+            logger.warning(f"Phase 31 drop-clash check failed: {e}")
+
+    async def _phase31_wiring_ticker() -> None:
+        try:
+            while True:
+                await asyncio.sleep(30)
+                try:
+                    await director_service.propose_phase_suggestions_on_change()
+                except Exception:
+                    pass
+                try:
+                    if event_bus._running:
+                        await _phase31_drop_clash_check()
+                except Exception:
+                    pass
+        except asyncio.CancelledError:
+            pass
+
+    app.state.phase31_ticker_task = asyncio.create_task(_phase31_wiring_ticker())
     # Phase 13: the demo simulators broadcast hardcoded squad names into the
     # live WS frames (kill feed, standings, director state, agent logs), so
     # they run ONLY with explicit DEMO_MODE=1. Default: disabled — the honest
@@ -1698,6 +1783,13 @@ async def lifespan(app: FastAPI):
         chatter_task.cancel()
     if director_hold_task:
         director_hold_task.cancel()
+    _p31t = getattr(app.state, "phase31_ticker_task", None)
+    if _p31t:
+        _p31t.cancel()
+    try:
+        event_bus.unsubscribe("phase31_rotation_intake")
+    except Exception:
+        pass
     _p25t = getattr(app.state, "phase25_ticker_task", None)
     if _p25t:
         _p25t.cancel()

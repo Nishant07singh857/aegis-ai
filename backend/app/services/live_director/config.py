@@ -113,3 +113,29 @@ class LiveDirectorConfig:
     context_beat_duration_s: float = 3.0
     #: Establishing scene used for the beat when the rig provides it.
     context_beat_scene: str = "map_cam"
+
+    # ── Phase 31B: clutch-incumbent lock + payoff ────────────────
+    #: When True, a clutch incumbent cannot be stolen through the
+    #: cheap challenger margin (5): challengers against a clutch
+    #: incumbent need the normal hold margin below instead. This is a
+    #: BLOCK rule in the style of the final-zone locks, not a tuning
+    #: change — and it deliberately does NOT touch the challenger-side
+    #: margin: a clutch CHALLENGER still wins at margin 5 (the
+    #: audit's "ULTA margin" finding is about the incumbent side
+    #: only; margin 5 must remain a challenger-side mechanism, never
+    #: a way to snatch a clutch camera).
+    clutch_incumbent_lock_enabled: bool = True
+    #: Margin a challenger needs against a clutch incumbent: the
+    #: normal fight-hold margin (service.py MARGIN_FIGHT_HOLD = 40.0).
+    #: Wiring note (see payoff.py HOOK NOTE): the service resolves
+    #: this through its existing "margin_fight_hold" knob, so the
+    #: factory value here is the default and learned profiles in
+    #: clone mode resolve through the same knob name.
+    clutch_incumbent_challenge_margin: float = 40.0
+    #: Safety expiry for an unconsumed winner preference (payoff.py
+    #: WinnerPreference). The preference is one-shot by design — it
+    #: applies to the NEXT decision after a fight resolves and is
+    #: then consumed — so this TTL only bounds a preference whose
+    #: next decision never arrives (e.g. match end). An editorial
+    #: tunable, not a measurement.
+    payoff_preference_ttl_s: float = 60.0
