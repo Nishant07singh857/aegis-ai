@@ -257,14 +257,61 @@ def test_tracker_disagreement_yields_unknown_identity():
 
 
 @pytest.mark.unit
-def test_tracker_single_signal_sources():
+def test_tracker_single_signal_never_confirms_identity():
+    """Phase 33 (K-H5 fix): the full identity matrix at tracker level.
+
+    highlight-only -> UNKNOWN, OCR-only -> UNKNOWN, both agree ->
+    known ("both"), disagreement -> UNKNOWN, neither -> UNKNOWN.
+    A single signal must never set identity_known or is_spectated,
+    even though roster binding (names/ids) still flows to the cards.
+    Replaces the pre-Phase-33 test that asserted highlight-only ->
+    "highlight" and OCR-only -> "ocr" as confirmed identities."""
     tracker = POVStateTracker(3, "src-3", roster_provider)
+
+    # highlight-only: no OCR at all.
     s1 = tracker.update(_raw(_ALIVE4, highlight=1))
-    assert (s1.spectated_index, s1.identity_source) == (1, "highlight")
+    assert (s1.spectated_index, s1.identity_known, s1.identity_source) == (
+        None, False, "none")
+    assert all(not p.is_spectated for p in s1.players)
+    assert s1.players[1].name == "Bravo"  # roster binding still flows
+
+    # OCR-only: no highlight at all.
     s2 = tracker.update(_raw(_ALIVE4, nameplate="Delta"))
-    assert (s2.spectated_index, s2.identity_source) == (3, "ocr")
-    s3 = tracker.update(_raw(_ALIVE4))
+    assert (s2.spectated_index, s2.identity_known, s2.identity_source) == (
+        None, False, "none")
+    assert all(not p.is_spectated for p in s2.players)
+
+    # Both signals present and agreeing: the ONLY confirming case.
+    s3 = tracker.update(_raw(_ALIVE4, highlight=2, nameplate="Cobra"))
     assert (s3.spectated_index, s3.identity_known, s3.identity_source) == (
+        2, True, "both")
+    assert s3.players[2].is_spectated is True
+    assert s3.spectated_player().name == "Cobra"
+
+    # Both present and disagreeing: UNKNOWN (also covered by the
+    # dedicated disagreement test; repeated here for the matrix).
+    s4 = tracker.update(_raw(_ALIVE4, highlight=0, nameplate="Delta"))
+    assert (s4.spectated_index, s4.identity_known, s4.identity_source) == (
+        None, False, "none")
+    assert all(not p.is_spectated for p in s4.players)
+
+    # Neither signal.
+    s5 = tracker.update(_raw(_ALIVE4))
+    assert (s5.spectated_index, s5.identity_known, s5.identity_source) == (
+        None, False, "none")
+
+    # Highlight plus an OCR text that matches NO roster entry: still
+    # UNKNOWN -- an unmatchable nameplate is not a second signal, and
+    # must not fall back to a highlight-only confirmation.
+    s6 = tracker.update(_raw(_ALIVE4, highlight=1, nameplate="Zulu"))
+    assert (s6.spectated_index, s6.identity_known, s6.identity_source) == (
+        None, False, "none")
+
+    # Highlight outside the roster plus a matching OCR name: still
+    # UNKNOWN -- the out-of-range highlight binds nobody, so there
+    # is no agreement to confirm.
+    s7 = tracker.update(_raw(_ALIVE4, highlight=9, nameplate="Bravo"))
+    assert (s7.spectated_index, s7.identity_known, s7.identity_source) == (
         None, False, "none")
 
 

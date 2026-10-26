@@ -5,6 +5,7 @@ Automatically detects highlight-worthy moments for clipping.
 Identifies squad wipes, clutch plays, multi-kills, and funny moments.
 """
 
+import math
 import time
 from typing import Dict, List, Optional, Any
 from dataclasses import dataclass, field
@@ -382,30 +383,174 @@ class ClipDetector(BaseAgent):
             platform_suitability={"tiktok": 90, "youtube_shorts": 85},
         )
     
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    # PHASE 33 (D-2): EVIDENCE-GATED LONG-RANGE RENDERING
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+    _NO_WEAPON_TOKENS = frozenset({"", "unknown", "none", "null", "n/a"})
+
+    @staticmethod
+    def _evidence_weapon(data: Dict[str, Any]) -> Optional[str]:
+        """Return the evidenced weapon display name, or None.
+
+        Evidence is a real weapon value passed into the event: the
+        kill-feed ``weapon`` (Phase 23/32: class-level, margin-gated
+        icon-template match — ``None`` when unconfident, never
+        guessed), or an explicit ``weapon_name`` / ``weapon_class``.
+        A dict (e.g. an IconMatch-shaped payload) is unwrapped via
+        its name/label/class keys; an object with a ``weapon`` string
+        attribute is accepted the same way. ``weapon_family`` alone
+        (e.g. ``"ar_a"``) is NOT a display gun name, so it never
+        renders as one. Sentinels (``"Unknown"``, ``"None"``,
+        ``"unknown_*`` abstention glyphs) and non-strings mean NO
+        evidence — the caller gets gun-less rendering, never a
+        default gun. The value is returned verbatim (stripped);
+        nothing here maps a class to a specific gun or vice versa.
+        """
+        raw: Any = None
+        for key in ("weapon", "weapon_name", "weapon_class"):
+            if data.get(key) is not None:
+                raw = data.get(key)
+                break
+        if raw is None:
+            return None
+        if isinstance(raw, dict):
+            for key in ("name", "label", "weapon", "weapon_class", "weapon_family"):
+                if raw.get(key) is not None:
+                    raw = raw.get(key)
+                    break
+            else:
+                return None
+        if not isinstance(raw, str):
+            weapon_attr = getattr(raw, "weapon", None)
+            raw = weapon_attr if isinstance(weapon_attr, str) else None
+            if raw is None:
+                return None
+        value = raw.strip()
+        lowered = value.lower()
+        if lowered in ClipDetector._NO_WEAPON_TOKENS or lowered.startswith("unknown_"):
+            return None
+        return value
+
+    @staticmethod
+    def _evidence_distance(data: Dict[str, Any]) -> Optional[float]:
+        """Return the evidenced kill distance in metres, or None.
+
+        Evidence is a measured distance passed into the event
+        (``distance`` / ``distance_m`` / ``distance_meters``).
+        Only finite, positive, real numbers (or plain numeric
+        strings) count. Bools, zero/negative values, NaN/inf,
+        non-numeric strings and missing keys mean NO evidence —
+        the caller gets distance-less rendering, never a default
+        number. Fail-closed by design: an unparseable value is
+        unknown, not 200.
+        """
+        raw: Any = None
+        for key in ("distance", "distance_m", "distance_meters", "distance_metres"):
+            if data.get(key) is not None:
+                raw = data.get(key)
+                break
+        if raw is None or isinstance(raw, bool):
+            return None
+        if isinstance(raw, str):
+            try:
+                raw = float(raw.strip())
+            except (TypeError, ValueError):
+                return None
+        if not isinstance(raw, (int, float)):
+            return None
+        value = float(raw)
+        if not math.isfinite(value) or value <= 0:
+            return None
+        return value
+
     def _create_long_range_clip(
         self,
         data: Dict[str, Any],
         context: Dict[str, Any],
     ) -> HighlightClip:
-        """Create long range kill highlight"""
-        
+        """Create long range kill highlight — evidence-gated (D-2).
+
+        The previous defaults (``distance=200``, ``weapon="Sniper"``)
+        were live-reachable: the commentary path
+        (``handle_event`` → ``detect_clip("long_range_kill", ...)``)
+        built its event WITHOUT weapon/distance, so every such clip
+        shipped an invented ``"200m Sniper shot!"`` to viewers.
+        There are no defaults anymore. Weapon and distance come
+        ONLY from evidence passed into ``data`` (kill-feed
+        IconMatch weapon / measured distance); when either is
+        absent, the clip renders WITHOUT it — gun-less and/or
+        distance-less — and the excitement score gets NO
+        distance contribution. The ``long_range`` category label
+        itself is the caller's event classification, not a measured
+        claim, so it is retained; no number and no gun name is ever
+        invented to go with it. The signature is unchanged
+        (``data, context``), so existing callers keep working —
+        they just stop getting invented claims.
+
+        Rendering matrix (``headshot`` only counts when literally
+        a bool ``True``; anything else means a plain kill):
+        - weapon + distance: ``"hits 320m AWM shot!"``
+        - distance only:     ``"hits 320m shot!"`` (no gun)
+        - weapon only:        ``"long-range AWM shot!"`` (no number)
+        - neither:            ``"long-range shot!"`` (neither)
+        ``#Sniper`` is added ONLY when the evidenced weapon is
+        exactly the ``"sniper"`` class — a specific gun (e.g. AWM)
+        earns no class hashtag, because no gun→class map is
+        asserted here.
+        """
+
         player_name = data.get("player_name", "Unknown")
-        distance = data.get("distance", 200)
-        weapon = data.get("weapon", "Sniper")
-        headshot = data.get("headshot", False)
-        
-        excitement = 40 + min(40, distance / 10)
+        weapon = self._evidence_weapon(data)
+        distance = self._evidence_distance(data)
+        headshot = data.get("headshot") is True
+
+        # Excitement: distance contributes ONLY when evidenced.
+        excitement = 40
+        if distance is not None:
+            excitement += min(40, distance / 10)
         if headshot:
             excitement += 15
-        
+
         quality = self._determine_quality(excitement)
-        
+
+        if weapon is not None and distance is not None:
+            dist_str = f"{int(distance)}" if float(distance).is_integer() else f"{distance:g}"
+            title = f"INCREDIBLE! {player_name} hits {dist_str}m {weapon} shot!"
+            description = (
+                f"{player_name} lands an unbelievable {dist_str} meter "
+                f"{'headshot' if headshot else 'kill'} with {weapon}!"
+            )
+        elif distance is not None:
+            dist_str = f"{int(distance)}" if float(distance).is_integer() else f"{distance:g}"
+            title = f"INCREDIBLE! {player_name} hits {dist_str}m shot!"
+            description = (
+                f"{player_name} lands an unbelievable {dist_str} meter "
+                f"{'headshot' if headshot else 'kill'}!"
+            )
+        elif weapon is not None:
+            title = f"INCREDIBLE! {player_name} lands a long-range {weapon} shot!"
+            description = (
+                f"{player_name} lands an unbelievable long-range "
+                f"{'headshot' if headshot else 'kill'} with {weapon}!"
+            )
+        else:
+            title = f"INCREDIBLE! {player_name} lands a long-range shot!"
+            description = (
+                f"{player_name} lands an unbelievable long-range "
+                f"{'headshot' if headshot else 'kill'}!"
+            )
+
+        hashtags = ["#LongRange", "#BGMI"]
+        if weapon is not None and weapon.strip().lower() == "sniper":
+            hashtags.insert(1, "#Sniper")
+
         return HighlightClip(
             clip_id=f"clip_range_{int(time.time())}",
             category=HighlightCategory.LONG_RANGE,
             quality=quality,
-            title=f"INCREDIBLE! {player_name} hits {distance}m {weapon} shot!",
-            description=f"{player_name} lands an unbelievable {distance} meter {'headshot' if headshot else 'kill'} with {weapon}!",
+            title=title,
+            description=description,
             start_timestamp_ms=data.get("timestamp_ms", 0) - 4000,
             end_timestamp_ms=data.get("timestamp_ms", 0) + 3000,
             duration_seconds=7,
@@ -416,7 +561,7 @@ class ClipDetector(BaseAgent):
             suggested_angles=["player_scope_view", "bullet_trajectory", "victim_pov"],
             needs_slow_motion=True,
             needs_zoom=True,
-            hashtags=["#LongRange", "#Sniper", "#BGMI"],
+            hashtags=hashtags,
         )
     
     def _create_headshot_clip(
@@ -848,15 +993,27 @@ class ClipDetector(BaseAgent):
             clip_event_type = str(data.get("clip_event_type") or "multi_kill")
             match_id = data.get("match_id") or self.config.match_id
 
-            # Honesty rule (inspection H14): kill_count / time_span are
-            # taken from the event itself, never defaulted here. If the
-            # commentary event does not carry them, detect_clip treats
-            # the event as insufficient and produces no clip.
+            # Honesty rule (inspection H14, Phase 33 D-2): kill_count /
+            # time_span are taken from the event itself, never
+            # defaulted here. If the commentary event does not carry
+            # them, detect_clip treats the event as insufficient and
+            # produces no clip. Same for long-range evidence: weapon
+            # / distance / headshot are forwarded ONLY when the
+            # commentary event actually carries them; when absent,
+            # _create_long_range_clip renders gun-less /
+            # distance-less — the old path built this dict without
+            # them at all, so the old 200m/Sniper defaults fired.
             event_data = {
                 "player_name": data.get("player_name", "Unknown"),
                 "team_name": data.get("team_name", ""),
                 "kill_count": data.get("kill_count"),
                 "time_span": data.get("time_span"),
+                "distance": data.get("distance"),
+                "distance_m": data.get("distance_m"),
+                "weapon": data.get("weapon"),
+                "weapon_name": data.get("weapon_name"),
+                "weapon_class": data.get("weapon_class"),
+                "headshot": data.get("headshot"),
                 "timestamp_ms": int(time.time() * 1000),
                 "commentary_text": str(data.get("text", ""))[:300],
                 "trigger": data.get("trigger", ""),

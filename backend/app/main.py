@@ -1220,17 +1220,81 @@ async def _is_deactivated_db_user(username: str) -> bool:
 
 
 # ==========================================
+# PHASE 33 (K-H6) — DB BOOT FAIL-FAST
+# ==========================================
+async def _init_database_or_fail_fast() -> None:
+    """Boot-time database gate: the lifespan calls this and NOTHING
+    else wraps it, so a failure here aborts startup.
+
+    The distinction is explicit and lives in exactly one place
+    (``settings.database_configured`` — see ``app/config.py``):
+
+    * DATABASE_URL UNSET/blank (non-production) — intentional
+      dev/test no-DB mode. ``init_db`` is NOT called (there is no
+      database to initialise; ``app.db.base`` only built an
+      in-memory sqlite placeholder so the process can import).
+      Boot continues WITHOUT persistence, and the log says so in
+      plain language. DB-backed features then fail per-request
+      under their own error handling — nothing is silently
+      "persisted" to a store that does not exist. This is the
+      documented ``.env.development`` "empty = in-memory mode"
+      path, and the path the test suite's sqlite fixtures do NOT
+      take (they set a real DATABASE_URL, below).
+    * DATABASE_URL SET — a database is REQUIRED. ``init_db`` runs,
+      and ANY failure (dead Postgres, refused connection, bad
+      credentials, uncreatable schema) raises RuntimeError and
+      ABORTS boot. The app must never silently boot in-memory
+      against a configured-but-dead database: an operator who
+      configured a DB and got a silent in-memory server would
+      lose data and never know. This mirrors the existing
+      production fail-fast for unset SECRET_KEY/DATABASE_URL,
+      extended here to "set but dead" in every environment.
+    * Production + unset is already refused earlier, at Settings
+      validation (``config._fail_fast_in_production``), so this
+      function never has to guess about production.
+
+    The configured URL itself is NEVER logged: it embeds the DB
+    password. Only the fact that a URL was configured, and the
+    driver error, are logged.
+    """
+    if not settings.database_configured:
+        logger.info(
+            "No DATABASE_URL configured — booting without a database "
+            "(dev/test no-DB mode). init_db skipped: DB-backed "
+            "features will fail per-request and nothing is persisted. "
+            "Set DATABASE_URL to run with a real database."
+        )
+        return
+    try:
+        await init_db()
+    except Exception as e:
+        logger.critical(
+            "Refusing to boot: DATABASE_URL is configured but the "
+            f"database is unreachable (init_db failed: {e}). The app "
+            "will NOT fall back to in-memory state."
+        )
+        raise RuntimeError(
+            "Refusing to boot: DATABASE_URL is configured but the "
+            "database is unreachable (init_db failed). The app will "
+            "NOT silently fall back to in-memory state. Fix "
+            "DATABASE_URL or start the database, or unset "
+            "DATABASE_URL for intentional no-DB dev/test mode. "
+            f"Original error: {e}"
+        ) from e
+
+
+# ==========================================
 # FASTAPI APP & LIFESPAN
 # ==========================================
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup
     logger.info("AEGIS AI Starting...")
-    
-    try:
-        await init_db()
-    except Exception as e:
-        logger.warning(f"Database initialization failed, continuing with in-memory state: {e}")
+
+    # Phase 33 (K-H6): intentionally UNWRAPPED. A configured-but-dead
+    # database must abort startup; wrapping this in try/warn (the old
+    # code) is exactly the silent in-memory boot this fix removes.
+    await _init_database_or_fail_fast()
 
     # Phase 6: fan director.state changes out over /ws/live, and seed the
     # first admin user when ADMIN_EMAIL/ADMIN_PASSWORD are configured.

@@ -478,10 +478,17 @@ def _entry_to_event(detector: Any, entry: Any, match_id: Optional[str], now: flo
         "dedup_key": _entry_key(entry),
     }
     weapon = getattr(entry, "weapon", None)
-    # Phase 32: the KillFeedDetector path uses _entry_to_event above
-    # (margin-gated + abstention payload); this fallback only mirrors
-    # an abstention flag a foreign detector already set — it never
-    # invents a weapon, and entry.weapon here is already gated.
+    # Phase 32 / Phase 33 (D-3 correction): the KillFeedDetector path
+    # uses its own builder above (margin-gated + abstention payload).
+    # This fallback does NOT re-gate: it passes ``entry.weapon``
+    # through verbatim and only mirrors an abstention flag a foreign
+    # detector already set. A foreign detector whose weapon is NOT
+    # margin-gated would therefore leak ungated labels through this
+    # path — do NOT wire a foreign detector here until its weapons
+    # are gated (or this fallback gains a gate). No foreign detector
+    # is wired in production today, so there is no live bypass; the
+    # previous comment's "already gated" claim was wrong for the
+    # foreign-detector case and has been corrected, not the logic.
     if getattr(entry, "weapon_abstained", False):
         payload["weapon_abstained"] = True
         payload["weapon_margin"] = round(float(getattr(entry, "weapon_margin", 0.0)), 3)

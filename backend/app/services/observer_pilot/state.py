@@ -16,10 +16,14 @@ Identity resolution (the honesty core of Phase 29):
       identity_known=False, identity_source="none" (logged -- a
       disagreement means one signal is lying; picking either would
       be a guess)
-    * exactly one signal              -> that signal wins,
-      identity_source="highlight" / "ocr"
-    * neither                         -> spectated_index=None,
-      identity_known=False, identity_source="none"
+    * exactly one signal, or neither  -> spectated_index=None,
+      identity_known=False, identity_source="none". A single signal
+      NEVER confirms identity (Phase 33, K-H5 fix: the pre-fix code
+      let a highlight-only or OCR-only read set identity_known=True,
+      which contradicted the two-signal contract). An OCR text that
+      does not match the roster counts as no OCR signal here, so a
+      highlight plus unmatchable OCR text is likewise UNKNOWN, not
+      a highlight-only confirmation.
 
   Without a roster binding for the slot there is nothing to resolve
   against: names/ids stay None and identity stays unknown, even when
@@ -188,10 +192,10 @@ class POVStateTracker:
                 nameplate_text=raw.nameplate_text,
             )
             return None, False, "none"
-        if highlight is not None:
-            return highlight, True, "highlight"
-        if ocr_index is not None:
-            return ocr_index, True, "ocr"
+        # Exactly one signal (or neither, or an OCR text that matches
+        # no roster entry): NOT a confirmation. Identity requires
+        # both signals present AND agreeing; anything else is UNKNOWN
+        # so no rule, tap, or director display can act on a guess.
         return None, False, "none"
 
     def _velocity(self, index: int, hp: Optional[float], ts: float) -> Optional[float]:

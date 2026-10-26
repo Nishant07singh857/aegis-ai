@@ -111,7 +111,15 @@ class Settings(BaseSettings):
     # fails fast in _fail_fast_in_production below.
     DATABASE_URL: str = Field(
         default="",
-        description="Database connection URL (REQUIRED from env; no built-in credentials)"
+        description=(
+            "Database connection URL (REQUIRED from env in production; "
+            "no built-in credentials). Phase 33 (K-H6) boot rule — "
+            "EMPTY in non-production = intentionally no database "
+            "(dev/test no-DB mode: the app boots without DB "
+            "persistence, see app.main lifespan); NON-EMPTY = a "
+            "database is REQUIRED, and a failed init_db at boot is "
+            "fatal instead of silently falling back to in-memory state."
+        )
     )
     DATABASE_POOL_SIZE: int = Field(default=20, ge=5, le=100)
     DATABASE_MAX_OVERFLOW: int = Field(default=10, ge=0, le=50)
@@ -318,6 +326,30 @@ class Settings(BaseSettings):
             self.HIGHLIGHTS_DIR, self.LOGS_DIR, self.TEMP_DIR
         ]:
             dir_path.mkdir(parents=True, exist_ok=True)
+
+    @property
+    def database_configured(self) -> bool:
+        """Phase 33 (K-H6) — the ONE explicit distinction between the
+        two boot cases, so no caller has to guess:
+
+        * ``False`` — DATABASE_URL is empty/whitespace: NO database
+          was configured. In non-production this is the intentional
+          dev/test no-DB mode (the app boots without persistence;
+          ``app.main`` lifespan skips ``init_db`` and says so).
+          Production never reaches this branch: the validator above
+          already refuses to boot in production without DATABASE_URL.
+        * ``True`` — a DATABASE_URL was configured: a database is
+          REQUIRED. If ``init_db`` fails, boot fails fast (see
+          ``app.main._init_database_or_fail_fast``); the app must
+          never silently run in-memory against a dead configured DB.
+
+        Whitespace-only counts as unconfigured: a URL of spaces is
+        not a connection string, it is an unset variable with
+        padding. This property reads the field at call time, so
+        tests that monkeypatch ``settings.DATABASE_URL`` see the
+        updated value without rebuilding the Settings object.
+        """
+        return bool((self.DATABASE_URL or "").strip())
 
 
 # Global settings instance

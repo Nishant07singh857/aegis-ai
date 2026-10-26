@@ -5,9 +5,14 @@ Secrets policy, incident history, and rotation runbook for this repository.
 > **Standing rule:** no real secret may ever be committed to this repo.
 > Local dev secrets live in `backend/.env.development` (gitignored), prod
 > secrets live in the deployment environment / secret manager — never in
-> `backend/.env.production` as a committed file (also gitignored). The only
-> env file that is committed is `backend/.env.example`, which contains
-> **placeholder values only**.
+> `backend/.env.production` as a committed file (also gitignored).
+> CORRECTION (Phase 33): despite the gitignore entries, env files ARE
+> tracked from the initial commit — `git ls-files` shows
+> `backend/.env.development`, `backend/.env.production`,
+> `backend/.env.example`, and `frontend/.env.example` as committed.
+> Only `backend/.env.example` is claimed placeholder-only; the
+> `.env.development` / `.env.production` history is the incident in §1,
+> whose purge is still pending a user decision (§3).
 
 ---
 
@@ -126,9 +131,13 @@ After either option:
 ## 4. New secrets policy (enforced going forward)
 
 1. **Never commit real secrets.** `backend/.env.development`,
-   `backend/.env.production`, and `.env` are gitignored (see `.gitignore`).
-2. **`.env.example` is the only committed env file** — placeholders only.
-   CI/review should reject any real-looking value in it.
+   `backend/.env.production`, and `.env` are gitignored (see `.gitignore`) —
+   but gitignore does not untrack files already committed, so the §1 files
+   remain tracked until the §3 purge is executed (user decision).
+2. **`.env.example` files are the only env files that should be committed** — placeholders only.
+   CI/review should reject any real-looking value in them. (The previous
+   wording here — "`.env.example` is the only committed env file" — was
+   false: see the header correction.)
 3. **New settings that hold secrets** (`ADMIN_PASSWORD`, `ADMIN_API_KEYS`,
    `FERNET_KEY`, `SECRET_KEY`) must come from environment / secret manager.
    `FERNET_KEY` is required in production — the server refuses to boot
@@ -140,7 +149,17 @@ After either option:
    production with the default `SECRET_KEY` or default/empty
    `ADMIN_PASSWORD`.
 
-## 5. Auth model (Phase 1, for operators)
+## 5. Auth model (Phase 1 description — SUPERSEDED in part, see note)
+
+> CORRECTION (Phase 33): the sentence below claiming "There is no `User`
+> table yet" is stale since Phase 13/16. A `User` table DOES exist
+> (`backend/app/db/models/user.py:14`, `class User`), and REST + WebSocket
+> auth now checks the DB user's live `is_active` flag on every request /
+> action frame (`backend/app/api/deps.py`, Phase 32 kill-switch). The
+> settings-based operator account remains only as a non-DB fallback
+> (`deps.py` notes that account is NOT a DB user). The Phase 1 mechanism
+> described below is therefore history, not the current auth model;
+> consult `deps.py` for the endpoint map.
 
 There is no `User` table yet, so protected endpoints authenticate against
 settings (see `backend/app/api/deps.py` for the full endpoint map):

@@ -41,6 +41,24 @@ Expected model formats:
         transposed layouts are accepted too. Confidence = max class
         score; there is no objectness head in YOLOv8.
         2 kill-feed classes by default: killfeed_panel, killfeed_entry.
+    - decode_mode "rfdetr" (RF-DETR exports, e.g. the Phase-15 kill-feed
+      model from train_rfdetr_nano_killfeed.ipynb): TWO raw outputs —
+      dets (B,Q,4) normalized cxcywh + labels (B,Q,C) raw logits,
+      background in the last slot (verified against rfdetr 1.11.2
+      export layout). Decode: per-class sigmoid, drop bg, global
+      top-k over Q*C' query/class pairs (a per-query argmax would
+      silently drop extra classes a query scores on), cxcywh→xyxy
+      in model-input pixels. Needs normalize_imagenet=True and
+      input_size matching the training resolution (384 for
+      RFDETRNano default).
+      GATING (Phase 33 W4): "rfdetr" is opt-in ONLY — it activates
+      when a caller explicitly sets decode_mode="rfdetr" (plus
+      normalize_imagenet=True, input_size=(384, 384)). The registry
+      default for "killfeed" stays "yolov8" (the YOLO26 fallback)
+      until a real best.onnx has been smoke-tested; without that
+      file nothing on the live path changes. There is deliberately
+      NO best.onnx in this repo and this patch must not be read
+      as live RF-DETR wiring.
 
 Honest limits (stated, not hidden):
     - decode_mode must match the model that produced the .onnx. The
@@ -106,11 +124,21 @@ class TrainedDetectorConfig:
     nms_iou: float = 0.45
     max_detections: int = 300
     class_filter: Optional[List[str]] = None  # None = keep all model classes
-    decode_mode: str = "yolov5"  # "yolov5" | "yolov8" | "direct"
+    decode_mode: str = "yolov5"  # "yolov5" | "yolov8" | "direct" | "rfdetr"
     #   yolov5 : anchor heads (B, 3*(4+C), H, W) x3 — fight_detection models
     #   yolov8 : ultralytics-exported single output (B, 4+C, N), decoded
-    #            xyxy + sigmoided scores — killfeed_detection models
+    #            xyxy + sigmoided scores — killfeed_detection models,
+    #            and the YOLO26 fallback (same ultralytics layout)
     #   direct : pre-decoded (B, N, 6) xyxy+conf+class_id passthrough
+    #   rfdetr : RF-DETR exports — dets (B,Q,4) normalized cxcywh +
+    #            labels (B,Q,C) logits, background = last slot.
+    #            Requires normalize_imagenet=True. OPT-IN ONLY: no
+    #            registry default selects it (see registry.py); it
+    #            activates only when explicitly configured, so the
+    #            live path is unchanged while best.onnx is absent.
+    #   ImageNet mean/std for RF-DETR exports
+    #   (rfdetr/export/_runtime/preprocess.py).
+    normalize_imagenet: bool = False  # True for RF-DETR exports only
     onnx_providers: List[str] = field(default_factory=lambda: ["CPUExecutionProvider"])
     intra_op_threads: int = 0  # 0 = onnxruntime default
 
@@ -145,6 +173,15 @@ class TrainedDetector:
         self._total_processing_time = 0.0
         self._last_result: Optional[DetectionResult] = None
         self._input_name: Optional[str] = None
+        self._output_names: List[str] = []
+        if session is not None:
+            # Best-effort only: injected sessions may be stubs (tests)
+            # or real ort sessions. The rfdetr decoder re-derives
+            # names from the session when this list is empty.
+            try:
+                self._output_names = [o.name for o in session.get_outputs()]
+            except Exception:
+                self._output_names = []
         self._log = logger.bind(detector=name)
 
     # ── duck-type interface (mirrors BaseDetector) ──────────────────
@@ -233,6 +270,7 @@ class TrainedDetector:
             "max_detections": self.config.max_detections,
             "class_filter": self.config.class_filter,
             "decode_mode": self.config.decode_mode,
+            "normalize_imagenet": self.config.normalize_imagenet,
             "model_path": self.model_path,
         }
 
@@ -264,6 +302,7 @@ class TrainedDetector:
         """Release the ONNX session (safe to call multiple times)."""
         self._session = None
         self._input_name = None
+        self._output_names = []
 
     # ── session handling (lazy) ─────────────────────────────────────
 
@@ -295,7 +334,9 @@ class TrainedDetector:
             sess_options=sess_options,
             providers=self.config.onnx_providers,
         )
-        self._log.info("model_loaded", path=self.model_path)
+        self._output_names = [o.name for o in self._session.get_outputs()]
+        self._log.info("model_loaded", path=self.model_path,
+                       outputs=self._output_names)
         return self._session
 
     # ── preprocessing ───────────────────────────────────────────────
@@ -327,6 +368,12 @@ class TrainedDetector:
 
         rgb = canvas[:, :, ::-1]  # BGR → RGB
         tensor = rgb.transpose(2, 0, 1).astype(np.float32) / 255.0
+        if self.config.normalize_imagenet:
+            # RF-DETR exports expect ImageNet-normalized input
+            # (rfdetr/export/_runtime/preprocess.py).
+            mean = np.array([0.485, 0.456, 0.406], dtype=np.float32)[:, None, None]
+            std = np.array([0.229, 0.224, 0.225], dtype=np.float32)[:, None, None]
+            tensor = (tensor - mean) / std
         return tensor[None], scale, (pad_x, pad_y)
 
     # ── decoding ────────────────────────────────────────────────────
@@ -344,6 +391,8 @@ class TrainedDetector:
     ) -> Tuple[List[DetectionBox], List[str], List[float]]:
         if self.config.decode_mode == "direct":
             all_preds = [self._decode_direct(o) for o in outputs]
+        elif self.config.decode_mode == "rfdetr":
+            all_preds = [self._decode_rfdetr(outputs)]
         elif self.config.decode_mode == "yolov8":
             all_preds = [self._decode_yolov8(o) for o in outputs]
         else:
@@ -481,6 +530,75 @@ class TrainedDetector:
     def _decode_direct(self, head: np.ndarray) -> np.ndarray:
         """Passthrough decode: head already (B, N, 6) xyxy+conf+class_id."""
         return np.asarray(head[0]).reshape(-1, 6)
+
+    def _session_output_names(self) -> List[str]:
+        """Output names for rfdetr matching, from cache or live session."""
+        if self._output_names:
+            return list(self._output_names)
+        try:
+            return [o.name for o in self._session.get_outputs()]
+        except Exception:
+            return []
+
+    def _decode_rfdetr(self, outputs: List[np.ndarray]) -> np.ndarray:
+        """Decode an RF-DETR export → (N, 6) xyxy+conf+class_id, model-input pixels.
+
+        Expects the raw pair: dets (B,Q,4) normalized cxcywh and labels
+        (B,Q,C) raw logits with background in the last slot (rfdetr 1.11.2
+        export layout). Mirrors rfdetr's PostProcess._select_topk: per-class
+        sigmoid, drop bg, global ranking over Q*C' query/class pairs — a
+        per-query argmax would drop extra classes a query scores on.
+        Output tensors are matched by name ("dets"/"labels") with a
+        shape-based fallback ((*,*,4) = dets). No thresholding here:
+        the shared path in _decode_outputs applies conf_threshold,
+        NMS, the max_detections cap and the letterbox-undo.
+
+        NOTE on the draft (drafts/aegis-rfdetr-decode-patch.md §1e):
+        ranking uses a full descending argsort instead of the draft's
+        argpartition(-Q*C'), which is an edge-case hazard when Q*C'
+        equals the flat length. Semantics are identical; Q*C' is
+        small (e.g. 300 queries × 2 classes = 600 pairs).
+
+        GATED: reachable only with decode_mode="rfdetr". Never
+        selected by any registry default while best.onnx is absent.
+        """
+        names = self._session_output_names()
+        dets = labels = None
+        for out, name in zip(outputs, names):
+            n = (name or "").lower()
+            if "det" in n and dets is None:
+                dets = out
+            elif "label" in n and labels is None:
+                labels = out
+        if dets is None or labels is None:  # name-less graph: match by shape
+            for out in outputs:
+                arr = np.asarray(out)
+                if arr.ndim == 3 and arr.shape[-1] == 4 and dets is None:
+                    dets = out
+                elif arr.ndim == 3 and labels is None:
+                    labels = out
+        if dets is None or labels is None:
+            raise ValueError(
+                "rfdetr decode needs dets (B,Q,4) + labels (B,Q,C); got "
+                + str([getattr(o, "shape", None) for o in outputs])
+            )
+        h, w = self.config.input_size
+        d = np.asarray(dets[0], dtype=np.float64)                    # (Q,4)
+        scores = self._sigmoid(np.asarray(labels[0], dtype=np.float64)[..., :-1])
+        qn, cn = scores.shape                                        # (Q, C')
+        if qn == 0 or cn == 0:
+            return np.zeros((0, 6), dtype=np.float64)
+        flat = scores.reshape(-1)
+        order = np.argsort(-flat)  # score desc, all Q*C' pairs
+        qi, ci = np.unravel_index(order, (qn, cn))
+        b = d[qi]                                                    # (N,4) cxcywh
+        x1 = (b[:, 0] - b[:, 2] / 2) * w
+        y1 = (b[:, 1] - b[:, 3] / 2) * h
+        x2 = (b[:, 0] + b[:, 2] / 2) * w
+        y2 = (b[:, 1] + b[:, 3] / 2) * h
+        return np.stack(
+            [x1, y1, x2, y2, flat[order], ci.astype(np.float64)], axis=1
+        )
 
     @staticmethod
     def _nms(boxes: np.ndarray, scores: np.ndarray, iou_threshold: float) -> List[int]:

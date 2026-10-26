@@ -13,7 +13,8 @@ Honesty rules baked into the types:
   * ``FeedPOVState.identity_known`` is True only when the spectated
     identity was resolved against the roster (see state.py for the
     two-signal agreement rules); ``identity_source`` records HOW
-    ("both" / "highlight" / "ocr" / "none").
+    ("both" / "none" only since Phase 33: a single signal never
+    confirms identity, so "highlight" / "ocr" are no longer emitted).
   * ``stale`` marks a cached state whose frame did not change since
     the last real read -- ``observed_at`` is NOT refreshed for stale
     copies, so consumers can see the state's true age.
@@ -58,12 +59,14 @@ class FeedPOVState:
     spectated_index: Optional[int] = None  # roster index; None = UNKNOWN
     players: Tuple[PlayerPOV, ...] = ()
     identity_known: bool = False
-    # How spectated_index was resolved: "both" | "highlight" | "ocr" | "none".
+    # How spectated_index was resolved: "both" | "none" only.
+    # ("highlight" / "ocr" were pre-Phase-33 single-signal values;
+    # they are no longer emitted -- see state._resolve_identity.)
     identity_source: str = "none"
     # True when this state is a cached copy (frame unchanged since the
     # last real read). observed_at keeps the ORIGINAL read time.
     stale: bool = False
-    # Raw nameplate OCR text behind an "ocr"/"both" resolution (audit).
+    # Raw nameplate OCR text behind a "both" resolution (audit).
     nameplate_text: Optional[str] = None
 
     def spectated_player(self) -> Optional[PlayerPOV]:

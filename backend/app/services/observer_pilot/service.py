@@ -1324,7 +1324,19 @@ def _frame_provider_for_monitor(monitor: Any):
 
 def _spectated_reader():
     """W3 spectated_reader over W1's POVReader: the highlight index
-    read from one frame image (None = identity not readable)."""
+    read from one frame image (None = identity not readable).
+
+    SCOPE NOTE (Phase 33, K-H5): this is TAP VERIFICATION only -- it
+    checks that the camera's highlight moved to the target card after
+    a tap. It is NOT an identity confirmation and never sets
+    identity_known: identity decisions still gate on
+    POVStateTracker, which since Phase 33 requires BOTH highlight
+    and nameplate-OCR agreement. Requiring OCR agreement here too
+    would need slot + roster plumbing through the executor's
+    frame->int reader contract (it carries neither) and would make
+    verification fail whenever OCR is unavailable; that rework is
+    deliberately NOT done in this fix (tap+verify behaviour
+    unchanged) -- see the worker report for the follow-up decision."""
     try:
         from app.vision.detectors.pov_reader import POVReader
 
@@ -1375,7 +1387,9 @@ def build_observer_pilot(
         #                      manager -> W3's no_device_resolver, so
         #                      every tap honestly ends no_device
         #   frame_provider   — the monitor feeds' own frame providers
-        #   spectated_reader — POVReader's highlight read
+        #   spectated_reader — POVReader's highlight read (tap
+        #                      verification only, NOT identity
+        #                      confirmation -- see _spectated_reader)
         #   config           — ExecutorConfig() loads the calibration
         #                      JSON from AEGIS_POV_CALIBRATION_PATH
         from app.vision.capture.adb_controller import ADBController

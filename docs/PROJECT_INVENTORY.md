@@ -3,24 +3,28 @@
 **Date:** 2026-10-20 · **Method:** every number below was counted from the code itself
 (grep / find / pytest --collect-only), not copied from phase reports.
 Where a count could not be verified exactly, that is stated.
+**Headline recount (Phase 33 low batch, 2026-10-26, HEAD `877cc7a`):**
+the headline table below was re-measured at that HEAD; per-module
+detail in §1/§5/§7/§9 is the 2026-10-20 snapshot unless a line below
+was individually corrected and says so.
 
 ## Headline counts
 
 | Metric | Count | How verified |
 |---|---|---|
-| Backend Python files (`backend/app/`) | 403 | `find` |
-| Backend LOC (`backend/app/**/*.py`) | ~96,946 | `wc -l` |
-| Frontend TS/TSX LOC (app+components+lib) | ~26,234 | `wc -l` |
-| API endpoints | **169** (167 HTTP + 2 WebSocket) | 170 decorator matches; 1 is a false positive inside `db/base.py` text |
+| Backend Python files (`backend/app/`) | 459 | `find` |
+| Backend LOC (`backend/app/**/*.py`) | ~126,322 | `wc -l` |
+| Frontend TS/TSX LOC (app+components+lib) | ~31,430 | `wc -l` |
+| API endpoints | **211** (209 HTTP + 2 WebSocket) | 212 decorator matches; 1 is a false positive inside `db/base.py` text |
 | Agent classes (BaseAgent subclasses) | **41** in 9 families | grep `class …(BaseAgent)` per family dir |
-| DB tables | **26** (23 explicit `__tablename__` + user/api_key/audit_log auto-named) | grep across `backend/app` |
-| Alembic migrations | **11 files** (001, 005–014) | `ls backend/alembic/versions/` |
+| DB tables | **33** (30 explicit `__tablename__` + User/ApiKey/AuditLog auto-named) | grep across `backend/app` |
+| Alembic migrations | **13 files** (001, 005–016) | `ls backend/alembic/versions/` |
 | Vision detectors on disk | 16 modules; **10 wired live** | `vision/runtime.py` imports + docstring |
 | Frontend page routes | **34** | `find app -name page.tsx` |
-| Frontend component files | 53 (26 graphics) | `find components -name '*.tsx'` |
+| Frontend component files | 55 | `find components -name '*.tsx'` |
 | Graphics templates | **17 templates + 7 animated story graphics** | `components/graphics/**` |
-| Backend tests | **947 collected** (pytest --collect-only; 12 legacy collection errors); 62 test files; 1,172 `def test_` by grep | pytest + grep |
-| Docs | 30 top-level `docs/*.md` + 11 deep-analysis + 9 architecture | `ls docs/` |
+| Backend tests | **2062 collected** (pytest --collect-only; 0 collection errors) | pytest + grep |
+| Docs | 44 top-level `docs/*.md` | `ls docs/` |
 | Piper voices installed | 2 (Hindi `hi_IN-pratham-medium`, English `en_US-amy-medium`) | `.local-voices/` |
 | Commentary modes | 5 | `audio/commentary_modes.py` |
 | Feed event types (NormalizedEvent) | 15 | `feed_adapter/schemas.py` |
@@ -29,7 +33,9 @@ Where a count could not be verified exactly, that is stated.
 
 ---
 
-## 1. API surface — 169 endpoints by module
+## 1. API surface — 169 endpoints by module (2026-10-20 snapshot; the
+headline total is now 211 — per-module counts below were NOT re-measured
+in the Phase 33 recount and no longer sum to the headline)
 
 Route decorators counted per file (`@router.*` + `@app.*`):
 
@@ -55,7 +61,7 @@ Route decorators counted per file (`@router.*` + `@app.*`):
 | `api/v1/observers` | 4 | observer-slot ↔ team mapping |
 | `api/v1/ceremony` | 4 | WWCD ceremony control |
 | `api/v1/anti_cheat` | 4 | flags list, review confirm/dismiss |
-| `api/v1/stream` | 3 | stream start/stop/status (multi-RTMP) |
+| `api/v1/stream` | 3 | stream start/stop/status — Phase 32 K-C2: start/stop now 410 Gone, status reports `"deprecated"`; the shell streamer is the official path (see `docs/STREAMING.md` §0) |
 | `api/v1/pip` | 2 | map-cam / PiP layout |
 | `api/v1/predictions` | 1 | `GET /predictions/win-probability` |
 | `api/v1/cluster` | 1 | `GET /cluster/nodes` |
@@ -102,7 +108,7 @@ prediction models, `vision_wiring.py` (trained-model → detector bridge).
 - **pip/** — map-cam / PiP layout state
 - **observer_mapping/** — observer slot ↔ team assignment
 - **video_feed_service** — MJPEG layers for output page (honest feed states)
-- **streaming/** (`app/streaming`) — Xvfb+Chromium+FFmpeg pipeline, encoder, destinations (YouTube/Twitch/Facebook/custom RTMP)
+- **streaming/** (`app/streaming`) — Xvfb+Chromium+FFmpeg pipeline, encoder, destinations (YouTube/Twitch/Facebook/custom RTMP). Phase 32 K-C2 correction: the API-driven path is deprecated (410 Gone); the module is retained only as a library for pure command builders + unit tests, and the shell streamer is the official topology (see `docs/STREAMING.md` §0).
 - **broadcast/** — OBS client, scene/source managers, transition controller, recording manager, audio mixer
 - **production/** — fail-safe controller, emergency scenes, OBS health monitor, production guard/metrics
 - **cluster/** — Redis node registry (advisory/monitoring)
@@ -125,13 +131,15 @@ kill_feed_ocr module (superseded by the HUD reader / KillFeedDetector).
 Inference: model loader, GPU manager, batch processor, worker; trained-model path via
 `VISION_MODEL_PATH` (RF-DETR/YOLO ONNX — model itself still in Kaggle training).
 
-## 5. Database — 26 tables, 11 migrations
+## 5. Database — 33 tables, 13 migrations
 
 Tables: teams, players, tournaments, user (auto-named), api_key, audit_log, matches,
 match_events, kill_events, fight_events, match_player_stats, match_team_stats,
 predictions, highlights, commentary, broadcast_sessions, event_store, observer_slots,
 stories, story_settings, team_intelligence, rotation_events, drop_events, zone_phases,
-utility_events, anti_cheat_flags.
+utility_events, anti_cheat_flags, director_decisions, director_decision_labels,
+director_learning_state, director_learning_adjustments, director_suggestion_fates,
+director_shadow_divergences, pov_pilot_decisions.
 
 | Migration | Added |
 |---|---|
@@ -146,8 +154,10 @@ utility_events, anti_cheat_flags.
 | 012 | Player utility stats — healing, grenades_used |
 | 013 | MVP unification — mvp_score/is_mvp, damage_dealt nullable (honesty) |
 | 014 | anti_cheat_flags (review workflow) |
+| 015 | Director learning loop — decision journal, suggestion fates, shadow divergences |
+| 016 | Observer auto-pilot — POV pilot decisions |
 
-(Numbers 002–004 do not exist as separate files; the chain is linear, single head 014.)
+(Numbers 002–004 do not exist as separate files; the chain is linear, single head 016.)
 
 ## 6. Audio / commentary
 
@@ -175,7 +185,7 @@ utility_events, anti_cheat_flags.
 - **Admin:** `/admin`, `/admin/teams`, `/admin/players`, `/admin/tournament`, `/admin/users`
 - **Analyst:** `/analyst`, `/analyst/match/[id]`, `/analyst/team/[name]`
 
-Components (53 files): broadcast ×4 (game-video, game-overlays, map-cam-view,
+Components (55 files, Phase 33 recount; subgroup counts below are the 2026-10-20 snapshot): broadcast ×4 (game-video, game-overlays, map-cam-view,
 top-center-stats), live ×7 (DirectorPanel, KillFeed, StandingsTable, MatchHeader,
 AgentChatter, SystemHealth, ConnectionBanner), graphics-staging ×10 (map-cam, PiP
 layout, player/team panels, preshow view+controls, WWCD ceremony, zone timer,
@@ -193,11 +203,8 @@ ZoneAdvantage, WWCD cards, StoryGraphic shell, TemplatePicker, animation-style s
 
 ## 9. Tests & docs & infra
 
-- **Tests:** 62 test files (57 under `backend/tests/`: unit, integration — api/broadcast/
-  database/websocket — e2e, fixtures). `pytest --collect-only` = **947 tests collected**,
-  12 collection errors in legacy scaffold-era files (pre-existing). Phase gates reported:
-  P21 55/55 new, P22 83/83 new, full suite 914 pass / 31 pre-existing fails (P22 report).
-- **Docs (30 top-level):** VISUAL_BROADCAST_BIBLE, PRD_GAP_ANALYSIS, PHASE22_FINAL_LEDGER,
+- **Tests:** Phase 33 recount at HEAD `877cc7a`: `pytest --collect-only` = **2062 tests collected, 0 collection errors** (run with `-o addopts=""` because the system Python lacks pytest-cov, which `tests/pytest.ini` requests). The 2026-10-20 snapshot below it (947 collected, 12 errors) is superseded.
+- **Docs (44 top-level `docs/*.md`, Phase 33 recount):** VISUAL_BROADCAST_BIBLE, PRD_GAP_ANALYSIS, PHASE22_FINAL_LEDGER,
   BETTER_THAN_KRAFTON, BGMI_TERMS_AZ, BGMI_EXPERT_PROMPTS, AI_STORYTELLER,
   ANIMATED_GRAPHICS, GRAPHICS, DIRECTOR, ROLES, CLUSTER, STREAMING, AUDIO, VISION,
   VISION_MODEL, GAME_FEED, OBSERVER_SETUP, ANALYSIS_PRODUCT, KAGGLE_TRAINING, TRAINING,
@@ -277,10 +284,16 @@ detection (multi-kill, squad wipe, verified clutch, final-kill); day reel
 (24 segments / 5 min cap); video renderer cuts 16:9 MP4 + 9:16 MP4 + 3 s GIF from
 recordings when a source recording exists, else honest `no_source`.
 
-### Streaming — BUILT (never live-tested)
-Director output page → Xvfb + headless Chromium → FFmpeg x264 → tee → multi-RTMP
-(YouTube/Twitch/Facebook/custom); NVENC selection logic present (in-service plug
-reverted after A/B test broke streaming tests — correct shape documented).
+### Streaming — BUILT via shell streamer (never live-tested); API path DEPRECATED
+Phase 32 K-C2 correction: the official topology is the shell streamer
+(Director output page → Xvfb + headless Chromium → FFmpeg x264 → tee →
+multi-RTMP, YouTube/Twitch/Facebook/custom; see `docs/STREAMING.md` §0).
+The older API-driven path (`POST /api/v1/stream/start`, `app.streaming`
+spawning the display stack from the API process) is deprecated and
+disabled — start/stop return 410 Gone, status reports `"deprecated"`.
+No real RTMP push has ever been demonstrated from the dev VM, so
+"streaming works" is still unproven until the first real push on the
+production rig.
 
 ### Team Analysis — BUILT
 Rotation/drop/zone tracking, fight log, team dossiers, analyst dashboard,
@@ -321,14 +334,18 @@ documented (real BGMI killfeed is top-LEFT, "killer [weapon icon] victim" format
   (migration 013); `GET /api/v1/matches/{id}/player-stats` serialises the persisted
   value directly — `null` ("—") when no real damage was recorded, never `kills×120`
   (that fabrication was removed in Phase 21).
-- **The gap:** `MatchService.record_player_stats(...)` — the only writer of
-  `damage_dealt` — has **no live caller** in the running app (verified by grep: only
-  the definition and doc references exist). So in a live match today, the API will
-  honestly show `null` damage per player. Also note the vision chain measures
-  damage **taken** by the observed player (their own HP bar); damage **dealt by an
-  attacker** is not attributable from HP bars alone and is not computed.
-- **Verdict:** fight-signal damage = BUILT & WIRED. Per-player damage stat =
-  EXISTS (schema + API + honesty) BUT NOT WIRED to a live producer.
+- **The gap, CORRECTED Phase 33 (was: "no live caller"):** `MatchService.record_player_stats(...)`
+  now HAS a live caller — `LiveStatsService` (`backend/app/services/live_stats.py:351`,
+  Phase 24 W6) subscribes to the event bus itself and flushes accumulated
+  per-player stats through it. The remaining honest limit is narrower:
+  `damage_dealt` is still NEVER written from a spectator feed (HP drops
+  measure damage *taken*, never damage *dealt* by an attacker), so
+  `live_stats.py` deliberately omits it and the API still renders `null`
+  ("—") for damage per player.
+- **Verdict (corrected):** fight-signal damage = BUILT & WIRED. Per-player
+  stats persistence = WIRED via the live-stats service. Per-player
+  `damage_dealt` itself = still honestly NULL — no dealt-damage producer
+  exists from spectator mode.
 
 ### 2. Camera switching — ✅ BUILT & WIRED (one nuance)
 - **Director service** (`services/director_service.py`, 855 lines): 3 modes —
@@ -399,12 +416,20 @@ documented (real BGMI killfeed is top-LEFT, "killer [weapon icon] victim" format
   text** — so on real footage this flag will almost never fire. The DB has a
   `headshots` column, the canonical MVP formula includes `headshots × 2`, and
   agents (EngagementAnalyzer, HypeDetector — incl. a >100 m headshot hype moment)
-  consume headshot flags *when present*. But: the feed-ingest schema has **no
-  headshot field**, and the Spotter UI has **no headshot toggle** — there is no
-  reliable live producer. In the live vision path the MVP headshot term is
+  consume headshot flags *when present*. CORRECTION (Phase 33 — the
+  2026-10-20 claim it replaces was wrong): the Spotter UI DOES have a
+  headshot toggle (Phase 24, `frontend/app/spotter/page.tsx:432`), and
+  a spotter/manual headshot is a trusted-human producer — the live-stats
+  writer source-gates headshots so only trusted-human provenance
+  (`headshot_confirmed`, spotter/manual/observer source) increments the
+  persisted counter (`backend/app/services/live_stats.py` header). What
+  still has no reliable producer is VISION headshot: the killfeed icon
+  flag measures 7.7% precision (Phase 23) and is banned from downstream
+  consumption, so in the pure vision path the MVP headshot term is
   effectively always 0 — honestly 0, not faked.
-- **Verdict:** knock = BUILT & WIRED. Headshot = schema/formula/consumers exist,
-  producer does not → EXISTS BUT NOT WIRED.
+- **Verdict (corrected):** knock = BUILT & WIRED. Headshot = schema/formula/
+  consumers exist + a MANUAL (spotter) producer exists; a reliable VISION
+  producer does not → EXISTS, MANUALLY PRODUCIBLE, NOT VISION-WIRED.
 
 ### 6. Replay of knock / headshot / big moments — big moments ✅ BUILT; knock/headshot-specific replay ❌ NOT PRESENT
 - **Replay system:** event replay — marks + clips cut from the rolling event

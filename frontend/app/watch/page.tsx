@@ -6,10 +6,17 @@
  * Route: /watch (all roles, including viewer).
  *
  * Embeds the director output layout (components/DirectorOutputView — the
- * same renderer /broadcast/output uses) with zero controls. A LIVE badge
- * appears when GET /api/v1/stream/status reports the stream as running;
- * otherwise an honest "stream offline" standby is shown instead of the
- * feed. No mock data: every value comes from the real status endpoint.
+ * same renderer /broadcast/output uses) with zero controls.
+ *
+ * LIVENESS LIMIT (Phase 32, K-C2 — comment only, do not re-wire):
+ * GET /api/v1/stream/status now always reports state "deprecated"
+ * (the API stream path is 410 Gone; the shell streamer is official —
+ * see docs/STREAMING.md §0), so `streamIsRunning` below can never
+ * return true and this page always shows the honest "stream offline"
+ * standby, even while the shell streamer is actually running. Shell-
+ * streamer liveness is unreported anywhere; a future out-of-band
+ * health signal is needed — resurrecting the API status is NOT the
+ * fix. No mock data: every value comes from the real status endpoint.
  */
 
 import { useCallback, useEffect, useState } from "react";

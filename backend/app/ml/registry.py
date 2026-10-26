@@ -51,6 +51,13 @@ MODEL_DETECTOR_MAP: Dict[str, Optional[List[str]]] = {
     # Phase-15 kill-feed model (YOLOv8, single-output export): the
     # Phase-14 OCR KillFeedDetector consults it FIRST for entry
     # localisation (see app/ml/vision_wiring.py).
+    # Phase 33 W4 GATE — deliberately NOT flipped to "rfdetr": the
+    # RF-DETR decode exists in trained_detector.py but is opt-in
+    # only (explicit decode_mode="rfdetr" override). The YOLO26
+    # export plugs into this yolov8 decode unchanged and is the
+    # decodable fallback TODAY. Flip this entry only after a real
+    # best.onnx passes the smoke test in the W4 report — never on
+    # the strength of this patch alone.
     "killfeed": list(KILLFEED_DEFAULT_CLASSES),
 }
 
@@ -209,6 +216,12 @@ class VisionModelRegistry:
         config = TrainedDetectorConfig(
             classes=list(model_cfg.get("classes", DEFAULT_CLASSES)),
             decode_mode=model_cfg.get("decode_mode", "yolov5"),
+            # Forwarded generically so a future rfdetr entry CAN carry
+            # normalize_imagenet/input_size; no current entry sets
+            # them, so defaults (False / (640, 640)) apply today and
+            # live behaviour is unchanged.
+            normalize_imagenet=bool(model_cfg.get("normalize_imagenet", False)),
+            input_size=tuple(model_cfg.get("input_size", (640, 640))),
             class_filter=class_filter,
         )
         for key, value in {**(getattr(self, "_detector_overrides", {})), **overrides}.items():

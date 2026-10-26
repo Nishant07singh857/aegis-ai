@@ -124,18 +124,111 @@ class Base(DeclarativeBase):
 # ASYNC ENGINE FACTORY
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
+def _register_engine_listeners(engine: AsyncEngine) -> None:
+    """Shared connect/checkout/close listeners for every engine this
+    module creates (real DB and the Phase 33 no-DB placeholder alike).
+    Extracted so the placeholder branch does not duplicate them; the
+    listeners only log, they never change connection behaviour.
+    """
+    # StaticPool (the no-DB placeholder) has no pool.size()/checkedin()
+    # in the same way; guard the checkout log so the placeholder can
+    # never crash on a debug log line.
+    def _pool_size() -> str:
+        try:
+            return str(engine.pool.size())
+        except Exception:
+            return "n/a"
+
+    def _pool_checkedin() -> str:
+        try:
+            return str(engine.pool.checkedin())
+        except Exception:
+            return "n/a"
+
+    @sa_event.listens_for(engine.sync_engine, "connect")
+    def receive_connect(dbapi_connection, connection_record):
+        """Set connection parameters on connect"""
+        logger.debug("Database connection established")
+
+    @sa_event.listens_for(engine.sync_engine, "checkout")
+    def receive_checkout(dbapi_connection, connection_record, connection_proxy):
+        """Log when connection is checked out from pool"""
+        if settings.DEBUG:
+            logger.debug(
+                f"Connection checked out from pool. "
+                f"Pool size: {_pool_size()}, "
+                f"Checked in: {_pool_checkedin()}"
+            )
+
+    @sa_event.listens_for(engine.sync_engine, "close")
+    def receive_close(dbapi_connection, connection_record):
+        """Log when connection is returned to pool"""
+        if settings.DEBUG:
+            logger.debug("Database connection closed")
+
+
 def create_engine() -> AsyncEngine:
     """
     Create async SQLAlchemy engine with production-optimized settings.
+
+    Phase 33 (K-H6) — unconfigured DATABASE_URL: previously
+    ``create_async_engine("")`` raised ``ArgumentError`` at import
+    time, so the documented dev "no Postgres needed / in-memory
+    mode" (``backend/.env.development``: "Set to empty string to use
+    in-memory mode") could never actually boot — the app died with
+    a cryptic URL-parse error before the lifespan was even reached.
+    In non-production, an empty DATABASE_URL now yields a
+    single-connection in-memory sqlite placeholder engine instead,
+    so the process can import and boot; the lifespan (see
+    ``app.main._init_database_or_fail_fast``) deliberately SKIPS
+    ``init_db`` in this mode and logs that there is no database —
+    the placeholder is an import-time shim, NOT a database the app
+    pretends to persist to. Production still refuses: the Settings
+    validator fails first, and this function raises again as
+    defence-in-depth if it is ever reached with an empty URL.
+    A NON-EMPTY url is untouched by this branch: a configured but
+    dead database still fails at ``init_db`` time in the lifespan,
+    loudly (see ``app.main``).
     """
-    
+
     # Base engine configuration
     #
     # connect_args is dialect-aware: asyncpg-only kwargs (command_timeout,
     # server_settings) crash every sqlite connect with "invalid keyword
     # argument", so they are only included for postgresql DATABASE_URLs.
+    database_url = (settings.DATABASE_URL or "").strip()
+    if not database_url:
+        if settings.ENVIRONMENT == "production":
+            raise RuntimeError(
+                "Refusing to create a database engine in production "
+                "without DATABASE_URL set. Set DATABASE_URL to the real "
+                "connection string."
+            )
+        logger.warning(
+            "DATABASE_URL is not set: no database is configured "
+            "(dev/test no-DB mode). Using an in-memory sqlite "
+            "placeholder engine so the process can boot; the "
+            "lifespan skips init_db in this mode and DB-backed "
+            "features will fail per-request instead of persisting. "
+            "Set DATABASE_URL to run with a real database."
+        )
+        from sqlalchemy.pool import StaticPool
+
+        engine = create_async_engine(
+            "sqlite+aiosqlite:///:memory:",
+            echo=settings.DATABASE_ECHO,
+            poolclass=StaticPool,
+            connect_args={"check_same_thread": False},
+        )
+        # Fall through to the shared event-listener registration
+        # below, then return early (no pool-size log: StaticPool
+        # has no pool_size).
+        _register_engine_listeners(engine)
+        logger.info("Database engine created | in-memory sqlite placeholder (no DATABASE_URL)")
+        return engine
+
     connect_args: Dict[str, Any] = {}
-    if settings.DATABASE_URL.startswith("postgresql"):
+    if database_url.startswith("postgresql"):
         connect_args = {
             "command_timeout": 30,
             "server_settings": {
@@ -155,7 +248,7 @@ def create_engine() -> AsyncEngine:
         "pool_pre_ping": True,  # Verify connections before use
         "connect_args": connect_args,
     }
-    
+
     # Environment-specific configurations
     if settings.ENVIRONMENT == "production":
         engine_kwargs.update({
@@ -183,35 +276,13 @@ def create_engine() -> AsyncEngine:
             "pool_size": 20,
             "max_overflow": 10,
         })
-    
+
     # Create engine
     engine = create_async_engine(
-        settings.DATABASE_URL,
+        database_url,
         **engine_kwargs
     )
-    
-    # Register event listeners
-    @sa_event.listens_for(engine.sync_engine, "connect")
-    def receive_connect(dbapi_connection, connection_record):
-        """Set connection parameters on connect"""
-        logger.debug("Database connection established")
-    
-    @sa_event.listens_for(engine.sync_engine, "checkout")
-    def receive_checkout(dbapi_connection, connection_record, connection_proxy):
-        """Log when connection is checked out from pool"""
-        if settings.DEBUG:
-            logger.debug(
-                f"Connection checked out from pool. "
-                f"Pool size: {engine.pool.size()}, "
-                f"Checked in: {engine.pool.checkedin()}"
-            )
-    
-    @sa_event.listens_for(engine.sync_engine, "close")
-    def receive_close(dbapi_connection, connection_record):
-        """Log when connection is returned to pool"""
-        if settings.DEBUG:
-            logger.debug("Database connection closed")
-    
+    _register_engine_listeners(engine)
     logger.info(
         f"Database engine created | "
         f"Pool Size: {engine_kwargs['pool_size']} | "

@@ -394,11 +394,18 @@ class IconMatcher:
     def match(self, crop) -> IconMatch:
         """Match a weapon-slot (or whole-entry) crop against the library.
 
-        Returns an IconMatch whose ``weapon`` is set ONLY when the best
-        family is an identified weapon family AND its score clears the
-        threshold. An ``unknown_*`` win or a low score yields
-        ``weapon=None`` — the raw best family/score are still reported
-        for diagnostics.
+        Delegates to :meth:`match_candidates` (``top_n=1``), so the
+        Phase 32 margin gate applies here exactly as there. Returns an
+        IconMatch whose ``weapon`` is set ONLY when the best family is
+        an identified weapon family AND its score clears ``threshold``
+        AND it beats the best other family by at least
+        ``margin_threshold`` (default 0.15, boundary inclusive). A
+        margin failure yields ``weapon=None`` with
+        ``weapon_abstained=True`` (identified + above threshold, but
+        abstained — distinct from a low-score or ``unknown_*`` null).
+        An ``unknown_*`` win or a below-threshold score likewise yields
+        ``weapon=None`` (without the abstention flag). The raw best
+        family/score/second_score are still reported for diagnostics.
         """
         ranked = self.match_candidates(crop, top_n=1)
         return ranked[0] if ranked else IconMatch()
