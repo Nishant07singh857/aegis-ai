@@ -62,6 +62,17 @@ services:
       YOUTUBE_STREAM_KEY: ${YOUTUBE_STREAM_KEY:-}
       TWITCH_STREAM_KEY: ${TWITCH_STREAM_KEY:-}
       FACEBOOK_STREAM_KEY: ${FACEBOOK_STREAM_KEY:-}
+      # Feed credential (Phase 32, K-C1): the output page embeds the game
+      # feed in a bare <img> that cannot send auth headers, so capture
+      # needs a short-lived signed feed token in the page URL. Either set
+      # FEED_TOKEN directly (minted beforehand by an operator via
+      # POST /api/v1/video/feed-token), or set AEGIS_BACKEND_URL +
+      # AEGIS_API_KEY (operator key) and the entrypoint mints one. With
+      # neither, the streamer fails fast instead of capturing NO FEED.
+      # (Overlay-only DIRECTOR_URLs skip this — they embed no game feed.)
+      FEED_TOKEN: ${FEED_TOKEN:-}
+      AEGIS_BACKEND_URL: ${AEGIS_BACKEND_URL:-}
+      AEGIS_API_KEY: ${AEGIS_API_KEY:-}
     deploy:
       resources:
         limits:

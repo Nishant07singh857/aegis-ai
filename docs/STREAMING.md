@@ -13,6 +13,45 @@ to do it:
 No paid APIs are involved anywhere. Stream keys are the only credentials, and
 they live in your environment — never in code, never in this repo.
 
+## 0. Topology decision (Phase 32, K-C2) — read this first
+
+There is ONE supported automated-streaming topology: the **shell
+streamer** in this guide (Docker service `streamer`, profile
+`streaming`). The older API-driven path (`POST /api/v1/stream/start`,
+`app.streaming.service.StreamService` spawning Xvfb/Chromium/FFmpeg from
+the API process) is **deprecated and disabled**: it could never run in
+the production backend image, which ships no Xvfb/Chromium/FFmpeg, so
+every start attempt failed with 409. The API now answers 410 Gone for
+start/stop and reports state `"deprecated"` for status — it does not
+pretend to know the shell streamer's state. Do not re-wire a route to
+`StreamService` without also putting those binaries into that route's
+image AND proving a real RTMP push on the production rig.
+
+HONEST LIMIT: no real RTMP push has ever been demonstrated from the dev
+VM (no keys, no ingest reachable here). The first real RTMP push must be
+proven on the production rig before any "streaming works" claim is made.
+
+## 0b. Feed credential for headless capture (Phase 32, K-C1)
+
+The game video on `/broadcast/output` comes from
+`GET /api/v1/video/feed/{slot}`, which is authenticated (H3): a bare
+`<img>` tag cannot send auth headers. Headless capture therefore carries
+a short-lived signed feed token:
+
+- An operator mints one: `POST /api/v1/video/feed-token`
+  (operator auth; default TTL 600s, range 60–3600s). The token is valid
+  ONLY on the feed route — it is not a general credential.
+- The streamer entrypoint takes it two ways: `FEED_TOKEN` directly, or
+  `AEGIS_BACKEND_URL` + `AEGIS_API_KEY` (operator key) to mint one
+  itself. With neither, and a `/broadcast/output` DIRECTOR_URL, the
+  streamer fails fast instead of silently capturing a NO FEED slate.
+- The output page also accepts `?feed_token=` in its own URL and
+  propagates it into the `<img>` src, so a manual/OBS capture URL can
+  carry the same token.
+- An open browser request with no credential still gets 401. Token
+  limits (bearer until expiry, no revocation list) are documented in
+  `backend/app/api/v1/video/feed_token.py` — keep TTLs short.
+
 ---
 
 ## 1. Getting a stream key
@@ -163,7 +202,10 @@ a host reboot; start it when you mean to go live.
 | `YOUTUBE_STREAM_KEY` | *(empty)* | YouTube stream key. At least one key required. |
 | `TWITCH_STREAM_KEY` | *(empty)* | Twitch stream key. |
 | `FACEBOOK_STREAM_KEY` | *(empty)* | Facebook stream key. |
-| `DIRECTOR_URL` | `http://frontend:3000/broadcast/output?bg=brand` | Page the streamer captures. `?bg=brand` = opaque plate (for direct capture); omit it for a transparent background (for downstream compositing). Any overlay URL works for a widget-only stream. |
+| `DIRECTOR_URL` | `http://frontend:3000/broadcast/output?bg=brand` | Page the streamer captures. `?bg=brand` = opaque plate (for direct capture); omit it for a transparent background (for downstream compositing). Any overlay URL works for a widget-only stream. The entrypoint appends `feed_token=` for `/broadcast/output` URLs (see §0b). |
+| `FEED_TOKEN` | *(empty)* | Pre-minted short-lived feed token (Phase 32, K-C1). Either this or `AEGIS_BACKEND_URL` + `AEGIS_API_KEY` is required for `/broadcast/output` captures. |
+| `AEGIS_BACKEND_URL` | *(empty)* | Backend origin (e.g. `http://backend:8000`) used to mint a feed token. |
+| `AEGIS_API_KEY` | *(empty)* | Operator API key used to mint a feed token. |
 | `STREAM_WIDTH` / `STREAM_HEIGHT` | `1280` / `720` | Capture resolution. |
 | `STREAM_FPS` | `30` | Capture frame rate. |
 | `VIDEO_BITRATE` | `4500k` | x264 target bitrate (`k` or `M` suffix). |

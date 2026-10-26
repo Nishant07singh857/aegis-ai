@@ -91,10 +91,7 @@ class TestIconMatcherSynthetic:
     @pytest.mark.parametrize(
         "template,family,klass",
         [
-            ("ar_a.png", "ar_a", "ar"),
-            ("ar_b.png", "ar_b", "ar"),
             ("smg_compact.png", "smg_compact", "smg"),
-            ("sniper_bolt.png", "sniper_bolt", "sniper"),
             ("dmr_long.png", "dmr_long", "dmr"),
             ("frag_grenade.png", "frag_grenade", "frag_grenade"),
             ("pistol_t.png", "pistol_t", "pistol"),
@@ -108,6 +105,35 @@ class TestIconMatcherSynthetic:
         assert result.weapon_family == family
         assert result.score >= matcher.threshold
         assert result.location is not None
+
+    # Phase 32 margin gate (abstention ON): these three templates are
+    # still identified CORRECTLY by family, but their runner-up family
+    # cross-matches so closely (ar_a vs ar_b, sniper vs the field)
+    # that the family margin lands below 0.15 even on an exact paste
+    # (measured: ar_a 0.095, ar_b 0.060, sniper_bolt 0.113) — so the
+    # label is honestly withheld instead of shipped. This is the gate
+    # working as decided, not a matcher regression: a wrong confident
+    # label would be worse than UNKNOWN, and the diagnostic slice that
+    # clears 0.15 is 79% precise vs ~48% ungated.
+    @pytest.mark.parametrize(
+        "template,family",
+        [
+            ("ar_a.png", "ar_a"),
+            ("ar_b.png", "ar_b"),
+            ("sniper_bolt.png", "sniper_bolt"),
+        ],
+    )
+    def test_pasted_template_margin_abstains_honestly(
+        self, matcher, template, family
+    ):
+        crop = _bar_crop_with(_load_gray(template))
+        result = matcher.match(crop)
+        assert result.family == family  # identification still correct
+        assert result.score >= matcher.threshold
+        assert result.margin < 0.15
+        assert result.weapon is None  # ...but the label is withheld
+        assert result.weapon_abstained is True
+        assert result.weapon_family is None
 
     def test_unknown_glyph_never_becomes_weapon(self, matcher):
         crop = _bar_crop_with(_load_gray("unknown_dome.png"))

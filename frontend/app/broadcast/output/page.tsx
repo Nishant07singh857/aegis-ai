@@ -24,6 +24,12 @@
  *                  (opaque branded backdrop when the capture needs a plate).
  *   ?video=<mode>  "real" (default — live game feed) or "sim" (watermarked
  *                  simulator test pattern; honest, never real footage).
+ *   ?feed_token=<token>  Phase 32 (K-C1): short-lived signed feed token
+ *                  minted by an operator (POST /api/v1/video/feed-token).
+ *                  The output page propagates it into the game-video
+ *                  <img> src, because an <img> cannot send auth headers.
+ *                  Without it the feed answers 401 (H3) and the page
+ *                  shows its NO FEED slate.
  *   ?ttl=<secs>    Kill ticker visibility in seconds (default 5, 3–60;
  *                  Bible-measured: Krafton killfeed entries fade after ~5s).
  *   ?hold=<secs>   Lower-third visibility in seconds (default 6, 2–30).
@@ -61,6 +67,8 @@ function BroadcastOutputInner() {
   const video = sp.get('video') === 'sim' ? 'simulator' : 'real';
   // Phase 22: ?captions=1 burns the live caption cues into the capture.
   const captions = sp.get('captions') === '1';
+  // Phase 32 (K-C1): ?feed_token= propagates into the game-video <img>.
+  const feedToken = sp.get('feed_token');
 
   return (
     <DirectorOutputView
@@ -72,6 +80,7 @@ function BroadcastOutputInner() {
       brand={brand}
       video={video}
       captions={captions}
+      feedToken={feedToken ?? undefined}
     />
   );
 }

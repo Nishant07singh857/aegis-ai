@@ -160,6 +160,12 @@ class KillFeedEntry:
     # Best-matching template family even when it did NOT yield a
     # weapon (unknown_* glyph or below threshold) — diagnostics only.
     icon_family: Optional[str] = None
+    # Phase 32 margin gate: top-candidate margin (best - runner-up)
+    # and whether the gate abstained an otherwise above-threshold
+    # identified family. Abstention keeps the entry; only the weapon
+    # is UNKNOWN — never a guessed gun name.
+    weapon_margin: float = 0.0
+    weapon_abstained: bool = False
 
     def dedup_key(self) -> str:
         """Stable identity for cross-frame deduplication."""
@@ -200,6 +206,10 @@ class KillFeedDetector(BaseDetector):
             # Phase 23 W2 report).
             "icon_preprocess": "none",
             "icon_threshold": 0.55,
+            # Phase 32 strict margin gate (abstention ON, owner
+            # decision): weapon labels ship only at margin >= this.
+            # Lowering it re-ships ~48% labels — never silent.
+            "icon_margin_threshold": 0.15,
             "marker_threshold": 0.50,
             "icon_upscale": 4,
             # Layout-row OCR: 4x cubic upscale + Otsu (measured on real
@@ -245,6 +255,7 @@ class KillFeedDetector(BaseDetector):
             float(self.config.get("icon_threshold", 0.55)),
             float(self.config.get("marker_threshold", 0.50)),
             int(self.config.get("icon_upscale", 4)),
+            float(self.config.get("icon_margin_threshold", 0.15)),
         )
         if self._matcher is not None and self._matcher_key == key:
             return self._matcher
@@ -256,6 +267,7 @@ class KillFeedDetector(BaseDetector):
                 threshold=key[1],
                 marker_threshold=key[2],
                 upscale=key[3],
+                margin_threshold=key[4],
             )
             self._matcher_key = key
         except Exception as exc:  # pragma: no cover - defensive
@@ -869,6 +881,9 @@ class KillFeedDetector(BaseDetector):
             killer=killer,
             victim=victim,
             event_type="knock" if knock else "kill",
+            # Phase 32: match.weapon is ALREADY margin-gated inside
+            # IconMatcher — a low-margin winner arrives here as None,
+            # never as a guessed gun name. The entry still ships.
             weapon=match.weapon,
             headshot=headshot,
             confidence=mean_conf,
@@ -877,6 +892,8 @@ class KillFeedDetector(BaseDetector):
             weapon_family=match.weapon_family,
             weapon_confidence=round(float(match.score), 3) if match.weapon else 0.0,
             icon_family=match.family,
+            weapon_margin=round(float(match.margin), 3),
+            weapon_abstained=bool(getattr(match, "weapon_abstained", False)),
         )
         return entry
 
@@ -965,10 +982,24 @@ class KillFeedDetector(BaseDetector):
         }
         if entry.weapon is not None:
             # Phase 23: class-level weapon from real icon matching.
+            # Phase 32: this branch is reachable ONLY for margin-gated
+            # labels (margin >= 0.15) — the matcher enforces it.
             payload["weapon_confidence"] = round(float(entry.weapon_confidence), 3)
             payload["weapon_family"] = entry.weapon_family
             payload["weapon_source"] = "icon_template"
             payload["weapon_granularity"] = "class"
+            payload["weapon_margin"] = round(float(entry.weapon_margin), 3)
+            payload["weapon_abstained"] = False
+        elif entry.weapon_abstained:
+            # Phase 32 abstention, stated honestly so downstream can
+            # count gated coverage: the glyph was identified and
+            # above score threshold, but too close to the runner-up
+            # to name. Weapon stays null -> bus renders "Unknown".
+            payload["weapon_abstained"] = True
+            payload["weapon_margin"] = round(float(entry.weapon_margin), 3)
+            payload["weapon_source"] = "icon_template"
+            payload["weapon_granularity"] = "class"
+            payload["icon_family"] = entry.icon_family
         elif entry.icon_family and entry.icon_family.startswith("unknown_"):
             # An unresolved glyph won the icon slot: the weapon stays
             # null (never guessed), but the payload says so honestly

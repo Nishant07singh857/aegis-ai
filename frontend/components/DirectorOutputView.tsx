@@ -102,6 +102,12 @@ export interface DirectorOutputViewProps {
    * Default off — the /watch page exposes the viewer toggle.
    */
   captions?: boolean;
+  /**
+   * Phase 32 (K-C1): short-lived signed feed token, propagated into the
+   * game-video <img> src. The /broadcast/output page reads it from its
+   * own ?feed_token= query param (headless capture path).
+   */
+  feedToken?: string;
 }
 
 /** TTL-filtered kill list, newest first; re-renders every second so
@@ -253,6 +259,7 @@ export function DirectorOutputView({
   brand = false,
   video = 'real',
   captions = false,
+  feedToken,
 }: DirectorOutputViewProps) {
   const {
     status,
@@ -453,7 +460,7 @@ export function DirectorOutputView({
           {/* Phase 17 W2: game video layer at the back (z-0, first in DOM).
               The camera slot follows director.state active_camera; all
               graphics overlays below render above it. */}
-          <GameVideo api={api} slot={slot} mode={video} />
+          <GameVideo api={api} slot={slot} mode={video} feedToken={feedToken} />
 
           {/* Bible §1 top bar: y 0-4%, x 0-100% thin dark strip. */}
           {showScorebug && (

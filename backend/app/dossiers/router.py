@@ -1,8 +1,11 @@
 """Dossiers API router — mounted at /api/v1 by the coordinator (app/main.py).
 
-Reads (fight log, dossiers, PDF reports) are public, matching the existing
-read-only match-state surface (/teams, /matches, ...). The fight ingest
-endpoint mutates state and requires operator or admin role.
+Phase 32 (K-H2 policy decision): NOTHING here is public. Team-intel
+reads (fight log, dossiers, PDF reports) are authenticated with the same
+operator-or-admin gate as the fight ingest endpoint — dossiers are
+opponent scouting material, not a public read-only surface like
+/teams or /matches. Unauthenticated callers get 401, authenticated
+viewers get 403 (require_operator), exactly as on POST ingest.
 """
 
 from __future__ import annotations
@@ -41,10 +44,14 @@ def get_report_service(db: AsyncSession = Depends(get_db)) -> ReportService:
     return ReportService(db)
 
 
-# ---------- public reads ----------
+# ---------- authenticated reads (Phase 32 K-H2: same gate as ingest) ----------
 
 
-@router.get("/dossiers/fights", response_model=FightListResponse)
+@router.get(
+    "/dossiers/fights",
+    response_model=FightListResponse,
+    dependencies=[Depends(require_operator)],
+)
 async def list_fights(
     team_id: Optional[str] = Query(default=None),
     match_id: Optional[str] = Query(default=None),
@@ -68,7 +75,11 @@ async def list_fights(
     }
 
 
-@router.get("/dossiers/dossier", response_model=DossierResponse)
+@router.get(
+    "/dossiers/dossier",
+    response_model=DossierResponse,
+    dependencies=[Depends(require_operator)],
+)
 async def get_dossier(
     team_id: str = Query(...),
     refresh: bool = Query(default=False, description="Force recompute, bypassing the 1h cache."),
@@ -87,7 +98,10 @@ async def get_dossier(
     return {"data": dossier}
 
 
-@router.get("/dossiers/report/match/{match_id}.pdf")
+@router.get(
+    "/dossiers/report/match/{match_id}.pdf",
+    dependencies=[Depends(require_operator)],
+)
 async def match_report_pdf_download(
     match_id: str,
     service: ReportService = Depends(get_report_service),
@@ -106,7 +120,10 @@ async def match_report_pdf_download(
     )
 
 
-@router.get("/dossiers/report/team/{team_id}.pdf")
+@router.get(
+    "/dossiers/report/team/{team_id}.pdf",
+    dependencies=[Depends(require_operator)],
+)
 async def team_dossier_pdf_download(
     team_id: str,
     service: DossierService = Depends(get_dossier_service),

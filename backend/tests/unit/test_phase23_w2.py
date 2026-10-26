@@ -118,16 +118,27 @@ class TestIconMatcher:
             assert value == value.lower()
 
     def test_template_vs_itself_high_confidence(self, matcher):
-        for fname, fam, cls in (
-            ("ar_a.png", "ar_a", "ar"),
-            ("frag_grenade.png", "frag_grenade", "frag_grenade"),
-            ("sniper_bolt.png", "sniper_bolt", "sniper"),
+        # Phase 32 margin gate (0.15): ar_a (margin 0.107) and
+        # sniper_bolt (0.092) are still identified correctly by family
+        # but the label is honestly withheld — gate consequence, not
+        # a matcher regression. frag_grenade clears the gate (0.164)
+        # and still labels, so its old assert is retained unchanged.
+        for fname, fam in (
+            ("ar_a.png", "ar_a"),
+            ("sniper_bolt.png", "sniper_bolt"),
         ):
             m = matcher.match(_bar_canvas(fname))
             assert m.family == fam, (fname, m)
             assert m.score >= matcher.threshold, (fname, m.score)
-            assert m.weapon == cls, (fname, m)
-            assert m.weapon_family == fam
+            assert m.margin < 0.15, (fname, m)
+            assert m.weapon is None, (fname, m)
+            assert m.weapon_abstained is True, (fname, m)
+            assert m.weapon_family is None
+        m = matcher.match(_bar_canvas("frag_grenade.png"))
+        assert m.family == "frag_grenade", m
+        assert m.score >= matcher.threshold, m.score
+        assert m.weapon == "frag_grenade", m
+        assert m.weapon_family == "frag_grenade"
 
     def test_blank_crop_no_weapon(self, matcher):
         blank = np.full((24, 140, 3), 45, dtype=np.uint8)
@@ -150,9 +161,15 @@ class TestIconMatcher:
             out = m.match(canvas)
             assert out.score >= 0.0  # runs; accuracy per-mode is W5's A/B
         # The two modes validated on harvest material must identify it.
+        # Phase 32 margin gate: ar_a is identified (family ar_a) in
+        # both modes but its margin (bin 0.022, none 0.107) is below
+        # 0.15, so the label is honestly withheld in both modes.
         for mode in ("bin", "none"):
             out = IconMatcher(preprocess=mode).match(canvas)
-            assert out.weapon == "ar", (mode, out)
+            assert out.family == "ar_a", (mode, out)
+            assert out.margin < 0.15, (mode, out)
+            assert out.weapon is None, (mode, out)
+            assert out.weapon_abstained is True, (mode, out)
 
     def test_marker_match_on_marker_crop(self, matcher):
         knock = matcher.match_markers(_bar_canvas("marker_knock.png"))
@@ -253,17 +270,29 @@ class TestLayoutParse:
         assert entry.victim == "GodLJonathan"
         assert entry.event_type == "knock"
         assert entry.headshot is False
-        assert entry.weapon == "ar"
-        assert entry.weapon_family == "ar_a"
-        assert entry.weapon_confidence >= 0.55
+        # Phase 32 margin gate: icon_family ar_a, margin 0.091 < 0.15,
+        # so the weapon label is withheld (weapon_family None and
+        # weapon_confidence 0.0 are the gate's own outputs, cf.
+        # killfeed.py: confidence is 0.0 whenever weapon is None).
+        assert entry.icon_family == "ar_a"
+        assert entry.weapon_margin < 0.15
+        assert entry.weapon is None
+        assert entry.weapon_abstained is True
+        assert entry.weapon_family is None
+        assert entry.weapon_confidence == 0.0
 
     def test_frag_kill_entry_no_marker(self, detector):
         strip = _entry_strip("frag_grenade.png", None)
         entry = detector._parse_entry_strip(strip, 360)
         assert entry is not None and entry.is_valid
         assert entry.event_type == "kill"
-        assert entry.weapon == "frag_grenade"
-        assert entry.weapon_family == "frag_grenade"
+        # Phase 32 margin gate: icon_family frag_grenade, margin
+        # 0.138 < 0.15 on this entry strip, so the label is withheld.
+        assert entry.icon_family == "frag_grenade"
+        assert entry.weapon_margin < 0.15
+        assert entry.weapon is None
+        assert entry.weapon_abstained is True
+        assert entry.weapon_family is None
 
     def test_sniper_headshot_entry(self, detector):
         strip = _entry_strip("sniper_bolt.png", "marker_headshot.png")
@@ -271,7 +300,12 @@ class TestLayoutParse:
         assert entry is not None and entry.is_valid
         assert entry.event_type == "kill"  # headshot marker is not a knock
         assert entry.headshot is True
-        assert entry.weapon == "sniper"
+        # Phase 32 margin gate: icon_family sniper_bolt, margin
+        # 0.102 < 0.15, so the label is withheld.
+        assert entry.icon_family == "sniper_bolt"
+        assert entry.weapon_margin < 0.15
+        assert entry.weapon is None
+        assert entry.weapon_abstained is True
 
     def test_headshot_knock_cooccurrence(self, detector):
         # Real entries can carry BOTH markers (ring then figure):
@@ -284,7 +318,12 @@ class TestLayoutParse:
         assert entry is not None and entry.is_valid
         assert entry.event_type == "knock"
         assert entry.headshot is True
-        assert entry.weapon == "ar"
+        # Phase 32 margin gate: icon_family ar_b, margin 0.070 < 0.15,
+        # so the label is withheld.
+        assert entry.icon_family == "ar_b"
+        assert entry.weapon_margin < 0.15
+        assert entry.weapon is None
+        assert entry.weapon_abstained is True
 
     def test_blank_strip_rejected(self, detector):
         blank = np.full((72, 400, 3), 40, dtype=np.uint8)
@@ -440,7 +479,11 @@ class TestRealHarvestMaterial:
         img = cv2.imread(path)
         m = IconMatcher().match(img)
         assert m.family == "ar_a"
-        assert m.weapon == "ar"
+        # Phase 32 margin gate: margin 0.029 < 0.15, so the label is
+        # withheld even though the family is identified correctly.
+        assert m.margin < 0.15, m
+        assert m.weapon is None, m
+        assert m.weapon_abstained is True, m
 
     def test_parse_frame_on_real_vod_frame_no_crash(self):
         if not os.path.exists(HARVEST_FRAME):

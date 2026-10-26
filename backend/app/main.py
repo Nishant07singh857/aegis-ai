@@ -1969,10 +1969,12 @@ async def websocket_live(websocket: WebSocket):
     # Control-channel auth: browsers can't set WS headers, so the client
     # passes ?token=<jwt-or-api-key>. Passive subscription stays public;
     # mutating actions are gated inside handle_action().
-    ws_user = authenticate_websocket(
-        websocket,
-        token=websocket.query_params.get("token"),
-    )
+    # Phase 32 (K-H1 fix): the token is RE-VALIDATED on every action frame
+    # (authenticate_websocket checks the DB user's live is_active flag),
+    # never frozen at connect time — a user deactivated mid-connection
+    # gets an "unauthorized" ack on their next action instead of keeping
+    # broadcast control until JWT expiry.
+    raw_token = websocket.query_params.get("token")
     await manager.connect(websocket)
     try:
         while True:
@@ -1982,6 +1984,10 @@ async def websocket_live(websocket: WebSocket):
                 continue
             try:
                 payload = json.loads(data)
+                ws_user = await authenticate_websocket(
+                    websocket,
+                    token=raw_token,
+                )
                 await handle_action(payload, user=ws_user)
             except Exception as e:
                 logger.error(f"Failed to handle WS action: {e}")

@@ -1,5 +1,16 @@
 """StreamService — lifecycle owner for the AEGIS AI automated stream.
 
+Phase 32 (K-C2) — DEPRECATED AS AN HTTP PATH. No route calls this service
+anymore: POST /api/v1/stream/start|stop return 410 and the official
+topology is the shell streamer (infrastructure/docker/Dockerfile.streamer
++ streamer-entrypoint.sh). This module is retained ONLY because its pure
+command builders (build_ffmpeg_command*, destination URL builders) are
+unit-tested and reusable, and because a future local-dev-only caller
+could still use StreamService directly — but nothing in production may
+present it as a live stream path again. Do NOT re-wire a route to it
+without also putting Xvfb/Chromium/FFmpeg into that route's image and
+proving a real RTMP push on the rig.
+
 Pipeline (all binaries must exist on the host / streamer container):
 
     Xvfb  →  virtual display (e.g. :99 @ 1280x720)
@@ -99,7 +110,9 @@ class StreamService:
     """Owns the FFmpeg streaming subprocess lifecycle.
 
     Exactly one logical stream exists; the module-level singleton
-    (see :func:`get_stream_service`) is shared by the API router.
+    (see :func:`get_stream_service`) was formerly shared by the API
+    router — Phase 32 (K-C2) removed that route wiring, so the singleton
+    is now library-only (see the module docstring).
     """
 
     def __init__(self, config: Optional[StreamConfig] = None) -> None:

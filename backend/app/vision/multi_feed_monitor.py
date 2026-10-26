@@ -478,6 +478,13 @@ def _entry_to_event(detector: Any, entry: Any, match_id: Optional[str], now: flo
         "dedup_key": _entry_key(entry),
     }
     weapon = getattr(entry, "weapon", None)
+    # Phase 32: the KillFeedDetector path uses _entry_to_event above
+    # (margin-gated + abstention payload); this fallback only mirrors
+    # an abstention flag a foreign detector already set — it never
+    # invents a weapon, and entry.weapon here is already gated.
+    if getattr(entry, "weapon_abstained", False):
+        payload["weapon_abstained"] = True
+        payload["weapon_margin"] = round(float(getattr(entry, "weapon_margin", 0.0)), 3)
     return schemas.NormalizedEvent(
         event_type=feed_type,
         ts=now,

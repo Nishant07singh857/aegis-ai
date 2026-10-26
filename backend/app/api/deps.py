@@ -77,7 +77,10 @@ AUTHENTICATED (get_current_user — viewer included) — read-only:
 PROTECTED (WS control channel) — every mutating action dispatched through
 /ws/live's handle_action() requires an authenticated ?token= (JWT or API key)
 whose role is operator or admin (mirrors the REST require_operator gates —
-viewers' tokens only unlock the read-only feeds):
+viewers' tokens only unlock the read-only feeds). The token is re-validated
+against the DB user's live is_active flag on EVERY action frame (Phase 32
+K-H1 fix), so deactivating an account kills its live control channel on
+the next action instead of at token expiry:
   assign_agent, lock_pov, start_scrim, generate_recap, restart_node,
   toggle_node, toggle_autopost, upload_sponsor, revoke_key, stop_training,
   post_now, create_tournament, clip_highlight, generate_all_highlights,
@@ -141,10 +144,12 @@ def authenticate_token_or_key(
 
     NOTE (H2, Integrity Fix Pack): this sync core only verifies the token
     signature. The REST dependencies below (``get_current_user`` /
-    ``get_optional_user``) use ``authenticate_checked`` instead, which
-    additionally revocation-checks JWT principals against the DB user's
-    live ``is_active`` flag. This sync function remains for callers that
-    cannot await (see ``authenticate_websocket`` — its own sync core).
+    ``get_optional_user``) and the WebSocket authenticator
+    (``authenticate_websocket``) use ``authenticate_checked``-equivalent
+    revocation checks instead, which additionally check JWT principals
+    against the DB user's live ``is_active`` flag. This sync function
+    remains only as the shared signature-verification step inside those
+    checked wrappers.
     """
     if bearer and bearer.credentials:
         payload = security_manager.decode_token(bearer.credentials)
@@ -403,7 +408,7 @@ def enforce_team_scope(requested_team_id: Optional[str], scope: Optional[str]) -
         )
 
 
-def authenticate_websocket(
+async def authenticate_websocket(
     websocket: WebSocket,
     token: Optional[str] = None,
     api_key: Optional[str] = None,
@@ -414,12 +419,40 @@ def authenticate_websocket(
     Browsers cannot set Authorization headers on a WebSocket handshake, so the
     client passes `?token=<jwt-or-api-key>` on connect. Returns the principal
     or None; the caller decides whether the action requires it.
+
+    Phase 32 (K-H1 fix): this is async and applies the SAME kill-switch
+    revocation check as the REST ``authenticate_checked`` path — a JWT
+    principal whose DB user row is missing or has ``is_active`` False is
+    rejected (None), and a DB lookup failure fails closed (None, logged).
+    The configured operator principal (user_id "operator", no DB row by
+    design) and the X-API-Key path are exempt, exactly as on REST.
+    Callers MUST re-run this per control action, not once at connect:
+    a token frozen at connect time would otherwise keep working until
+    expiry after its account is deactivated (see ``websocket_live`` in
+    app/main.py, which re-validates on every action frame).
     """
     credential = token or api_key
     if not credential:
         return None
     payload = security_manager.decode_token(credential)
     if payload and payload.user_id:
+        if payload.user_id == OPERATOR_USER_ID:
+            return payload
+        try:
+            is_active = await _db_user_is_active(payload.user_id)
+        except Exception:
+            logger.warning(
+                "WS is_active check failed for user_id=%s; failing closed",
+                payload.user_id,
+                exc_info=True,
+            )
+            return None
+        if is_active is not True:
+            logger.info(
+                "WS token rejected: DB user user_id=%s is inactive or missing",
+                payload.user_id,
+            )
+            return None
         return payload
     if _verify_api_key(credential):
         return ADMIN_PRINCIPAL

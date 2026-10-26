@@ -3,9 +3,12 @@
 /**
  * AEGIS AI — live stream control card (admin).
  *
- * Talks to the streaming service the backend exposes:
- *   POST /api/v1/stream/start   body: { destinations, custom_rtmp_url?, resolution }
- *   POST /api/v1/stream/stop
+ * Phase 32 (K-C2): the API stream path is DEPRECATED — POST
+ * /api/v1/stream/start|stop return 410 and GET /api/v1/stream/status
+ * reports state "deprecated". The official topology is the shell
+ * streamer (docker-compose.streaming.yml, profile streaming); this card
+ * renders that deprecation notice instead of start/stop controls.
+ * (Historical shape, kept for the notice path:
  *   GET  /api/v1/stream/status  -> { state, uptime_seconds,
  *                                    destinations_requested, destinations_configured,
  *                                    resolution, fps, restart_count, last_error }
@@ -232,7 +235,22 @@ export function StreamControl({
       {!loading && error && (
         <ErrorState message={error} onRetry={() => void loadStatus()} />
       )}
-      {!loading && !error && status && (
+      {/* Phase 32 (K-C2): the API stream path is deprecated — the shell
+          streamer is the official topology. The start/stop controls are
+          hidden here so the card cannot present a dead path as live;
+          the backend detail (last_error) carries the streamer command. */}
+      {!loading && !error && status?.state === 'deprecated' && (
+        <div className="rounded-lg border border-amber-300/30 bg-amber-300/5 px-3 py-2">
+          <p className="font-mono text-[11px] uppercase tracking-[0.2em] text-amber-300">
+            API stream deprecated
+          </p>
+          <p className="mt-1 text-sm text-zinc-300">
+            {status.lastError ??
+              'Use the shell streamer (docker-compose.streaming.yml, profile streaming) — see docs/STREAMING.md.'}
+          </p>
+        </div>
+      )}
+      {!loading && !error && status && status.state !== 'deprecated' && (
         <div className="space-y-5">
           {/* status row */}
           <div className="flex flex-wrap items-center gap-x-4 gap-y-2">

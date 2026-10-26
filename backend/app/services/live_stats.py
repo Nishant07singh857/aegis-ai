@@ -32,6 +32,22 @@ Spectator-only inputs; nothing fabricated:
 * **Knocks** accumulate per player in memory for the live payload, but
   the stats schema has no knocks column, so they are not persisted
   (the player-stats API already labels knocks ``null`` for this reason).
+* **Knocks are HINT-labelled (Phase 32, K-H4).** Every knock event
+  from the spectator stream is uncorroborated by default: measured
+  knock precision is P61.2%/R90.8% (docs/WEAPON_RECOGNITION.md —
+  "hint, not ground truth"), so the live payload NEVER presents a
+  knock as a confirmed fact. ``player_snapshot`` carries
+  ``knocks`` (total observed) split into ``knocks_verified`` (only
+  events with a trusted human provenance — ``knock_confirmed`` or a
+  spotter/manual/observer ``source``) and ``knocks_unverified``,
+  plus ``knocks_hint=True`` whenever any unverified knock exists
+  for that player and a match-level ``knocks_hint`` on standings.
+  No trusted knock producer exists in the codebase today (unlike
+  headshots, there is no knock_confirmed producer), so in practice
+  ALL live knocks are currently unverified — the verified branch
+  exists so a future trusted producer is distinguished, not merged.
+  Knocks never feed points: standings score finishes (kills) only,
+  and the MVP formula does not score knocks either.
 * **Headshots are source-gated (Integrity C2).** The killfeed icon
   matcher sets the same ``headshot`` flag as the spotter toggle, but
   its measured precision is 7.7 % (docs/WEAPON_RECOGNITION.md §2.7 —
@@ -139,7 +155,13 @@ class PlayerAccum:
     player_id: str
     team_id: str = ""
     kills: int = 0
-    knocks: int = 0  # knocks inflicted (live-only; no DB column)
+    knocks: int = 0  # knocks inflicted, TOTAL observed (live-only; no DB column)
+    #: Phase 32: of ``knocks``, only those from a trusted human
+    #: provenance (see _knock_trusted). The remainder is
+    #: knocks - knocks_verified == knocks_unverified == HINT, never
+    #: a confirmed fact. No trusted knock producer exists today, so
+    #: this is 0 for every pure-vision stream.
+    knocks_verified: int = 0
     headshots: int = 0  # TRUSTED (human-confirmed) only — persisted (C2)
     #: Icon-derived headshot flags dropped from the stats (C2). Kept
     #: only as a live diagnostic counter; never flushed, never scored.
@@ -359,6 +381,9 @@ class LiveStatsStats:
     #: Headshot flags dropped because their source is not a trusted
     #: human producer (Integrity C2) — counted, never silently lost.
     headshots_dropped_unverified: int = 0
+    #: Phase 32: knock events that arrived WITHOUT trusted provenance
+    #: (hint-labelled, never confirmed). Counted, never hidden.
+    knocks_unverified: int = 0
     by_type: Dict[str, int] = field(default_factory=dict)
 
 
@@ -592,6 +617,26 @@ class LiveStatsService:
         acc.events_since_flush += 1
         await self._maybe_flush(acc)
 
+    @staticmethod
+    def _knock_trusted(data: Dict[str, Any]) -> bool:
+        """Whether a knock counts as VERIFIED (Phase 32, K-H4).
+
+        Mirrors the headshot C2 gate: an explicit confirmed marker,
+        or a trusted human source (spotter/manual/observer). The
+        vision killfeed (source ``vision_killfeed``, no
+        ``knock_confirmed``) is NEVER trusted — its knock precision
+        is P61.2% (hint, not ground truth). No knock_confirmed
+        producer exists in the codebase today, so this branch is
+        forward-compatible: it distinguishes a future trusted
+        producer instead of silently merging it with vision hints.
+        """
+        if data.get("knock_confirmed") is True:
+            return True
+        source = str(
+            data.get("knock_source") or data.get("source") or ""
+        ).strip().lower()
+        return source in HEADSHOT_TRUSTED_SOURCES
+
     async def _on_knock(
         self, acc: MatchAccum, data: Dict[str, Any], ts: Optional[float]
     ) -> None:
@@ -602,6 +647,10 @@ class LiveStatsService:
         if killer_id is not None:
             killer = acc.player(killer_id, killer_team or "")
             killer.knocks += 1
+            if self._knock_trusted(data):
+                killer.knocks_verified += 1
+            else:
+                self.stats.knocks_unverified += 1
             self._count_headshot(acc, killer, data)
         if victim_id is not None:
             victim = acc.player(victim_id, victim_team or "")
@@ -749,7 +798,21 @@ class LiveStatsService:
                 "player_id": p.player_id,
                 "team_id": p.team_id,
                 "finishes": p.kills,
+                # Phase 32 knock hint-labelling (K-H4): knocks is the
+                # TOTAL observed, never a confirmed count. Verified
+                # (trusted human provenance) vs unverified (spectator
+                # hint, P61.2%) is split explicitly, and knocks_hint
+                # is True whenever any unverified knock exists, so a
+                # UI can never render the total as confirmed kills.
                 "knocks": p.knocks,
+                "knocks_verified": p.knocks_verified,
+                "knocks_unverified": p.knocks - p.knocks_verified,
+                "knocks_hint": (p.knocks - p.knocks_verified) > 0,
+                "knocks_status": (
+                    "hint"
+                    if (p.knocks - p.knocks_verified) > 0
+                    else ("verified" if p.knocks_verified > 0 else "none")
+                ),
                 # Trusted human-confirmed headshots only (C2) — this
                 # is the number that is persisted and scored.
                 "headshots": p.headshots,
@@ -813,6 +876,10 @@ class LiveStatsService:
                 "points_per_kill": self._calculator.points_per_kill,
                 "standings": [],
                 "players": [],
+                # Phase 32: no knocks observed at all here.
+                "knocks_hint": False,
+                "knocks_verified": 0,
+                "knocks_unverified": 0,
             }
         finishes = acc.team_finishes()
         placements = self._placements(acc)
@@ -846,6 +913,12 @@ class LiveStatsService:
         rows.sort(key=lambda r: (-r["total_points"], -r["finishes"], r["team_id"]))
         for idx, row in enumerate(rows, start=1):
             row["rank"] = idx
+        players = self.player_snapshot(acc.match_id)
+        # Phase 32: match-level knock hint — True whenever ANY
+        # player's knocks include an uncorroborated (vision) knock.
+        # Points above are finishes-only; knocks never score here.
+        knocks_verified = sum(pl["knocks_verified"] for pl in players)
+        knocks_unverified = sum(pl["knocks_unverified"] for pl in players)
         return {
             "match_id": acc.match_id,
             "live": True,
@@ -855,7 +928,10 @@ class LiveStatsService:
             "config_source": self._calculator.config_source,
             "points_per_kill": self._calculator.points_per_kill,
             "standings": rows,
-            "players": self.player_snapshot(acc.match_id),
+            "players": players,
+            "knocks_hint": knocks_unverified > 0,
+            "knocks_verified": knocks_verified,
+            "knocks_unverified": knocks_unverified,
         }
 
     def snapshot(self) -> Dict[str, Any]:
@@ -874,6 +950,7 @@ class LiveStatsService:
                 "headshots_dropped_unverified": (
                     self.stats.headshots_dropped_unverified
                 ),
+                "knocks_unverified": self.stats.knocks_unverified,
                 "by_type": dict(self.stats.by_type),
             },
         }

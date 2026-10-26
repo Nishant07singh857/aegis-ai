@@ -10,6 +10,15 @@
 #           FACEBOOK_STREAM_KEY (stream keys are env-only, never in code).
 # Optional tuning: STREAM_WIDTH, STREAM_HEIGHT, STREAM_FPS, VIDEO_BITRATE,
 #                  VIDEO_PRESET, DIRECTOR_URL.
+# Feed credential (Phase 32, K-C1): when DIRECTOR_URL renders
+# /broadcast/output, the page embeds the game feed in a bare <img> that
+# cannot send auth headers, so capture needs a short-lived signed feed
+# token in the page URL. Provide FEED_TOKEN directly (minted beforehand
+# by an operator via POST /api/v1/video/feed-token), OR set
+# AEGIS_BACKEND_URL + AEGIS_API_KEY (operator key) and the entrypoint
+# mints one (600s TTL). With neither, the entrypoint FAILS FAST rather
+# than silently streaming a NO FEED slate. Overlay-only DIRECTOR_URLs
+# (no /broadcast/output) skip this — they embed no game feed.
 # =============================================================================
 set -euo pipefail
 
@@ -39,7 +48,44 @@ fi
 
 TEE_URLS="$(IFS='|'; echo "${OUTPUTS[*]}")"
 echo "[streamer] destinations: ${#OUTPUTS[@]} configured"
-echo "[streamer] director: ${DIRECTOR_URL} @ ${WIDTH}x${HEIGHT} ${FPS}fps"
+
+# --- feed credential (Phase 32, K-C1) -------------------------------------
+# The output page embeds the game feed in a bare <img>, which cannot send
+# auth headers, so headless capture carries a short-lived signed feed
+# token in the page URL. Precedence: FEED_TOKEN env > mint via backend
+# operator API key. Fail fast with instructions when neither is set:
+# without a token the capture would silently show NO FEED (feed auth H3).
+# Tokens are base64url (URL-safe alphabet), so no encoding is needed.
+append_query() { # $1=url $2=param → url with the param appended
+  case "$1" in
+    *\?*) printf '%s&%s' "$1" "$2" ;;
+    *) printf '%s?%s' "$1" "$2" ;;
+  esac
+}
+case "${DIRECTOR_URL}" in
+  *broadcast/output*)
+    if [ -n "${FEED_TOKEN:-}" ]; then
+      DIRECTOR_URL="$(append_query "${DIRECTOR_URL}" "feed_token=${FEED_TOKEN}")"
+      echo "[streamer] using FEED_TOKEN from environment"
+    elif [ -n "${AEGIS_BACKEND_URL:-}" ] && [ -n "${AEGIS_API_KEY:-}" ]; then
+      BACKEND_BASE="$(printf '%s' "${AEGIS_BACKEND_URL}" | sed -E 's#/*$##')"
+      MINTED="$(curl -fsS --max-time 10 -X POST "${BACKEND_BASE}/api/v1/video/feed-token" \
+        -H "X-API-Key: ${AEGIS_API_KEY}" -H 'Content-Type: application/json' \
+        -d '{"ttl_seconds":600}' 2>/dev/null \
+        | sed -n 's/.*"feed_token"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' || true)"
+      [ -n "${MINTED}" ] || fail \
+        "could not mint a feed token from ${BACKEND_BASE} — check AEGIS_BACKEND_URL and AEGIS_API_KEY (operator key)"
+      DIRECTOR_URL="$(append_query "${DIRECTOR_URL}" "feed_token=${MINTED}")"
+      echo "[streamer] minted a short-lived feed token from the backend"
+    else
+      fail "DIRECTOR_URL renders /broadcast/output but no feed credential is configured — set FEED_TOKEN (minted by an operator via POST /api/v1/video/feed-token) or AEGIS_BACKEND_URL + AEGIS_API_KEY so one can be minted; without it the capture shows NO FEED (feed auth, H3)"
+    fi
+    ;;
+  *)
+    echo "[streamer] note: DIRECTOR_URL does not render /broadcast/output; no feed token attached"
+    ;;
+esac
+echo "[streamer] director: ${DIRECTOR_URL%%\?*} @ ${WIDTH}x${HEIGHT} ${FPS}fps"
 
 # --- virtual display ----------------------------------------------------------
 Xvfb "${DISPLAY_NUM}" -screen 0 "${WIDTH}x${HEIGHT}x24" -nolisten tcp >/tmp/xvfb.log 2>&1 &

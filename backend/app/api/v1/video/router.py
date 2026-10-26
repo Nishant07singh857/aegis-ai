@@ -27,6 +27,17 @@ Phase 17 (W2) additions:
     ?sim=1 (or AEGIS_VIDEO_SIMULATOR=1) streams a watermarked test
     pattern; slots without a live frame stream an honest labelled
     "NO FEED" slate.
+
+    Phase 32 (K-C1) — the headless credential, IMPLEMENTED (this was only
+    a docstring note before): a bare <img> tag cannot send headers, so
+    the feed accepts a short-lived signed feed token in the query string
+    (``?feed_token=``, see ``app.api.v1.video.feed_token``), minted by an
+    operator via POST /video/feed-token. The output page propagates
+    ``?feed_token=`` from its own URL into the <img> src, and the shell
+    streamer entrypoint mints/appends it the same way. An open browser
+    request with NO credential still gets 401 — the token is an
+    additional narrow path (feed route only), not a weakening of H3.
+    Full Bearer / X-API-Key auth keeps working unchanged.
 """
 
 from __future__ import annotations
@@ -40,6 +51,15 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from app.api.deps import TokenPayload, get_current_user, require_operator
+from app.api.v1.video.feed_token import (
+    DEFAULT_FEED_TOKEN_TTL_SECONDS,
+    MAX_FEED_TOKEN_TTL_SECONDS,
+    MIN_FEED_TOKEN_TTL_SECONDS,
+    FeedTokenError,
+    get_feed_principal,
+    mint_feed_token,
+    token_expiry_iso,
+)
 from app.db.base import get_db_context
 from app.services.observer_mapping.service import ObserverMappingService
 from app.services.video_feed_service import (
@@ -146,6 +166,22 @@ class DiscoverResponse(BaseModel):
     newly_mapped: List[Dict[str, Any]]
 
 
+class FeedTokenRequest(BaseModel):
+    ttl_seconds: int = Field(
+        default=DEFAULT_FEED_TOKEN_TTL_SECONDS,
+        ge=MIN_FEED_TOKEN_TTL_SECONDS,
+        le=MAX_FEED_TOKEN_TTL_SECONDS,
+        description="Token lifetime in seconds (60..3600, default 600).",
+    )
+
+
+class FeedTokenResponse(BaseModel):
+    feed_token: str
+    feed_url_template: str
+    expires_at: Optional[str] = None
+    ttl_seconds: int
+
+
 # ────────────────────────────────────────────────────────────────
 # Endpoints
 # ────────────────────────────────────────────────────────────────
@@ -236,6 +272,35 @@ async def stop_capture(
     return {"stopped": True}
 
 
+@router.post("/feed-token", response_model=FeedTokenResponse)
+async def mint_feed_token_endpoint(
+    payload: FeedTokenRequest,
+    _user: TokenPayload = Depends(require_operator),
+):
+    """Mint a short-lived signed feed token (Phase 32, K-C1). Operator+.
+
+    The token is valid ONLY on GET /video/feed/{slot} (feed-wide, so the
+    director can switch slots mid-broadcast without re-minting). Pass it
+    as ``?feed_token=`` on the feed URL, or on the /broadcast/output
+    page URL, which propagates it into the <img> src. It is NOT a general
+    credential: it cannot call any other endpoint. See
+    ``app.api.v1.video.feed_token`` for the honest limits (bearer until
+    expiry, no revocation list — keep the TTL short).
+    """
+    try:
+        token = mint_feed_token(payload.ttl_seconds)
+    except FeedTokenError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
+        )
+    return FeedTokenResponse(
+        feed_token=token,
+        feed_url_template="/api/v1/video/feed/{slot}?feed_token=" + token,
+        expires_at=token_expiry_iso(token),
+        ttl_seconds=payload.ttl_seconds,
+    )
+
+
 @router.post("/discover", response_model=DiscoverResponse)
 async def discover_devices(
     _user: TokenPayload = Depends(require_operator),
@@ -308,7 +373,7 @@ async def _mjpeg_program_stream(
 @router.get("/feed/{slot_number}")
 async def video_feed(
     slot_number: int,
-    _user: TokenPayload = Depends(get_current_user),
+    _user: TokenPayload = Depends(get_feed_principal),
     sim: bool = Query(
         default=False,
         description="Simulator mode: stream a watermarked test pattern "
@@ -333,6 +398,11 @@ async def video_feed(
     Previously this stream was deliberately unauthenticated for headless
     Chromium capture of /broadcast/output; that capture must now carry a
     Bearer JWT or X-API-Key credential.
+
+    Phase 32 (K-C1): the feed ALSO accepts a short-lived signed token
+    (``?feed_token=``, minted by an operator via POST /video/feed-token)
+    because a bare <img> tag cannot send headers. The token is valid on
+    this route only. Without any credential the response is still 401.
 
     Modes:
       * REAL (default): frames from the W4 capture manager (ADB observer

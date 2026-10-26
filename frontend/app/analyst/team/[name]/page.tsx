@@ -120,6 +120,12 @@ function TeamDossierInner() {
   const [extraFights, setExtraFights] = useState<FightRow[] | null>(null);
   const [extraFightsMeta, setExtraFightsMeta] = useState<EnvelopeMeta | null>(null);
   const [loading, setLoading] = useState(true);
+  // Phase 32 (K-H2): the dossier PDF endpoint is authenticated, so the
+  // old plain <a href> download (no Authorization header) would 401.
+  // The PDF is fetched with the operator token and saved from a blob
+  // instead — same pattern as the highlights download page.
+  const [pdfError, setPdfError] = useState<string | null>(null);
+  const [pdfDownloading, setPdfDownloading] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -239,9 +245,39 @@ function TeamDossierInner() {
         (dossier.notes && dossier.notes.length > 0))
   );
 
-  const pdfUrl = team
-    ? `${API_BASE}/api/v1/dossiers/report/team/${encodeURIComponent(team.id)}.pdf`
-    : null;
+  const downloadDossierPdf = useCallback(async () => {
+    if (!team) return;
+    setPdfError(null);
+    setPdfDownloading(true);
+    try {
+      const res = await fetch(
+        `${API_BASE}/api/v1/dossiers/report/team/${encodeURIComponent(team.id)}.pdf`,
+        { headers: token ? { Authorization: `Bearer ${token}` } : {} }
+      );
+      if (!res.ok) {
+        throw new Error(
+          res.status === 401 || res.status === 403
+            ? `PDF download failed: HTTP ${res.status} — sign in again as operator or admin.`
+            : `PDF download failed: HTTP ${res.status}.`
+        );
+      }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `aegis-dossier-${team.name.replace(/[^a-zA-Z0-9]/g, "-")}.pdf`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 10_000);
+    } catch (e) {
+      setPdfError(
+        e instanceof Error ? e.message : "PDF download failed."
+      );
+    } finally {
+      setPdfDownloading(false);
+    }
+  }, [team, token]);
 
   return (
     <div className="min-h-screen bg-[#0a0a0f] p-4 text-white md:p-8">
@@ -286,16 +322,20 @@ function TeamDossierInner() {
                   ) : null}
                 </div>
               </div>
-              {pdfUrl ? (
-                <a
-                  href={pdfUrl}
-                  download
-                  className="rounded-lg bg-cyan-400/90 px-4 py-2.5 text-sm font-semibold text-black hover:bg-cyan-300"
+              {team ? (
+                <button
+                  type="button"
+                  onClick={() => void downloadDossierPdf()}
+                  disabled={pdfDownloading}
+                  className="rounded-lg bg-cyan-400/90 px-4 py-2.5 text-sm font-semibold text-black hover:bg-cyan-300 disabled:opacity-50"
                 >
-                  Download Dossier PDF
-                </a>
+                  {pdfDownloading ? "Downloading…" : "Download Dossier PDF"}
+                </button>
               ) : null}
             </div>
+            {pdfError ? (
+              <p className="text-sm text-rose-400">{pdfError}</p>
+            ) : null}
 
             {/* dossier body */}
             {dossierError && !dossier ? (

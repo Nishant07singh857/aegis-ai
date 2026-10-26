@@ -105,6 +105,12 @@ function MatchTimelineInner() {
   const [trajectories, setTrajectories] =
     useState<EndpointState<GrenadeTrajectoryRecord[]>>(emptyEndpoint([]));
   const [selectedTeam, setSelectedTeam] = useState<string | null>(null);
+  // Phase 32 (K-H2): the match-report PDF endpoint is authenticated, so
+  // the old plain <a href> download (no Authorization header) would 401.
+  // The PDF is fetched with the operator token and saved from a blob
+  // instead — same pattern as the highlights download page.
+  const [pdfError, setPdfError] = useState<string | null>(null);
+  const [pdfDownloading, setPdfDownloading] = useState(false);
 
   const loadEndpoint = useCallback(
     async <T,>(path: string, fallback: T): Promise<EndpointState<T>> => {
@@ -333,7 +339,37 @@ function MatchTimelineInner() {
     drops.data.team_stats.length > 0 ||
     schematicTrajectories.length > 0;
 
-  const pdfUrl = `${API_BASE}/api/v1/dossiers/report/match/${encodeURIComponent(matchId)}.pdf`;
+  const downloadMatchPdf = useCallback(async () => {
+    if (!matchId) return;
+    setPdfError(null);
+    setPdfDownloading(true);
+    try {
+      const res = await fetch(
+        `${API_BASE}/api/v1/dossiers/report/match/${encodeURIComponent(matchId)}.pdf`,
+        { headers: token ? { Authorization: `Bearer ${token}` } : {} }
+      );
+      if (!res.ok) {
+        throw new Error(
+          res.status === 401 || res.status === 403
+            ? `PDF download failed: HTTP ${res.status} — sign in again as operator or admin.`
+            : `PDF download failed: HTTP ${res.status}.`
+        );
+      }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `aegis-match-report-${matchId.replace(/[^a-zA-Z0-9]/g, "-")}.pdf`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 10_000);
+    } catch (e) {
+      setPdfError(e instanceof Error ? e.message : "PDF download failed.");
+    } finally {
+      setPdfDownloading(false);
+    }
+  }, [matchId, token]);
 
   return (
     <div className="min-h-screen bg-[#0a0a0f] p-4 text-white md:p-8">
@@ -355,14 +391,18 @@ function MatchTimelineInner() {
               {matchId}
             </h1>
           </div>
-          <a
-            href={pdfUrl}
-            download
-            className="rounded-lg bg-cyan-400/90 px-4 py-2.5 text-sm font-semibold text-black hover:bg-cyan-300"
+          <button
+            type="button"
+            onClick={() => void downloadMatchPdf()}
+            disabled={pdfDownloading}
+            className="rounded-lg bg-cyan-400/90 px-4 py-2.5 text-sm font-semibold text-black hover:bg-cyan-300 disabled:opacity-50"
           >
-            Download Match Report PDF
-          </a>
+            {pdfDownloading ? "Downloading…" : "Download Match Report PDF"}
+          </button>
         </div>
+        {pdfError ? (
+          <p className="text-sm text-rose-400">{pdfError}</p>
+        ) : null}
 
         {loading ? (
           <Loading label="Loading match analysis" />

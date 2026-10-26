@@ -20,6 +20,14 @@ Honesty rules (hard):
     must be able to WIN) but are never emitted as a weapon: if the best
     match is an ``unknown_*`` family, or the best score is below the
     configured threshold, the weapon is ``None`` (honest unknown).
+  * Phase 32 STRICT MARGIN GATE (abstention ON, owner decision): even
+    an identified family above threshold emits NO weapon unless its
+    score beats the best other family by >= 0.15 (``MARGIN_THRESHOLD``,
+    ``gated_weapon``). Below that the weapon is ``None`` with
+    ``weapon_abstained=True``. This is the single choke point for
+    production weapon labels — the kill-feed parser and the
+    multi-feed monitor both read ``IconMatch.weapon``, so no
+    downstream consumer can bypass the gate to a raw label.
   * NEVER a specific gun model. At 360p an M416 and an M416-like profile
     are indistinguishable; families map to CLASS-level weapon strings
     only ("AR", "SMG", "Sniper", "DMR", "Frag Grenade", "Pistol") and
@@ -86,6 +94,44 @@ def _is_unknown(family: str) -> bool:
     return family.startswith("unknown_")
 
 
+#: Phase 32 — strict margin gate (owner decision, abstention ON).
+#: A weapon label ships ONLY when the best family's NCC score beats
+#: the best OTHER family by at least this margin. Below it the label
+#: is UNKNOWN (abstained), never a guessed gun name. Diagnostic on
+#: held-out real 360p entries (Phase 23 W5): margin >= 0.15 ->
+#: 79% precision at 24/357 coverage, vs ~48.2% class accuracy
+#: ungated. Coverage loss is the EXPECTED trade-off; loosening this
+#: gate to buy coverage back is not a silent option — it re-ships
+#: the ~48% labels this gate exists to stop.
+MARGIN_THRESHOLD = 0.15
+
+
+def gated_weapon(
+    family: Optional[str],
+    score: float,
+    second_score: float,
+    *,
+    threshold: float = 0.55,
+    margin_threshold: float = MARGIN_THRESHOLD,
+) -> Optional[str]:
+    """Pure margin-gate decision for one candidate (Phase 32).
+
+    Returns the class-level weapon iff the family is identified, the
+    score clears ``threshold``, AND ``score - second_score`` clears
+    ``margin_threshold`` (boundary inclusive: margin == threshold
+    is confident). Anything else -> None (UNKNOWN/abstain). Pure so
+    the gate is unit-testable without cv2 or the template library;
+    :meth:`IconMatcher.match_candidates` applies exactly this.
+    """
+    if family is None or family not in FAMILY_TO_CLASS:
+        return None
+    if float(score) < float(threshold):
+        return None
+    if float(score) - float(second_score) < float(margin_threshold):
+        return None
+    return FAMILY_TO_CLASS[family]
+
+
 @dataclass
 class IconMatch:
     """Result of one template-matching pass over a crop."""
@@ -94,8 +140,13 @@ class IconMatch:
     score: float = 0.0                   # NCC score of the best match
     second_score: float = 0.0            # best score of any OTHER family
     location: Optional[Tuple[int, int, int, int]] = None  # (x, y, w, h) in crop px
-    weapon: Optional[str] = None         # class string iff identified + >= threshold
+    weapon: Optional[str] = None         # class string iff identified + >= threshold + margin gate
     weapon_family: Optional[str] = None  # family iff weapon is not None
+    #: Phase 32: True iff an identified family cleared the score
+    #: threshold but the MARGIN gate abstained (margin < threshold).
+    #: Distinct from unknown-glyph / low-score nulls, so downstream
+    #: can count gate coverage honestly (labelled vs abstained).
+    weapon_abstained: bool = False
 
     @property
     def margin(self) -> float:
@@ -145,12 +196,16 @@ class IconMatcher:
         marker_threshold: float = 0.50,
         upscale: int = 4,
         scales: Tuple[float, ...] = (0.85, 1.0, 1.15),
+        margin_threshold: float = MARGIN_THRESHOLD,
     ) -> None:
         self.icons_dir = icons_dir or DEFAULT_ICONS_DIR
         mode = str(preprocess or "none").strip().lower()
         self.preprocess = mode if mode in ("bin", "clahe", "histeq", "none") else "none"
         self.threshold = float(threshold)
         self.marker_threshold = float(marker_threshold)
+        #: Phase 32 strict margin gate (default ON at 0.15). Appended
+        #: last so existing positional construction is unaffected.
+        self.margin_threshold = float(margin_threshold)
         self.upscale = max(1, int(upscale))
         self.scales = tuple(float(s) for s in scales) or (1.0,)
         self._templates: Dict[str, list] = {}   # family -> [prepared arrays]
@@ -356,7 +411,15 @@ class IconMatcher:
         word — a team logo mimicking the wheel glyph) is rejected and
         the next candidate is tried, instead of failing the whole row.
         Each candidate's ``weapon`` follows the same honesty rule as
-        :meth:`match` (identified family + score >= threshold only).
+        :meth:`match` (identified family + score >= threshold + the
+        Phase 32 margin gate). NOTE on the margin of a non-top
+        candidate: its best OTHER family is the top family, so its
+        margin is negative and it can never carry a weapon — only
+        the top candidate can be confident, and only when it beats
+        the runner-up by >= margin_threshold. A structurally-rejected
+        top candidate therefore abstains the weapon rather than
+        promoting a close runner-up into a guessed gun name; the
+        entry (names, knock) still ships, only the weapon is UNKNOWN.
         """
         self._ensure_loaded()
         if not self._available or crop is None:
@@ -372,16 +435,36 @@ class IconMatcher:
         ranked = sorted(per_family.items(), key=lambda kv: -kv[1][0])
         out: List[IconMatch] = []
         for rank, (family, (score, loc)) in enumerate(ranked[: max(1, top_n)]):
-            second = ranked[1][1][0] if len(ranked) > 1 else 0.0
+            # Best score of any OTHER family: the runner-up for the
+            # top candidate, the top score for every other candidate
+            # (previously every candidate wrongly shared ranked[1]).
+            if rank == 0:
+                second = ranked[1][1][0] if len(ranked) > 1 else 0.0
+            else:
+                second = ranked[0][1][0]
             cand = IconMatch(
                 family=family,
                 score=max(0.0, score),
                 second_score=max(0.0, second),
                 location=loc,
             )
-            if family in FAMILY_TO_CLASS and score >= self.threshold:
-                cand.weapon = FAMILY_TO_CLASS[family]
+            cand.weapon = gated_weapon(
+                family,
+                score,
+                second,
+                threshold=self.threshold,
+                margin_threshold=self.margin_threshold,
+            )
+            if cand.weapon is not None:
                 cand.weapon_family = family
+            elif (
+                family in FAMILY_TO_CLASS
+                and score >= self.threshold
+                and score - second < self.margin_threshold
+            ):
+                # Identified + above score threshold, but the margin
+                # gate abstained: record it (not a low-score null).
+                cand.weapon_abstained = True
             out.append(cand)
         return out
 
@@ -580,6 +663,8 @@ __all__ = [
     "DEFAULT_ICONS_DIR",
     "FAMILY_TO_CLASS",
     "MARKER_FAMILIES",
+    "MARGIN_THRESHOLD",
+    "gated_weapon",
     "IconMatch",
     "IconMatcher",
     "MarkerMatch",

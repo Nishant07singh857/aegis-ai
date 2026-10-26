@@ -37,25 +37,42 @@ export interface GameVideoProps {
   slot: number;
   /** "real" or "simulator" (output page ?video=sim). */
   mode?: VideoLayerMode;
+  /**
+   * Phase 32 (K-C1): short-lived signed feed token (?feed_token= on the
+   * output page URL, minted by an operator). A bare <img> cannot send
+   * headers, so the token travels in the query string; without it (and
+   * without a session credential the <img> cannot carry either) the
+   * feed answers 401 and this component shows its NO FEED slate.
+   */
+  feedToken?: string;
 }
 
 type FeedState = 'connecting' | 'live' | 'error';
 
-export function GameVideo({ api, slot, mode = 'real' }: GameVideoProps) {
+export function GameVideo({ api, slot, mode = 'real', feedToken }: GameVideoProps) {
   const [feedState, setFeedState] = useState<FeedState>('connecting');
   const simulator = mode === 'simulator';
 
   const base = api.replace(/\/+$/, '');
-  // The MJPEG endpoint is intentionally unauthenticated (same trust model
-  // as /ws/live): the output page is captured by an unauthenticated
-  // headless Chromium. No token can be attached to an <img> anyway.
-  const src = `${base}/api/v1/video/feed/${slot}${simulator ? '?sim=1' : ''}`;
+  // Phase 32 (K-C1): the MJPEG endpoint is AUTHENTICATED (H3). A bare
+  // <img> cannot send Authorization/X-API-Key headers, so headless
+  // capture carries the short-lived signed feed token in the query
+  // string instead (minted by an operator; the output page propagates
+  // its own ?feed_token= here). No token + no header-able credential =
+  // 401 = the NO FEED slate below, never fake footage.
+  const query = [
+    simulator ? 'sim=1' : '',
+    feedToken ? `feed_token=${encodeURIComponent(feedToken)}` : '',
+  ]
+    .filter(Boolean)
+    .join('&');
+  const src = `${base}/api/v1/video/feed/${slot}${query ? `?${query}` : ''}`;
 
   // Reset the load state whenever the camera/mode changes so a stale
   // "error" or "live" does not survive a slot switch.
   useEffect(() => {
     setFeedState('connecting');
-  }, [slot, mode, api]);
+  }, [slot, mode, api, feedToken]);
 
   const showSlate = feedState === 'error';
 
