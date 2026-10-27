@@ -200,30 +200,53 @@ class ClipDetector(BaseAgent):
         data: Dict[str, Any],
         context: Dict[str, Any],
     ) -> HighlightClip:
-        """Create squad wipe highlight clip"""
-        
+        """Create squad wipe highlight clip — evidence-gated (Phase 34, H-2).
+
+        ``time_span`` and ``placement`` come ONLY from evidence passed
+        into ``data``; there are no defaults anymore (the old
+        ``time_span=15`` / ``placement=16`` invented a "15.0s" and a
+        "#16 place"). When ``time_span`` is absent, the description
+        carries no duration phrase and ``duration_seconds`` is the
+        neutral fixed 8s clip window (the same fixed window grenade
+        clips use) — never ``time_span + 8`` from an invented value.
+        When ``placement`` is absent, there is no "#N place" phrase.
+        Neither missing value contributes to excitement.
+        """
+
         team_name = data.get("team_name", "Unknown")
         eliminator = data.get("eliminator", "Unknown")
-        time_span = data.get("time_span", 15)
-        placement = data.get("placement", 16)
-        
+        time_span = self._evidence_positive_number(data, ("time_span",))
+        placement = self._evidence_positive_count(data, "placement", minimum=1)
+
         excitement = 65
-        if placement <= 3:
+        if placement is not None and placement <= 3:
             excitement += 25
-        if time_span < 10:
+        if time_span is not None and time_span < 10:
             excitement += 10
-        
+
         quality = self._determine_quality(excitement)
-        
+
+        if time_span is not None and placement is not None:
+            description = (
+                f"{eliminator} wipes out {team_name} in {time_span:.1f}s "
+                f"at #{placement} place!"
+            )
+        elif time_span is not None:
+            description = f"{eliminator} wipes out {team_name} in {time_span:.1f}s!"
+        elif placement is not None:
+            description = f"{eliminator} wipes out {team_name} at #{placement} place!"
+        else:
+            description = f"{eliminator} wipes out {team_name}!"
+
         clip = HighlightClip(
             clip_id=f"clip_wipe_{int(time.time())}",
             category=HighlightCategory.SQUAD_WIPE,
             quality=quality,
             title=f"SQUAD WIPE! {eliminator} eliminates {team_name}",
-            description=f"{eliminator} wipes out {team_name} in {time_span:.1f}s at #{placement} place!",
+            description=description,
             start_timestamp_ms=data.get("start_time_ms", 0) - 5000,
             end_timestamp_ms=data.get("end_time_ms", 0) + 3000,
-            duration_seconds=time_span + 8,
+            duration_seconds=time_span + 8 if time_span is not None else 8.0,
             primary_team=eliminator,
             secondary_teams=[team_name],
             excitement_score=excitement,
@@ -235,7 +258,7 @@ class ClipDetector(BaseAgent):
             needs_slow_motion=(quality in [ClipQuality.LEGENDARY, ClipQuality.EXCELLENT]),
             hashtags=["#SquadWipe", "#BGMI", "#Esports"],
         )
-        
+
         return clip
     
     def _create_clutch_clip(
@@ -243,26 +266,62 @@ class ClipDetector(BaseAgent):
         data: Dict[str, Any],
         context: Dict[str, Any],
     ) -> HighlightClip:
-        """Create clutch win highlight clip"""
-        
+        """Create clutch win highlight clip — evidence-gated (Phase 34, H-2).
+
+        ``enemy_count`` and ``win_probability`` come ONLY from evidence
+        passed into ``data``; there are no defaults anymore (the old
+        ``enemy_count=4`` / ``win_probability=0.1`` invented a "1v4"
+        and "defies 10% odds"). ``enemy_count`` must be a positive
+        int >= 2 — a 1v1 is not a clutch claim, so 1 is no evidence.
+        ``win_probability`` must be a finite number in [0, 1). The
+        "1vN" phrase renders only when the count is evidenced, the
+        odds phrase only when the probability is evidenced, and the
+        "#1v4" hashtag only when the evidenced count is exactly 4.
+        Neither missing value contributes to excitement.
+        """
+
         player_name = data.get("player_name", "Unknown")
-        enemies = data.get("enemy_count", 4)
-        probability = data.get("win_probability", 0.1)
-        
+        enemies = self._evidence_positive_count(data, "enemy_count", minimum=2)
+        probability = self._evidence_probability(data, "win_probability")
+
         excitement = 80
-        if enemies >= 4:
+        if enemies is not None and enemies >= 4:
             excitement += 15
-        if probability < 0.1:
+        if probability is not None and probability < 0.1:
             excitement += 5
-        
+
         quality = self._determine_quality(excitement)
-        
+
+        if enemies is not None:
+            title = f"IMPOSSIBLE! {player_name} wins 1v{enemies} Clutch!"
+        else:
+            title = f"IMPOSSIBLE! {player_name} wins the Clutch!"
+
+        if enemies is not None and probability is not None:
+            description = (
+                f"{player_name} defies {probability:.0%} odds to win "
+                f"a 1v{enemies} clutch! LEGENDARY!"
+            )
+        elif enemies is not None:
+            description = f"{player_name} wins a 1v{enemies} clutch! LEGENDARY!"
+        elif probability is not None:
+            description = (
+                f"{player_name} defies {probability:.0%} odds to win "
+                f"the clutch! LEGENDARY!"
+            )
+        else:
+            description = f"{player_name} wins the clutch! LEGENDARY!"
+
+        hashtags = ["#Clutch", "#BGMI", "#Impossible"]
+        if enemies == 4:
+            hashtags.insert(1, "#1v4")
+
         return HighlightClip(
             clip_id=f"clip_clutch_{int(time.time())}",
             category=HighlightCategory.CLUTCH_WIN,
             quality=quality,
-            title=f"IMPOSSIBLE! {player_name} wins 1v{enemies} Clutch!",
-            description=f"{player_name} defies {probability:.0%} odds to win a 1v{enemies} clutch! LEGENDARY!",
+            title=title,
+            description=description,
             start_timestamp_ms=data.get("start_time_ms", 0) - 8000,
             end_timestamp_ms=data.get("end_time_ms", 0) + 5000,
             duration_seconds=20,
@@ -275,7 +334,7 @@ class ClipDetector(BaseAgent):
             suggested_angles=["clutch_player_pov", "enemy_pov", "overhead"],
             suggested_speed=0.5,
             needs_slow_motion=True,
-            hashtags=["#Clutch", "#1v4", "#BGMI", "#Impossible"],
+            hashtags=hashtags,
             platform_suitability={
                 "youtube_shorts": 95,
                 "tiktok": 98,
@@ -350,24 +409,46 @@ class ClipDetector(BaseAgent):
         data: Dict[str, Any],
         context: Dict[str, Any],
     ) -> HighlightClip:
-        """Create grenade kill highlight"""
-        
+        """Create grenade kill highlight — evidence-gated (Phase 34, H-2).
+
+        ``victims`` and ``distance`` come ONLY from evidence passed
+        into ``data``; there are no defaults anymore (the old
+        ``victims=1`` / ``distance=0`` invented a "1-man grenade").
+        ``victims`` must be a positive int >= 1; ``distance`` is the
+        shared ``_evidence_distance`` gate (positive finite only, so
+        0 is no evidence). With no evidenced victim count the clip
+        renders as a plain grenade with no count, ``needs_slow_motion``
+        fires only on an evidenced count >= 3, and neither missing
+        value contributes to excitement.
+        """
+
         player_name = data.get("player_name", "Unknown")
-        victims = data.get("victims", 1)
-        distance = data.get("distance", 0)
-        
-        excitement = 45 + victims * 15
-        if distance > 50:
+        victims = self._evidence_positive_count(data, "victims", minimum=1)
+        distance = self._evidence_distance(data)
+
+        excitement = 45
+        if victims is not None:
+            excitement += victims * 15
+        if distance is not None and distance > 50:
             excitement += 10
-        
+
         quality = self._determine_quality(excitement)
-        
+
+        if victims is not None:
+            title = f"KOBE! {player_name} with the {victims}-man grenade!"
+            description = (
+                f"Perfect grenade from {player_name} takes out {victims} players!"
+            )
+        else:
+            title = f"KOBE! {player_name} with the grenade!"
+            description = f"Perfect grenade from {player_name}!"
+
         return HighlightClip(
             clip_id=f"clip_nade_{int(time.time())}",
             category=HighlightCategory.GRENADE_KILL,
             quality=quality,
-            title=f"KOBE! {player_name} with the {victims}-man grenade!",
-            description=f"Perfect grenade from {player_name} takes out {victims} players!",
+            title=title,
+            description=description,
             start_timestamp_ms=data.get("timestamp_ms", 0) - 5000,
             end_timestamp_ms=data.get("timestamp_ms", 0) + 3000,
             duration_seconds=8,
@@ -378,7 +459,7 @@ class ClipDetector(BaseAgent):
             replay_value=excitement,
             match_id=context.get("match_id", ""),
             suggested_angles=["player_pov", "overhead", "explosion_closeup"],
-            needs_slow_motion=(victims >= 3),
+            needs_slow_motion=(victims is not None and victims >= 3),
             hashtags=["#GrenadeKill", "#Nade", "#BGMI"],
             platform_suitability={"tiktok": 90, "youtube_shorts": 85},
         )
@@ -389,6 +470,12 @@ class ClipDetector(BaseAgent):
 
     _NO_WEAPON_TOKENS = frozenset({"", "unknown", "none", "null", "n/a"})
 
+    # Dict-unwrap keys for _evidence_weapon. "weapon_family" is
+    # deliberately NOT among them: a family id (e.g. "ar_a") is an
+    # internal classifier label, never a display gun name, at any
+    # nesting depth.
+    _WEAPON_UNWRAP_KEYS = ("name", "label", "weapon", "weapon_class")
+
     @staticmethod
     def _evidence_weapon(data: Dict[str, Any]) -> Optional[str]:
         """Return the evidenced weapon display name, or None.
@@ -398,14 +485,18 @@ class ClipDetector(BaseAgent):
         icon-template match — ``None`` when unconfident, never
         guessed), or an explicit ``weapon_name`` / ``weapon_class``.
         A dict (e.g. an IconMatch-shaped payload) is unwrapped via
-        its name/label/class keys; an object with a ``weapon`` string
-        attribute is accepted the same way. ``weapon_family`` alone
-        (e.g. ``"ar_a"``) is NOT a display gun name, so it never
-        renders as one. Sentinels (``"Unknown"``, ``"None"``,
-        ``"unknown_*`` abstention glyphs) and non-strings mean NO
-        evidence — the caller gets gun-less rendering, never a
-        default gun. The value is returned verbatim (stripped);
-        nothing here maps a class to a specific gun or vice versa.
+        its name/label/weapon/weapon_class keys, at any nesting
+        depth; ``weapon_family`` is never an unwrap key, so a dict
+        carrying ONLY ``weapon_family`` (e.g. ``{"weapon_family":
+        "ar_a"}``) is NO evidence, nested or top-level. An unwrapped
+        value that is itself a dict or another non-string with no
+        string name yields None — never a guess. An object with a
+        ``weapon`` string attribute is accepted the same way.
+        Sentinels (``"Unknown"``, ``"None"``, ``"unknown_*``
+        abstention glyphs) and non-strings mean NO evidence — the
+        caller gets gun-less rendering, never a default gun. The
+        value is returned verbatim (stripped); nothing here maps a
+        class to a specific gun or vice versa.
         """
         raw: Any = None
         for key in ("weapon", "weapon_name", "weapon_class"):
@@ -414,21 +505,113 @@ class ClipDetector(BaseAgent):
                 break
         if raw is None:
             return None
-        if isinstance(raw, dict):
-            for key in ("name", "label", "weapon", "weapon_class", "weapon_family"):
+        # Unwrap nested dicts (bounded depth). The first non-None
+        # unwrap key wins at each level; a dict with none of the
+        # keys is no evidence. A value that stays a dict past the
+        # bound is no evidence either.
+        for _ in range(3):
+            if not isinstance(raw, dict):
+                break
+            for key in ClipDetector._WEAPON_UNWRAP_KEYS:
                 if raw.get(key) is not None:
                     raw = raw.get(key)
                     break
             else:
                 return None
+        if isinstance(raw, dict):
+            return None
         if not isinstance(raw, str):
             weapon_attr = getattr(raw, "weapon", None)
-            raw = weapon_attr if isinstance(weapon_attr, str) else None
-            if raw is None:
+            if isinstance(weapon_attr, str):
+                raw = weapon_attr
+            elif isinstance(weapon_attr, dict):
+                for key in ClipDetector._WEAPON_UNWRAP_KEYS:
+                    if weapon_attr.get(key) is not None:
+                        raw = weapon_attr.get(key)
+                        break
+                else:
+                    return None
+                if not isinstance(raw, str):
+                    return None
+            else:
                 return None
         value = raw.strip()
         lowered = value.lower()
         if lowered in ClipDetector._NO_WEAPON_TOKENS or lowered.startswith("unknown_"):
+            return None
+        return value
+
+    @staticmethod
+    def _evidence_number(data: Dict[str, Any], keys: tuple) -> Optional[float]:
+        """Shared numeric parsing for the evidence helpers.
+
+        Takes the first non-``None`` of ``keys``. Only real numbers
+        and plain numeric strings count as parseable; bools,
+        non-numeric strings, dicts/lists and missing keys are NO
+        evidence. NaN/inf parse but are rejected here, so every
+        caller built on this helper is finite-only by construction.
+        Range/floor checks are the caller's job.
+        """
+        raw: Any = None
+        for key in keys:
+            if data.get(key) is not None:
+                raw = data.get(key)
+                break
+        if raw is None or isinstance(raw, bool):
+            return None
+        if isinstance(raw, str):
+            try:
+                raw = float(raw.strip())
+            except (TypeError, ValueError):
+                return None
+        if not isinstance(raw, (int, float)):
+            return None
+        value = float(raw)
+        if not math.isfinite(value):
+            return None
+        return value
+
+    @staticmethod
+    def _evidence_positive_number(
+        data: Dict[str, Any], keys: tuple
+    ) -> Optional[float]:
+        """Return the evidenced positive finite number, or None.
+
+        Same parsing contract as ``_evidence_number``; zero and
+        negative values are NO evidence.
+        """
+        value = ClipDetector._evidence_number(data, keys)
+        if value is None or value <= 0:
+            return None
+        return value
+
+    @staticmethod
+    def _evidence_positive_count(
+        data: Dict[str, Any], key: str, minimum: int = 1
+    ) -> Optional[int]:
+        """Return the evidenced positive count, or None.
+
+        Same parsing contract as ``_evidence_number`` (plain numeric
+        strings that parse to an integral value count, mirroring
+        ``_evidence_distance``); the value must additionally be a
+        whole number >= ``minimum``. Bools, 0/negative values,
+        fractional values, NaN/inf, non-numeric strings, dicts and
+        missing keys are NO evidence — never a default count.
+        """
+        value = ClipDetector._evidence_number(data, (key,))
+        if value is None or not value.is_integer() or value < minimum:
+            return None
+        return int(value)
+
+    @staticmethod
+    def _evidence_probability(data: Dict[str, Any], key: str) -> Optional[float]:
+        """Return the evidenced probability in [0, 1), or None.
+
+        Same parsing contract as ``_evidence_number``; values
+        outside [0, 1) — including exactly 1.0 — are NO evidence.
+        """
+        value = ClipDetector._evidence_number(data, (key,))
+        if value is None or not 0 <= value < 1:
             return None
         return value
 
@@ -443,26 +626,13 @@ class ClipDetector(BaseAgent):
         non-numeric strings and missing keys mean NO evidence —
         the caller gets distance-less rendering, never a default
         number. Fail-closed by design: an unparseable value is
-        unknown, not 200.
+        unknown, not 200. Implemented on the shared
+        ``_evidence_positive_number`` gate, so this is the same
+        evidence path every other numeric creator uses.
         """
-        raw: Any = None
-        for key in ("distance", "distance_m", "distance_meters", "distance_metres"):
-            if data.get(key) is not None:
-                raw = data.get(key)
-                break
-        if raw is None or isinstance(raw, bool):
-            return None
-        if isinstance(raw, str):
-            try:
-                raw = float(raw.strip())
-            except (TypeError, ValueError):
-                return None
-        if not isinstance(raw, (int, float)):
-            return None
-        value = float(raw)
-        if not math.isfinite(value) or value <= 0:
-            return None
-        return value
+        return ClipDetector._evidence_positive_number(
+            data, ("distance", "distance_m", "distance_meters", "distance_metres")
+        )
 
     def _create_long_range_clip(
         self,
@@ -569,19 +739,38 @@ class ClipDetector(BaseAgent):
         data: Dict[str, Any],
         context: Dict[str, Any],
     ) -> HighlightClip:
-        """Create headshot chain highlight"""
-        
+        """Create headshot chain highlight — evidence-gated (Phase 34, H-2).
+
+        ``headshots`` comes ONLY from evidence passed into ``data``;
+        there is no default anymore (the old ``headshots=2`` invented
+        "2 headshots!"). The count must be a positive int >= 1. With
+        no evidenced count the clip renders count-less ("ONE TAPS!
+        {player}!") and the excitement score gets NO count
+        contribution.
+        """
+
         player_name = data.get("player_name", "Unknown")
-        headshots = data.get("headshots", 2)
-        
-        excitement = 40 + headshots * 15
-        
+        headshots = self._evidence_positive_count(data, "headshots", minimum=1)
+
+        excitement = 40
+        if headshots is not None:
+            excitement += headshots * 15
+
+        if headshots is not None:
+            title = f"ONE TAPS! {player_name} with {headshots} headshots!"
+            description = (
+                f"Clean headshots from {player_name} - {headshots} perfect one-taps!"
+            )
+        else:
+            title = f"ONE TAPS! {player_name}!"
+            description = f"Clean headshots from {player_name} - perfect one-taps!"
+
         return HighlightClip(
             clip_id=f"clip_hs_{int(time.time())}",
             category=HighlightCategory.HEADSHOT_CHAIN,
             quality=self._determine_quality(excitement),
-            title=f"ONE TAPS! {player_name} with {headshots} headshots!",
-            description=f"Clean headshots from {player_name} - {headshots} perfect one-taps!",
+            title=title,
+            description=description,
             start_timestamp_ms=data.get("start_time_ms", 0) - 2000,
             end_timestamp_ms=data.get("end_time_ms", 0) + 2000,
             duration_seconds=6,
