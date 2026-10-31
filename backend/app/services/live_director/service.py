@@ -1275,9 +1275,23 @@ class LiveDirector:
         active: bool = True,
         occupied_by: Optional[str] = None,
         poi: Optional[str] = None,
+        rotation_mode: Optional[str] = None,
+        bearing_deg: Optional[float] = None,
+        speed_px_s: Optional[float] = None,
+        occupancy_basis: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
         """Feed a RotationTracker movement reading into the engagement
-        tracker (ROTATING, or PRE_COMBAT into an occupied POI)."""
+        tracker (ROTATING, or PRE_COMBAT into an occupied POI).
+
+        ``rotation_mode`` / ``bearing_deg`` / ``speed_px_s`` are the
+        screen-derived enrichment of the reading (Phase 35): mode is
+        ``"vehicle"`` / ``"on_foot"`` (inferred), bearing is in screen
+        degrees, speed is in minimap px/s — never physical units.
+        They travel through to the engagement tracker's latest
+        rotation audit context (see ``engagement_snapshot()``) and
+        are NEVER scored: they change no state and no decision.
+        ``occupancy_basis`` is the audit label for how ``occupied_by``
+        was derived; it travels with the same intake."""
         resolved = await self._resolve_team(team_id)
         if resolved is None:
             self.stats["dropped_unknown_team"] += 1
@@ -1292,6 +1306,10 @@ class LiveDirector:
             occupied_by=occupied_id,
             poi=poi,
             now=self._clock(),
+            rotation_mode=rotation_mode,
+            bearing_deg=bearing_deg,
+            speed_px_s=speed_px_s,
+            occupancy_basis=occupancy_basis,
         )
         async with self._eval_lock:
             return await self._evaluate(trigger="rotation")

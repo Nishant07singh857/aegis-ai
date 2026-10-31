@@ -452,12 +452,141 @@ def _entry_key(entry: Any) -> Optional[str]:
     return None
 
 
+#: Score threshold a foreign weapon label must clear in the
+#: fallback gate — the same 0.55 default ``gated_weapon`` and the
+#: production ``IconMatcher`` use. (No margin evidence can rescue a
+#: below-threshold score, and no score can rescue a missing margin.)
+_FOREIGN_WEAPON_SCORE_THRESHOLD = 0.55
+
+
+def _finite_float(value: Any) -> Optional[float]:
+    """Finite float or None (non-numeric / NaN / +/-inf -> None).
+
+    NaN and infinities are evidence of nothing: they must never
+    satisfy a gate comparison, so they fail closed here instead of
+    leaking through a ``<`` check that NaN always fails.
+    """
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        return None
+    if out != out or out in (float("inf"), float("-inf")):
+        return None
+    return out
+
+
+def _foreign_weapon_evidence(entry: Any) -> Tuple[Optional[str], Optional[float], Optional[float]]:
+    """Margin evidence carried by a foreign entry, if any.
+
+    Returns ``(family, score, margin)`` where ``family`` is the
+    ``weapon_family``/``icon_family`` attribute when it is a string,
+    ``score`` is the weapon/icon score (never the OCR ``confidence``,
+    which is on a different scale and says nothing about the icon),
+    and ``margin`` is ``weapon_margin``/``margin`` when present, else
+    ``score - second_score`` from a runner-up pair. Any component may
+    be None: missing evidence is reported, never invented.
+    """
+    family = getattr(entry, "weapon_family", None) or getattr(
+        entry, "icon_family", None
+    )
+    if not isinstance(family, str) or not family.strip():
+        family = None
+    score: Optional[float] = None
+    for attr in ("weapon_confidence", "weapon_score", "icon_score", "score"):
+        score = _finite_float(getattr(entry, attr, None))
+        if score is not None:
+            break
+    margin: Optional[float] = None
+    for attr in ("weapon_margin", "margin"):
+        margin = _finite_float(getattr(entry, attr, None))
+        if margin is not None:
+            break
+    if margin is None and score is not None:
+        for attr in ("second_score", "runner_up_score", "second_best_score"):
+            second = _finite_float(getattr(entry, attr, None))
+            if second is not None:
+                margin = score - second
+                break
+    return family, score, margin
+
+
+def _gate_foreign_weapon(
+    entry: Any,
+) -> Tuple[Optional[str], bool, Optional[float], Optional[str], Optional[float]]:
+    """Gate a foreign detector's weapon label (Phase 35 M-2).
+
+    Returns ``(weapon, abstained, margin, family, score)`` under the
+    SAME contract as Phase 32's ``gated_weapon``: a label ships only
+    when margin evidence exists and clears the clamped 0.15 floor
+    (and the score clears 0.55). Every other case abstains —
+    ``weapon=None`` with ``abstained=True`` when a label was claimed
+    — so the abstention flag and the label can never disagree.
+
+    * A foreign ``weapon_abstained`` flag is respected, never
+      overridden: mirroring it is necessary but NOT sufficient —
+      the label itself is re-checked below.
+    * No margin evidence -> abstain rather than trust, however
+      confident the foreign detector sounds.
+    * Family evidence goes through ``gated_weapon`` itself (score +
+      margin, clamped threshold); the gated result must also agree
+      with the claimed label, or inconsistent evidence abstains.
+    * Without family evidence the claimed label must be exactly a
+      class-level weapon (``ar``/``smg``/``sniper``/``dmr``/
+      ``frag_grenade``/``pistol``) — a model name (``m416``), a
+      family id (``ar_a``), or any other string never ships.
+    * A non-string ``weapon`` (e.g. a dict) is a claimed-but-unusable
+      label: abstain, never unwrap it into a name.
+    * If the gate implementation itself cannot be imported, fail
+      closed: abstain. A missing gate must never become a bypass.
+    """
+    raw = getattr(entry, "weapon", None)
+    already_abstained = bool(getattr(entry, "weapon_abstained", False))
+    family, score, margin = _foreign_weapon_evidence(entry)
+    if raw is None or (isinstance(raw, str) and not raw.strip()):
+        # No label claimed: nothing to gate. A foreign abstention
+        # flag (weapon already None) is preserved as-is.
+        return None, already_abstained, margin, None, score
+    if not isinstance(raw, str):
+        return None, True, margin, None, score
+    claimed = raw.strip()
+    if already_abstained:
+        return None, True, margin, None, score
+    try:
+        from .detectors.icon_matcher import (
+            FAMILY_TO_CLASS,
+            MARGIN_THRESHOLD,
+            gated_weapon,
+        )
+    except Exception:
+        return None, True, margin, None, score
+    if margin is None:
+        return None, True, margin, None, score
+    if family is not None:
+        if score is None:
+            return None, True, margin, None, score
+        gated = gated_weapon(family, score, score - margin)
+        if gated is None or gated != claimed:
+            return None, True, margin, None, score
+        return gated, False, margin, family, score
+    if claimed not in frozenset(FAMILY_TO_CLASS.values()):
+        return None, True, margin, None, score
+    if score is None or score < _FOREIGN_WEAPON_SCORE_THRESHOLD:
+        return None, True, margin, None, score
+    if margin < MARGIN_THRESHOLD:
+        return None, True, margin, None, score
+    return claimed, False, margin, None, score
+
+
 def _entry_to_event(detector: Any, entry: Any, match_id: Optional[str], now: float):
     """Build the NormalizedEvent for a CONFIRMED entry.
 
     Prefers the detector's own builder (identical payload contract to
     the primary pipeline); falls back to a manual build with the same
-    fields when a foreign detector does not provide one.
+    fields when a foreign detector does not provide one. The fallback
+    gates the foreign ``weapon`` through the Phase 32 margin /
+    abstention contract (Phase 35 M-2): no margin evidence, or margin
+    below the clamped 0.15 floor, yields ``weapon=None`` with
+    ``weapon_abstained=True`` — never a verbatim foreign label.
     """
     builder = getattr(detector, "_entry_to_event", None)
     if callable(builder):
@@ -477,21 +606,37 @@ def _entry_to_event(detector: Any, entry: Any, match_id: Optional[str], now: flo
         "headshot_source": "vision_icon",
         "dedup_key": _entry_key(entry),
     }
-    weapon = getattr(entry, "weapon", None)
-    # Phase 32 / Phase 33 (D-3 correction): the KillFeedDetector path
-    # uses its own builder above (margin-gated + abstention payload).
-    # This fallback does NOT re-gate: it passes ``entry.weapon``
-    # through verbatim and only mirrors an abstention flag a foreign
-    # detector already set. A foreign detector whose weapon is NOT
-    # margin-gated would therefore leak ungated labels through this
-    # path — do NOT wire a foreign detector here until its weapons
-    # are gated (or this fallback gains a gate). No foreign detector
-    # is wired in production today, so there is no live bypass; the
-    # previous comment's "already gated" claim was wrong for the
-    # foreign-detector case and has been corrected, not the logic.
-    if getattr(entry, "weapon_abstained", False):
-        payload["weapon_abstained"] = True
-        payload["weapon_margin"] = round(float(getattr(entry, "weapon_margin", 0.0)), 3)
+    weapon, abstained, margin, family, score = _gate_foreign_weapon(entry)
+    # Phase 35 M-2: the fallback label passes the SAME gated_weapon /
+    # abstention contract as Phase 32 — margin < 0.15 (clamped floor)
+    # or no margin evidence -> UNKNOWN, never a confident verbatim
+    # name. Mirroring a foreign abstention flag alone was the old
+    # (ungated) behaviour and is not sufficient: the label itself is
+    # re-checked by _gate_foreign_weapon above. Flag and label agree
+    # on every path: a dropped label always carries
+    # weapon_abstained=True, a shipped label always False. The
+    # 0.0 margin below is the absent-evidence default (the
+    # KillFeedEntry convention), not a measured margin.
+    payload["weapon_abstained"] = abstained
+    payload["weapon_margin"] = round(margin, 3) if margin is not None else 0.0
+    if weapon is not None and family is not None:
+        # Family-evidenced pass: production-shaped provenance, the
+        # same keys KillFeedDetector's builder emits for a gated label.
+        payload["weapon_family"] = family
+        payload["weapon_source"] = "icon_template"
+        payload["weapon_granularity"] = "class"
+        if score is not None:
+            payload["weapon_confidence"] = round(score, 3)
+    elif weapon is not None and score is not None:
+        payload["weapon_confidence"] = round(score, 3)
+    elif abstained:
+        # Diagnostic only: which glyph the foreign detector claimed,
+        # without ever promoting it to a weapon label.
+        claimed_family = getattr(entry, "weapon_family", None) or getattr(
+            entry, "icon_family", None
+        )
+        if isinstance(claimed_family, str) and claimed_family.strip():
+            payload["icon_family"] = claimed_family.strip()
     return schemas.NormalizedEvent(
         event_type=feed_type,
         ts=now,

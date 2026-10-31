@@ -137,10 +137,18 @@ needed, but encoding is the most expensive thing the box does.
 | 1080p60 | A strong CPU (8+ fast cores) **or** a hardware encoder. |
 
 Hardware encoding (NVIDIA NVENC, Intel QuickSync) is the usual answer for
-1080p60 on modest hardware, but it is **not wired up yet** — the streamer
-image and entrypoint assume software x264. It is a natural future upgrade:
-pass through `/dev/dri` or the NVIDIA runtime and switch the encoder to
-`h264_nvenc` / `h264_qsv`.
+1080p60 on modest hardware. The NVENC half of that story already exists in
+code — but it is **not plumbed into the shell streamer**: `backend/app/streaming/encoder.py`
+(`detect_encoder`) really probes for NVENC (ffmpeg `-encoders` lists
+`h264_nvenc` AND `nvidia-smi` reports a GPU) and selects it under
+`VIDEO_ENCODER=auto`/`nvenc`, falling back to `libx264` with a warning when
+either probe fails; its sole production caller is the highlight
+renderer (`backend/app/services/replay/renderer.py:398`), and it maps the x264 preset to `p4` for NVENC
+(NVENC rejects x264 preset names). The streamer entrypoint below does not
+call it at all — it hardcodes `-c:v libx264` (`infrastructure/docker/streamer-entrypoint.sh`).
+Plumbing the entrypoint into `detect_encoder` (with the preset mapping) is
+the remaining work; QuickSync has no equivalent probing code. Until then the
+shipped streamer is software x264 only, whatever GPU the host has.
 
 Rules of thumb:
 
@@ -148,9 +156,10 @@ Rules of thumb:
   YouTube stream costs almost no extra CPU — only network upload.
 - Upload bandwidth matters: budget ~6 Mbps up per 720p30 stream destination
   headroom (bitrate + overhead + spikes).
-- If the picture stutters but audio is fine, you are CPU-bound: drop to a
+- If the picture stutters, you are CPU-bound: drop to a
   faster preset (`VIDEO_PRESET=ultrafast`, lower quality) or fewer pixels
-  (`STREAM_WIDTH=960 STREAM_HEIGHT=540`).
+  (`STREAM_WIDTH=960 STREAM_HEIGHT=540`). (There is no stream audio to judge
+  by — the stream is video-only, see §6.)
 
 ---
 
@@ -262,9 +271,15 @@ today and the easiest way to combine AEGIS graphics with a human caster.
   feeding it real gameplay right now. What you see on the director page and
   overlays is the real layout, real components, and real websocket plumbing —
   driven by the **simulated match engine**, not a live match.
-- **Audio is a silent track.** The streamer muxes a silent AAC track because
-  platforms expect one; there is no game audio, no commentary audio, no TTS
-  on the stream today. (The commentary *text* feed in the app is real.)
+- **Audio: there is none on the stream — video-only, honestly.** The
+  streamer entrypoint encodes with `-an` and no audio input at all ("no
+  faked silent track", `infrastructure/docker/streamer-entrypoint.sh`):
+  no game audio, no commentary audio, no TTS, and no silent AAC track is
+  muxed onto the stream. (The commentary *text* feed in the app is real.)
+  The deprecated API streaming path does the same (`backend/app/streaming/service.py`:
+  with no audio inputs the encoder gets `-an` rather than a faked silent
+  track). If a platform requires an audio track, that is future work —
+  nothing is faked today.
 - **The picture is the web UI**, captured at 720p. It looks like a broadcast
   graphics package, not a game client — because that is what it is.
 
@@ -281,7 +296,13 @@ something this guide pretends exists.
 - `infrastructure/docker/Dockerfile.streamer` — ffmpeg + Chromium + Xvfb
   image (Debian bookworm, release-pinned).
 - `infrastructure/docker/streamer-entrypoint.sh` — virtual display →
-  Chromium → x11grab → x264 → multi-RTMP (tee muxer).
+  Chromium → x11grab → x264 → multi-RTMP (tee muxer). Video-only (`-an`);
+  hardcodes `libx264` — it does not call `streaming/encoder.py`.
+- `backend/app/streaming/encoder.py` — real NVENC probing
+  (`detect_encoder`: ffmpeg `h264_nvenc` + `nvidia-smi`, `VIDEO_ENCODER`
+  override, `libx264` fallback, NVENC preset mapping). Used by the highlight
+  renderer only — NOT by the shell
+  streamer entrypoint above.
 - `infrastructure/docker/docker-compose.streaming.yml` — overlay adding the
   `streamer` service (profile `streaming`) on top of prod/staging. It does
   not modify any base compose file.

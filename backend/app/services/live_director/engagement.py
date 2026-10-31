@@ -47,6 +47,7 @@ log with the signals that triggered it, for QA audit.
 
 from __future__ import annotations
 
+import math
 import time
 from collections import deque
 from enum import Enum
@@ -83,12 +84,28 @@ def baseline_for_phase(phase: Optional[str]) -> EngagementState:
     return EngagementState.IDLE
 
 
+def _finite_float(value: Any) -> Optional[float]:
+    """Finite float for a numeric enrichment reading, else None.
+
+    Bools and non-numeric / non-finite values (NaN, infinities) are
+    rejected: an unmeasurable enrichment field is absent, never a
+    stored number that looks measured.
+    """
+    if isinstance(value, bool):
+        return None
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        return None
+    return out if math.isfinite(out) else None
+
+
 class _TeamState:
     __slots__ = (
         "team_id", "state", "state_since", "phase",
         "fight_id", "fight_clutch", "fight_last_activity",
         "precombat_last", "precombat_signals",
-        "rotating_last", "last_signals",
+        "rotating_last", "last_signals", "rotation_detail",
     )
 
     def __init__(self, team_id: str, phase: Optional[str]):
@@ -103,6 +120,14 @@ class _TeamState:
         self.precombat_signals: List[str] = []
         self.rotating_last = 0.0
         self.last_signals: List[str] = []
+        #: Latest rotation intake for this team (Phase 35): the
+        #: screen-derived enrichment of the most recent active
+        #: rotation reading (mode / bearing / speed in px/s, plus
+        #: the occupancy/POI audit fields). Audit context ONLY —
+        #: never an input to state derivation or scoring. None when
+        #: no enriched rotation has been recorded, or once the
+        #: rotation signal has gone stale / ended.
+        self.rotation_detail: Optional[Dict[str, Any]] = None
 
 
 class EngagementTracker:
@@ -156,12 +181,28 @@ class EngagementTracker:
         occupied_by: Optional[str] = None,
         poi: Optional[str] = None,
         now: Optional[float] = None,
+        rotation_mode: Optional[str] = None,
+        bearing_deg: Optional[float] = None,
+        speed_px_s: Optional[float] = None,
+        occupancy_basis: Optional[str] = None,
     ) -> None:
         """RotationTracker movement for one team.
 
         ``occupied_by`` names a team already holding the destination
         POI/compound (from labelled positions / derivations): a
         rotation into an occupied POI is convergence -> PRE_COMBAT.
+
+        ``rotation_mode`` / ``bearing_deg`` / ``speed_px_s`` are the
+        screen-derived enrichment of the rotation reading (Phase 35):
+        mode is ``"vehicle"`` / ``"on_foot"`` (inferred), bearing is
+        in screen degrees, speed is in minimap pixels per second —
+        NEVER physical units. They are stored as the team's latest
+        rotation audit context (see :meth:`snapshot`) and are NEVER
+        inputs to state derivation or scoring: mode alone never
+        creates PRE_COMBAT, and bearing/speed never change a state.
+        Invalid enrichment (unknown mode, non-finite or negative
+        speed, non-finite bearing) is dropped to None, never stored
+        as if measured.
         """
         if not team_id:
             return
@@ -170,10 +211,32 @@ class EngagementTracker:
         self.stats["signals"] += 1
         if not active:
             entry.rotating_last = 0.0
+            entry.rotation_detail = None
             self._refresh(entry, ts, ["rotation_ended"])
             return
         entry.rotating_last = ts
         entry.last_signals = ["rotation_active"]
+        detail: Dict[str, Any] = {"at": ts}
+        if occupied_by and occupied_by != team_id:
+            detail["occupied_by"] = occupied_by
+        if poi:
+            detail["poi"] = poi
+        if occupancy_basis:
+            detail["occupancy_basis"] = str(occupancy_basis)
+        mode = (
+            str(rotation_mode).strip()
+            if isinstance(rotation_mode, str) and rotation_mode.strip()
+            else None
+        )
+        if mode in ("vehicle", "on_foot"):
+            detail["rotation_mode"] = mode
+        bearing = _finite_float(bearing_deg)
+        if bearing is not None:
+            detail["bearing_deg"] = bearing
+        speed = _finite_float(speed_px_s)
+        if speed is not None and speed >= 0.0:
+            detail["speed_px_s"] = speed
+        entry.rotation_detail = detail if len(detail) > 1 else None
         if occupied_by and occupied_by != team_id:
             entry.precombat_last = ts
             entry.precombat_signals = [
@@ -393,6 +456,20 @@ class EngagementTracker:
         self, entry: _TeamState, now: float, signals: Sequence[str]
     ) -> None:
         entry.phase = self._phase_now() or entry.phase
+        # A rotation detail whose signal has gone stale is no longer
+        # the team's current rotation: drop it rather than let a
+        # snapshot reader mistake old enrichment for live movement.
+        # (State derivation itself never reads rotation_detail.)
+        if (
+            entry.rotation_detail is not None
+            and entry.rotating_last <= 0
+        ):
+            entry.rotation_detail = None
+        elif (
+            entry.rotation_detail is not None
+            and now - entry.rotating_last > self._config.rotating_ttl_s
+        ):
+            entry.rotation_detail = None
         new_state = self._derive(entry, now)
         if new_state != entry.state:
             transition = {
@@ -469,6 +546,15 @@ class EngagementTracker:
                 "fight_id": entry.fight_id,
                 "last_signals": list(entry.last_signals),
                 "precombat_signals": list(entry.precombat_signals),
+                # Latest rotation enrichment (screen-derived px/deg
+                # audit context, or None). Never scored; see
+                # note_rotation. Consumers must check "at" against
+                # the rotation TTL before treating it as current.
+                "rotation_detail": (
+                    dict(entry.rotation_detail)
+                    if entry.rotation_detail is not None
+                    else None
+                ),
             }
         return {
             "phase": self._phase_now(),

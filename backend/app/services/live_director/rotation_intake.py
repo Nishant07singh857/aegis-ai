@@ -27,7 +27,9 @@ director, WITHOUT editing ``live_director/service.py``:
   callback (subscribed in ``app/main.py`` lifespan) that feeds both
   event types straight into a LiveDirector instance. The bridge never
   raises — a bad event is counted and dropped, never allowed to break
-  bus dispatch for other subscribers.
+  bus dispatch for other subscribers. Phase 35: the bridge forwards
+  the FULL rotation spec (mode / bearing / speed-px/s / occupancy
+  basis) to ``note_rotation()`` — earlier it dropped the enrichment.
 
 SLAM ANTICIPATION — WHAT THIS DOES AND DOES NOT DO
 --------------------------------------------------
@@ -67,6 +69,7 @@ claim actually was.
 
 from __future__ import annotations
 
+import math
 from typing import Any, Callable, Dict, List, Optional
 
 import structlog
@@ -151,6 +154,17 @@ def translate_rotation_event(event: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     mode = str(mode).strip() if isinstance(mode, str) and mode.strip() else None
     if mode not in ("vehicle", "on_foot"):
         mode = None
+    # Enrichment gate (Phase 35): a bearing/speed that was never a
+    # measurement is absent, never passed through as if measured —
+    # non-finite values and negative speeds (a px/s magnitude) are
+    # dropped here; the engagement tracker applies the same gate
+    # again before storing anything.
+    bearing = _as_float(event.get("bearing_deg"))
+    if bearing is not None and not math.isfinite(bearing):
+        bearing = None
+    speed = _as_float(event.get("speed_px_s"))
+    if speed is not None and (not math.isfinite(speed) or speed < 0.0):
+        speed = None
     precombat = occupied_by is not None
     return {
         "team_id": team_id,
@@ -158,8 +172,8 @@ def translate_rotation_event(event: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         "occupied_by": occupied_by,
         "poi": poi,
         "rotation_mode": mode,
-        "bearing_deg": _as_float(event.get("bearing_deg")),
-        "speed_px_s": _as_float(event.get("speed_px_s")),
+        "bearing_deg": bearing,
+        "speed_px_s": speed,
         "occupancy_basis": (
             event.get("occupancy_basis") if precombat else None
         ),
@@ -218,7 +232,13 @@ async def handle_rotation_record(
 ) -> Optional[Dict[str, Any]]:
     """Feed one bus event into the director. Returns the intake spec
     applied, or ``None`` when the event carried nothing usable. Never
-    raises: intake failures are logged and counted by the caller."""
+    raises: intake failures are logged and counted by the caller.
+
+    The FULL rotation spec travels (Phase 35): team, occupancy, POI,
+    rotation mode, bearing and speed (px/s) are all forwarded to
+    ``note_rotation()`` — no enrichment field is dropped at the
+    bridge. The director stores the enrichment as audit context in
+    its engagement snapshot; it is never scored."""
     if event_type == "rotation_event":
         spec = translate_rotation_event(data)
         if spec is None:
@@ -228,6 +248,10 @@ async def handle_rotation_record(
             active=spec["active"],
             occupied_by=spec["occupied_by"],
             poi=spec["poi"],
+            rotation_mode=spec["rotation_mode"],
+            bearing_deg=spec["bearing_deg"],
+            speed_px_s=spec["speed_px_s"],
+            occupancy_basis=spec["occupancy_basis"],
         )
         return spec
     if event_type == "potential_fight":

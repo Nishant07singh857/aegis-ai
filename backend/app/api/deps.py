@@ -15,6 +15,20 @@ Phase 1 auth model (honest and minimal):
         (settings.API_KEY_HEADER). Compared with secrets.compare_digest.
         Static-allowlist keys are dev/demo grade; a hashed store belongs in
         the DB-backed auth that replaces this in Phase 2.
+  * Phase 35 (M-4): static keys CAN now be revoked at runtime, without a
+    restart, through the in-memory revocation registry below
+    (``revoke_api_key``). The registry is consulted by ``_verify_api_key``,
+    the single choke point for the REST and WebSocket API-key paths, so a
+    revoked key is rejected (401) on the very next request. HONEST LIMIT:
+    the registry is IN-MEMORY ONLY — a process restart resurrects a
+    revoked key unless the key has also been removed from ADMIN_API_KEYS
+    (the environment/config source). Permanent revocation is therefore
+    "revoke in-process AND remove from ADMIN_API_KEYS"; revoking
+    in-process alone buys immediate protection for the running process
+    only. No REST/WS endpoint wires ``revoke_api_key`` yet — the WS
+    ``revoke_key`` action in ``app/main.py`` still reports the old
+    restart-only message until it is rewired to call this registry.
+    Revoked keys are stored as SHA-256 digests only, never as raw keys.
 
 Dependencies:
   * get_current_user  — accepts a valid JWT (Authorization: Bearer <token>)
@@ -91,8 +105,10 @@ longer leaks a fresh key to anonymous callers, and `restart_node` /
 `stop_training` can no longer be triggered by anyone who can reach the port.
 """
 
+import hashlib
 import logging
 import secrets
+import threading
 from typing import Optional
 
 from fastapi import Depends, Header, HTTPException, WebSocket, status
@@ -119,9 +135,81 @@ ADMIN_PRINCIPAL = TokenPayload(
 )
 
 
+def _hash_api_key(raw_key: str) -> str:
+    """SHA-256 digest of a raw API key (hex). Only digests are ever stored
+    in the revocation registry; a raw key value is never retained."""
+    return hashlib.sha256(raw_key.encode("utf-8")).hexdigest()
+
+
+#: Phase 35 (M-4) — runtime revocation registry for static ADMIN_API_KEYS.
+#: In-memory ONLY (see module docstring): a restart clears it, so a
+#: revoked key comes back unless it was also removed from ADMIN_API_KEYS.
+#: Membership is by digest, never by raw key value.
+_REVOKED_API_KEY_HASHES: set = set()
+_REVOKED_API_KEY_LOCK = threading.Lock()
+
+
+def revoke_api_key(raw_key: str) -> bool:
+    """Revoke a static API key for the running process, no restart needed.
+
+    The key's SHA-256 digest is added to the revocation registry, and
+    every subsequent ``_verify_api_key`` check rejects it (401 on REST,
+    rejected principal on the WebSocket path). Returns True when the key
+    matched a currently configured ADMIN_API_KEYS entry at revocation
+    time, False otherwise (the digest is still recorded, so a key added
+    to the allowlist later in this process lifetime stays revoked —
+    there is deliberately no un-revoke: restoring a key requires a
+    restart with the key present in ADMIN_API_KEYS and no revocation
+    recorded in the fresh process).
+
+    HONEST LIMIT: in-memory only. A restart resurrects the key unless
+    it was also removed from ADMIN_API_KEYS. Permanent revocation is
+    "revoke here AND remove from the environment/config source". The
+    raw key is never stored or logged; only its digest is retained.
+    """
+    if not raw_key:
+        return False
+    digest = _hash_api_key(raw_key)
+    was_configured = any(
+        secrets.compare_digest(raw_key, allowed)
+        for allowed in settings.ADMIN_API_KEYS
+    )
+    with _REVOKED_API_KEY_LOCK:
+        _REVOKED_API_KEY_HASHES.add(digest)
+    logger.warning(
+        "API key revoked at runtime (digest recorded; in-memory only — "
+        "remove the key from ADMIN_API_KEYS for permanent revocation)"
+    )
+    return was_configured
+
+
+def is_api_key_revoked(raw_key: str) -> bool:
+    """True when the key's digest is in the runtime revocation registry."""
+    if not raw_key:
+        return False
+    return _hash_api_key(raw_key) in _REVOKED_API_KEY_HASHES
+
+
+def clear_revoked_api_keys_for_tests() -> None:
+    """Empty the runtime revocation registry. TEST SUPPORT ONLY — no
+    production caller uses this; revocation is one-way in a running
+    process (a restart is the restore path)."""
+    with _REVOKED_API_KEY_LOCK:
+        _REVOKED_API_KEY_HASHES.clear()
+
+
 def _verify_api_key(raw_key: str) -> bool:
-    """Constant-time check of a raw key against the static allowlist."""
+    """Constant-time check of a raw key against the static allowlist.
+
+    A key in the Phase 35 runtime revocation registry is rejected even
+    though it is still in ADMIN_API_KEYS (fail closed: revoked = 401).
+    This is the single choke point for API-key auth on both REST
+    (``authenticate_checked``) and WebSocket (``authenticate_websocket``),
+    so revocation takes effect on every path on the next request.
+    """
     if not raw_key or not settings.ADMIN_API_KEYS:
+        return False
+    if is_api_key_revoked(raw_key):
         return False
     return any(
         secrets.compare_digest(raw_key, allowed)
@@ -186,8 +274,8 @@ async def authenticate_checked(
     ``authenticate_token_or_key`` + H2 kill-switch revocation check.
 
     For JWT (Bearer) principals — the token path only; the X-API-Key path
-    is deliberately untouched and never DB-checked — the DB user row is
-    loaded and:
+    is deliberately untouched by the DB check and never DB-checked — the
+    DB user row is loaded and:
 
       * ``is_active`` is False (e.g. after the Phase 16 kill switch,
         ``UserService.deactivate_tournament``) → rejected (None → 401);
@@ -201,6 +289,9 @@ async def authenticate_checked(
     if payload is None:
         return None
     if not (bearer and bearer.credentials):
+        # X-API-Key path: no DB check by design, but _verify_api_key has
+        # already consulted the Phase 35 runtime revocation registry, so
+        # a revoked static key never reaches this return.
         return payload  # X-API-Key path: unchanged, no DB check.
     if payload.user_id == OPERATOR_USER_ID:
         return payload
@@ -425,7 +516,9 @@ async def authenticate_websocket(
     principal whose DB user row is missing or has ``is_active`` False is
     rejected (None), and a DB lookup failure fails closed (None, logged).
     The configured operator principal (user_id "operator", no DB row by
-    design) and the X-API-Key path are exempt, exactly as on REST.
+    design) and the X-API-Key path are exempt from the DB check, exactly
+    as on REST — the X-API-Key path IS still checked against the Phase 35
+    runtime revocation registry inside ``_verify_api_key``.
     Callers MUST re-run this per control action, not once at connect:
     a token frozen at connect time would otherwise keep working until
     expiry after its account is deactivated (see ``websocket_live`` in

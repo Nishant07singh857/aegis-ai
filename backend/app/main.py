@@ -6,7 +6,7 @@ import time
 import uuid
 import structlog
 from collections import deque
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional
 from fastapi import Depends, FastAPI, WebSocket, WebSocketDisconnect, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -99,6 +99,11 @@ from app.intelligence.director_ai import DirectorAIEngine, BroadcastEvent, Event
 from app.intelligence.commentary_engine import get_commentary_engine
 from app.db.session import init_db
 from app.db.base import get_db_context
+# Phase 35 (M-5): DB-error scrub — every DB exception logged/raised
+# from this module passes through app.db.error_scrub first, so a
+# driver message embedding the DATABASE_URL/password can never reach
+# a log line, a WS/HTTP payload, or a raised exception.
+from app.db.error_scrub import scrub_db_error_text, scrubbed_exception
 from app.db.models.enums import UserRole
 from app.db.models.user import User
 
@@ -474,9 +479,16 @@ async def _action_ack(action, status: str, **extra) -> dict:
 
 
 async def _action_error(action, message: str, **extra) -> dict:
-    """Honest failure ack: the action did NOT happen, and here is why."""
+    """Honest failure ack: the action did NOT happen, and here is why.
+
+    Phase 35 (M-5): the message is scrubbed at this single choke point
+    before broadcast, so no WS action error — including the DB-backed
+    ones (tournament create, player-stats reads) — can carry a database
+    URL/password embedded in a driver exception out to WS clients.
+    """
+    safe_message = scrub_db_error_text(message)
     return await _action_ack(
-        action, "error", message=message, reason=message, **extra
+        action, "error", message=safe_message, reason=safe_message, **extra
     )
 
 
@@ -1146,7 +1158,28 @@ async def _seed_first_admin() -> None:
             )
         logger.info("Seeded the first admin user from ADMIN_EMAIL/ADMIN_PASSWORD.")
     except Exception as e:
-        logger.warning(f"First-admin seeding skipped: {e}")
+        logger.warning(f"First-admin seeding skipped: {scrub_db_error_text(e)}")
+
+
+#: Phase 35 (M-3) — account lockout, implemented for real. The
+#: ``locked_until`` column was previously read but never set, so the
+#: lockout was dead code and only the login rate limit stood between
+#: an attacker and unlimited password guessing per account. Now:
+#: ``LOCKOUT_THRESHOLD`` consecutive failed passwords lock the account
+#: for ``LOCKOUT_DURATION_SECONDS``. 5 / 15 minutes: strict enough that
+#: a guessing attack stalls after a handful of tries per account, loose
+#: enough that a tournament staffer mistyping a password is not locked
+#: out for an hour, and aligned with the 5/min login rate limit so the
+#: two controls do not fight. The lock does NOT extend on further
+#: attempts while locked (fixed expiry, no indefinite lockout), and it
+#: clears on expiry, on a successful login, or when an admin resets the
+#: password (``UserService.patch_user`` already resets both fields).
+#: Applies to DB users only — the settings-only operator credential
+#: (ADMIN_USERNAME/ADMIN_PASSWORD) has no User row and no
+#: ``locked_until``; its brute-force mitigation remains the 5/min
+#: login rate limit.
+LOCKOUT_THRESHOLD = 5
+LOCKOUT_DURATION_SECONDS = 900  # 15 minutes
 
 
 async def _authenticate_db_user(username: str, password: str) -> Optional[User]:
@@ -1156,8 +1189,13 @@ async def _authenticate_db_user(username: str, password: str) -> Optional[User]:
     unlocked account and a bcrypt password match. Returns the User on
     success, None otherwise. Never raises: an unreachable DB or a schema
     missing the 005_add_user_role migration simply means "no DB user
-    matched". Successful logins refresh last_login_at and reset the failed
-    attempt counter (failed attempts increment it).
+    matched" — a DB failure denies the login (fail closed), it never
+    grants one. Successful logins refresh last_login_at and reset the
+    failed attempt counter and any lock; failed attempts increment the
+    counter and, at ``LOCKOUT_THRESHOLD``, set ``locked_until`` to a
+    future time (Phase 35, M-3). Counter/lock mutations are persisted
+    by the ``get_db_context`` commit on exit, on both the success and
+    the failure return paths.
     """
     ident = (username or "").strip().lower()
     if not ident or not password:
@@ -1173,17 +1211,32 @@ async def _authenticate_db_user(username: str, password: str) -> Optional[User]:
             if user is None or not user.is_active:
                 return None
             locked_until = user.locked_until
+            now = datetime.now(timezone.utc)
             if locked_until is not None:
                 if locked_until.tzinfo is None:
                     locked_until = locked_until.replace(tzinfo=timezone.utc)
-                if locked_until > datetime.now(timezone.utc):
+                if locked_until > now:
                     logger.warning("DB login rejected: account locked", username=user.username)
                     return None
+                # Lock expired: clear it and restart the failure count
+                # from zero, so one post-expiry typo does not instantly
+                # re-lock the account. Persisted by the context commit
+                # on whichever return path follows.
+                user.locked_until = None
+                user.failed_login_attempts = 0
             if not security_manager.verify_password(password, user.hashed_password):
                 user.failed_login_attempts = (user.failed_login_attempts or 0) + 1
+                if user.failed_login_attempts >= LOCKOUT_THRESHOLD:
+                    user.locked_until = now + timedelta(seconds=LOCKOUT_DURATION_SECONDS)
+                    logger.warning(
+                        "DB account locked after failed logins",
+                        username=user.username,
+                        failed_login_attempts=user.failed_login_attempts,
+                    )
                 return None
-            user.last_login_at = datetime.now(timezone.utc)
+            user.last_login_at = now
             user.failed_login_attempts = 0
+            user.locked_until = None
             return user
     except Exception as e:
         logger.warning(f"DB credential check unavailable, skipping: {e}")
@@ -1255,7 +1308,8 @@ async def _init_database_or_fail_fast() -> None:
 
     The configured URL itself is NEVER logged: it embeds the DB
     password. Only the fact that a URL was configured, and the
-    driver error, are logged.
+    driver error — scrubbed of credentials via ``app.db.error_scrub``
+    (Phase 35, M-5) — are logged.
     """
     if not settings.database_configured:
         logger.info(
@@ -1268,9 +1322,20 @@ async def _init_database_or_fail_fast() -> None:
     try:
         await init_db()
     except Exception as e:
+        # Phase 35 (M-5): scrub BEFORE logging/raising. The raw
+        # exception can embed the configured DATABASE_URL (and its
+        # password); neither the log line, the RuntimeError message,
+        # nor the chained cause may carry it. The configured URL is
+        # passed as a known secret so even a driver message echoing
+        # it verbatim is redacted. Chaining to a SCRUBBED surrogate —
+        # never to ``e`` itself — so a traceback printing the chain
+        # cannot leak the raw message either. Boot-abort behaviour
+        # is unchanged (Phase 33): configured + dead still raises
+        # RuntimeError and aborts startup.
+        scrubbed = scrub_db_error_text(e, secrets=[settings.DATABASE_URL])
         logger.critical(
             "Refusing to boot: DATABASE_URL is configured but the "
-            f"database is unreachable (init_db failed: {e}). The app "
+            f"database is unreachable (init_db failed: {scrubbed}). The app "
             "will NOT fall back to in-memory state."
         )
         raise RuntimeError(
@@ -1279,8 +1344,8 @@ async def _init_database_or_fail_fast() -> None:
             "NOT silently fall back to in-memory state. Fix "
             "DATABASE_URL or start the database, or unset "
             "DATABASE_URL for intentional no-DB dev/test mode. "
-            f"Original error: {e}"
-        ) from e
+            f"Original error: {scrubbed}"
+        ) from scrubbed_exception(e, secrets=[settings.DATABASE_URL])
 
 
 # ==========================================
@@ -2054,7 +2119,11 @@ async def websocket_live(websocket: WebSocket):
                 )
                 await handle_action(payload, user=ws_user)
             except Exception as e:
-                logger.error(f"Failed to handle WS action: {e}")
+                # Phase 35 (M-5): scrub — handle_action can surface a
+                # DB driver error embedding the DATABASE_URL.
+                logger.error(
+                    f"Failed to handle WS action: {scrub_db_error_text(e)}"
+                )
     except WebSocketDisconnect:
         manager.disconnect(websocket)
         
@@ -2216,8 +2285,12 @@ async def get_match_player_stats_endpoint(match_id: str):
                 )
         return JSONResponse({"data": {"match_id": match_id, "players": out}})
     except Exception as e:  # honest degrade: empty, never invented
+        # Phase 35 (M-5): scrub — this read path is DB-backed and the
+        # exception can embed the DATABASE_URL.
         logger.warning(
-            "player-stats unavailable", match_id=match_id, error=str(e)
+            "player-stats unavailable",
+            match_id=match_id,
+            error=scrub_db_error_text(e),
         )
         return JSONResponse({"data": {"match_id": match_id, "players": []}})
 

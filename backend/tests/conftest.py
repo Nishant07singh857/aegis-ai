@@ -58,18 +58,76 @@ def event_loop():
 
 @pytest_asyncio.fixture
 async def db_session():
-    """Create a test database session"""
-    from app.db.base import AsyncSessionLocal
-    
-    async with AsyncSessionLocal() as session:
+    """Per-test ISOLATED database session (Phase 35 W5).
+
+    Previously this fixture handed out sessions on the shared
+    ``AsyncSessionLocal`` bound to the shared ``./test.db`` file,
+    with only a rollback at teardown — rows committed by one test
+    (or left behind by ``flush`` + a later commit) were visible to
+    the next, and two tests could collide on unique values (e.g.
+    the ``test_tournament`` slug below). Now every test gets a
+    FRESH in-memory SQLite database: its own engine (StaticPool,
+    one connection, so ``:memory:`` is shared by create_all and the
+    session), full ``create_all``, and engine disposal at teardown.
+    Nothing written here can leak into another test, or into the
+    shared ``./test.db``.
+
+    Scope limit, stated honestly: this isolates only tests that USE
+    this fixture (only the Phase 35 W5 proof tests do so far). It does NOT rebind the production
+    module-global engine / ``AsyncSessionLocal`` in
+    ``app.db.base``, so tests that reach the DB through the app
+    lifespan / ``TestClient`` / ``get_db`` still share ``./test.db``.
+    Suite-wide per-test isolation would require rebinding those
+    globals per test plus per-test create_all/dispose, which is
+    not attempted here: too invasive for this pass, and it would
+    disturb the many tests that monkeypatch
+    ``deps.AsyncSessionLocal``. That gap remains open.
+    """
+    from sqlalchemy import JSON
+    from sqlalchemy.dialects import postgresql
+    from sqlalchemy.ext.asyncio import (
+        AsyncSession,
+        async_sessionmaker,
+        create_async_engine,
+    )
+    from sqlalchemy.pool import StaticPool
+
+    from app.db.base import Base
+
+    # JSONB has no SQLite DDL rendering — swap it for generic JSON.
+    # Test-local only, same pattern as test_repositories.py and
+    # test_users.py; production models are untouched. The swap is
+    # idempotent: re-running it over already-swapped columns is a
+    # no-op, so repeated fixture use is safe.
+    for table in Base.metadata.tables.values():
+        for column in table.columns:
+            if isinstance(column.type, postgresql.JSONB):
+                column.type = JSON()
+
+    engine = create_async_engine(
+        "sqlite+aiosqlite:///:memory:",
+        poolclass=StaticPool,
+        connect_args={"check_same_thread": False},
+    )
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    maker = async_sessionmaker(
+        engine,
+        class_=AsyncSession,
+        expire_on_commit=False,
+        autocommit=False,
+        autoflush=False,
+    )
+    async with maker() as session:
         yield session
         await session.rollback()
+    await engine.dispose()
 
 
 @pytest_asyncio.fixture
 async def test_tournament(db_session):
     """Create a test tournament"""
-    from app.db.models import Tournament, TournamentStatus, TournamentFormat
+    from app.db.models import Tournament, TournamentStatus
     
     tournament = Tournament(
         id=str(uuid.uuid4()),
@@ -77,7 +135,6 @@ async def test_tournament(db_session):
         slug="test-tournament",
         description="Test tournament for unit tests",
         status=TournamentStatus.DRAFT,
-        format=TournamentFormat.BATTLE_ROYALE,
         start_date=datetime.utcnow(),
         end_date=datetime.utcnow() + timedelta(days=3),
         points_per_kill=1,
@@ -99,10 +156,7 @@ async def test_team(db_session):
     team = Team(
         id=str(uuid.uuid4()),
         name="Test Team",
-        short_name="TEST",
         tag="TST",
-        country="India",
-        primary_color="#FF0000",
         is_active=True,
     )
     
@@ -125,7 +179,6 @@ async def test_players(db_session, test_team):
             name=f"Test Player {i+1}",
             ign=f"TestPlayer{i+1}",
             role=PlayerRole.FRAGGER if i == 0 else PlayerRole.SUPPORT,
-            is_captain=(i == 0),
             is_active=True,
         )
         db_session.add(player)
@@ -144,7 +197,6 @@ async def test_match(db_session, test_tournament):
         id=str(uuid.uuid4()),
         tournament_id=test_tournament.id,
         match_number=1,
-        match_name="Test Match 1",
         map_name=MatchMap.ERANGEL,
         status=MatchStatus.SCHEDULED,
         scheduled_time=datetime.utcnow(),

@@ -47,12 +47,21 @@ branch and ``init_db`` succeeds exactly as before.
 
 Environment note: ``app.main`` needs ``fpdf2`` (pre-existing gap —
 the Phase 26 lifespan test skips for the same reason). Where
-``fpdf`` is absent, these tests install a minimal stub module
+``fpdf`` is absent, the Section C tests install a minimal stub module
 before importing ``app.main`` so the *DB boot logic* can still be
-exercised; the stub only stands in for the PDF class, which DB
-boot never touches. If ``app.main`` still cannot be imported for
-another reason, the main-helper tests skip honestly instead of
-failing on an unrelated dependency.
+exercised; the stub only stands in for the PDF class, which DB boot
+never touches. The stub is installed by a per-test fixture and is
+TORE DOWN after each test: ``sys.modules`` entries for ``fpdf`` /
+``fpdf.enums`` are restored to exactly what they were before the
+test, and any ``app.main`` / ``app.dossiers.*`` modules imported
+while the stub was present are evicted from ``sys.modules``, so a
+later import in the same process re-resolves ``fpdf`` honestly
+instead of reusing stub-bound modules. This file therefore adds no
+stub leak of its own; other files that install collection-time
+stubs are outside this file's scope. If ``app.main`` cannot be
+imported because of a missing module, the Section C tests skip
+honestly; any other import failure FAILS loudly instead of
+skipping (see ``_main_module``).
 """
 
 from __future__ import annotations
@@ -60,6 +69,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+from contextlib import contextmanager
 from types import ModuleType
 from unittest.mock import AsyncMock
 
@@ -70,20 +80,19 @@ pytestmark = pytest.mark.unit
 _DEAD_PG_URL = "postgresql+asyncpg://aegis:probe-password-not-real@127.0.0.1:59999/aegis"
 _DEAD_PG_PASSWORD = "probe-password-not-real"
 
+_MISSING = object()  # sentinel: sys.modules entry was absent before the stub
 
-def _install_fpdf_stub_if_absent():
-    """Install a minimal fpdf package stub only if fpdf2 is absent.
+
+def _build_fpdf_stub():
+    """Build the minimal fpdf package stub (import stand-in only).
 
     ``app.dossiers.pdf`` imports ``FPDF`` and ``fpdf.enums``
     (``MethodReturnValue``, ``XPos``, ``YPos``) at module level, so
     the stub must be a package with an ``enums`` submodule. It is
-    only a stand-in for import: DB boot never generates a PDF.
+    only a stand-in for import: DB boot never generates a PDF, and
+    the stub's ``FPDF`` has no PDF methods — PDF generation against
+    it fails, honestly, instead of pretending to work.
     """
-    try:
-        import fpdf  # noqa: F401
-        return
-    except ImportError:
-        pass
     import enum
 
     stub = ModuleType("fpdf")
@@ -116,22 +125,66 @@ def _install_fpdf_stub_if_absent():
     enums.XPos = XPos
     enums.YPos = YPos
     enums.MethodReturnValue = MethodReturnValue
+    return stub, enums
+
+
+@contextmanager
+def _fpdf_stub_if_absent():
+    """Install the fpdf stub only if fpdf2 is really absent, with teardown.
+
+    On exit, ``sys.modules["fpdf"]`` / ``sys.modules["fpdf.enums"]``
+    are restored to exactly their pre-context state (the previous
+    module object, or absent), and every ``app.main`` /
+    ``app.dossiers.*`` module first imported inside the context is
+    evicted from ``sys.modules``. Eviction matters: without it, a
+    later ``import app.main`` in the same process would return the
+    module bound to the stub's ``FPDF`` even after the stub itself
+    was removed. Modules already present before the context are
+    never evicted — this context only undoes what it caused.
+    """
+    try:
+        import fpdf  # noqa: F401
+
+        yield
+        return
+    except ImportError:
+        pass
+    prior_fpdf = sys.modules.get("fpdf", _MISSING)
+    prior_enums = sys.modules.get("fpdf.enums", _MISSING)
+    modules_before = set(sys.modules)
+    stub, enums = _build_fpdf_stub()
     sys.modules["fpdf"] = stub
     sys.modules["fpdf.enums"] = enums
-
-
-def _load_main_module():
-    """Import app.main, stubbing fpdf only if it is really absent.
-
-    Returns the module, or raises pytest.skip() when app.main cannot
-    be imported for an unrelated reason (the skip message names it).
-    """
-    _install_fpdf_stub_if_absent()
     try:
-        import app.main as main_module
-    except Exception as exc:  # noqa: BLE001 - any import failure is a skip reason
-        pytest.skip(f"app.main not importable here: {exc}")
-    return main_module
+        yield
+    finally:
+        for name, prior in (("fpdf", prior_fpdf), ("fpdf.enums", prior_enums)):
+            if prior is _MISSING:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = prior
+        for name in list(sys.modules):
+            if name not in modules_before and (
+                name == "app.main" or name.startswith("app.dossiers")
+            ):
+                sys.modules.pop(name, None)
+
+
+@pytest.fixture
+def _main_module():
+    """Import ``app.main`` under the (teardown-guarded) fpdf stub.
+
+    Skips ONLY on a missing-module import failure (the pre-existing
+    fpdf2 gap and any other genuinely absent dependency). Every
+    other import failure propagates and FAILS loudly: a real
+    setup/configuration error must never be reported as a skip.
+    """
+    with _fpdf_stub_if_absent():
+        try:
+            import app.main as main_module
+        except ImportError as exc:
+            pytest.skip(f"app.main not importable here: {exc}")
+        yield main_module
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -226,9 +279,9 @@ class TestNoDbPlaceholderEngine:
 class TestInitDatabaseOrFailFast:
     @pytest.mark.asyncio
     async def test_configured_dead_db_raises_and_never_logs_password(
-        self, monkeypatch
+        self, monkeypatch, _main_module
     ):
-        main = _load_main_module()
+        main = _main_module
         monkeypatch.setattr(main.settings, "DATABASE_URL", _DEAD_PG_URL)
         failing = AsyncMock(side_effect=ConnectionRefusedError("connection refused"))
         monkeypatch.setattr(main, "init_db", failing)
@@ -244,8 +297,8 @@ class TestInitDatabaseOrFailFast:
         assert _DEAD_PG_URL not in message
 
     @pytest.mark.asyncio
-    async def test_configured_healthy_db_boots(self, monkeypatch):
-        main = _load_main_module()
+    async def test_configured_healthy_db_boots(self, monkeypatch, _main_module):
+        main = _main_module
         monkeypatch.setattr(
             main.settings, "DATABASE_URL", "sqlite+aiosqlite:///./test.db"
         )
@@ -255,8 +308,10 @@ class TestInitDatabaseOrFailFast:
         healthy.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_unconfigured_skips_init_db_entirely(self, monkeypatch):
-        main = _load_main_module()
+    async def test_unconfigured_skips_init_db_entirely(
+        self, monkeypatch, _main_module
+    ):
+        main = _main_module
         monkeypatch.setattr(main.settings, "DATABASE_URL", "")
         would_raise = AsyncMock(
             side_effect=AssertionError("init_db must not be called with no DB")
@@ -266,8 +321,10 @@ class TestInitDatabaseOrFailFast:
         would_raise.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_whitespace_url_skips_init_db_entirely(self, monkeypatch):
-        main = _load_main_module()
+    async def test_whitespace_url_skips_init_db_entirely(
+        self, monkeypatch, _main_module
+    ):
+        main = _main_module
         monkeypatch.setattr(main.settings, "DATABASE_URL", "   ")
         would_raise = AsyncMock(
             side_effect=AssertionError("init_db must not be called with no DB")
@@ -329,11 +386,30 @@ _PROBE_PREAMBLE = (
 )
 
 
+def _probe_skipped_for_missing_fpdf(combined: str) -> bool:
+    """True ONLY when the probe died because fpdf itself is missing.
+
+    Narrowed deliberately (Phase 35 W5): the old check skipped on
+    ANY ``ImportError``/``ModuleNotFoundError`` text in the probe
+    output, so a real setup failure (missing asyncpg, a broken
+    import elsewhere) was silently reported as a skip. The probe
+    preamble already stubs a wholly-absent ``fpdf``; the remaining
+    honest skip is a partially-present fpdf package whose
+    ``fpdf.enums`` submodule is missing. Everything else FAILS.
+    """
+    return (
+        "No module named 'fpdf'" in combined
+        or 'No module named "fpdf"' in combined
+        or "No module named 'fpdf.enums'" in combined
+        or 'No module named "fpdf.enums"' in combined
+    )
+
 def test_probe_dead_postgres_fails_loudly_with_real_init_db():
     """Real engine + real init_db against a refused port: boot must
     die with the fail-fast RuntimeError, never with a warning + a
-    running app. Skipped (not failed) if app.main cannot be imported
-    here for an unrelated dependency reason."""
+    running app. Skipped (not failed) ONLY if the probe subprocess
+    dies because the fpdf package itself is missing; any other
+    import/setup failure fails loudly."""
     code = (
         _PROBE_PREAMBLE
         + "import asyncio, app.main as m\n"
@@ -342,8 +418,8 @@ def test_probe_dead_postgres_fails_loudly_with_real_init_db():
     )
     proc = _run_probe_snippet(code, _DEAD_PG_URL)
     combined = proc.stdout + proc.stderr
-    if "ModuleNotFoundError" in combined or "ImportError" in combined:
-        pytest.skip(f"app.main not importable in probe subprocess: {combined[-500:]}")
+    if _probe_skipped_for_missing_fpdf(combined):
+        pytest.skip(f"fpdf missing in probe subprocess: {combined[-500:]}")
     assert proc.returncode != 0, f"dead DB must abort boot, got stdout={proc.stdout!r}"
     assert "Refusing to boot" in combined
     assert "UNEXPECTED_BOOT_OK" not in proc.stdout
@@ -368,8 +444,8 @@ def test_probe_dead_postgres_aborts_real_lifespan_entry():
     )
     proc = _run_probe_snippet(code, _DEAD_PG_URL)
     combined = proc.stdout + proc.stderr
-    if "ModuleNotFoundError" in combined or "ImportError" in combined:
-        pytest.skip(f"app.main not importable in probe subprocess: {combined[-500:]}")
+    if _probe_skipped_for_missing_fpdf(combined):
+        pytest.skip(f"fpdf missing in probe subprocess: {combined[-500:]}")
     assert proc.returncode != 0, f"dead DB must abort lifespan, got stdout={proc.stdout!r}"
     assert "Refusing to boot" in combined
     assert "UNEXPECTED_LIFESPAN_OK" not in proc.stdout
@@ -391,7 +467,7 @@ def test_probe_no_db_configured_boots_without_init_db():
     )
     proc = _run_probe_snippet(code, "")
     combined = proc.stdout + proc.stderr
-    if "ModuleNotFoundError" in combined or "ImportError" in combined:
-        pytest.skip(f"app.main not importable in probe subprocess: {combined[-500:]}")
+    if _probe_skipped_for_missing_fpdf(combined):
+        pytest.skip(f"fpdf missing in probe subprocess: {combined[-500:]}")
     assert proc.returncode == 0, f"no-DB boot must succeed, stderr={proc.stderr[-1000:]}"
     assert "NO_DB_BOOT_OK" in proc.stdout

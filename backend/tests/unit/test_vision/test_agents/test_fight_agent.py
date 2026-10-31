@@ -461,7 +461,15 @@ class TestFightDetector:
         
         assert detail is not None
         assert detail["type"] == "close_quarters"
-        assert detail["teams"] == ["team_001", "team_002"]
+        # Phase 35 W5: teams_involved is a SET and get_fight returns
+        # list(set), whose order varies with PYTHONHASHSEED — the test
+        # must not assert a set-iteration order. sorted() keeps the
+        # assertion exactly as strong (same members, no duplicates)
+        # while removing the false order dependence. Deterministic
+        # ordering in get_fight itself is a production-code follow-up
+        # (sorted() at the list(set) sites); this test no longer
+        # depends on it either way.
+        assert sorted(detail["teams"]) == ["team_001", "team_002"]
         assert detail["total_damage"] == 300
     
     def test_get_team_fights(self, detector):

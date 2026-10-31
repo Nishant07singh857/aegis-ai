@@ -56,7 +56,10 @@ def test_lifespan_monitor_live_and_auto_enrolls(monkeypatch):
 
     try:
         import app.main as main_module
-    except Exception as exc:  # e.g. fpdf missing in this environment
+    except ImportError as exc:  # e.g. fpdf missing in this environment
+        # NARROWED (Phase 35 W5): only a missing-module failure skips.
+        # Any other import failure (configuration, RuntimeError, ...)
+        # must FAIL loudly, never be reported as a skip.
         pytest.skip(f"app.main not importable here: {exc}")
 
     from fastapi.testclient import TestClient

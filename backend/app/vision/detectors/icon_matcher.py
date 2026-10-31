@@ -58,6 +58,7 @@ no-match results (weapon stays None — never a guess).
 from __future__ import annotations
 
 import json
+import math
 import os
 import threading
 from dataclasses import dataclass, field
@@ -105,6 +106,34 @@ def _is_unknown(family: str) -> bool:
 #: the ~48% labels this gate exists to stop.
 MARGIN_THRESHOLD = 0.15
 
+#: Ceiling of the clamp in :func:`clamp_margin_threshold`: a caller may
+#: demand a STRICTER gate than the measured floor, but never a looser
+#: one, and never a threshold above 1.0 (the NCC margin range).
+MARGIN_CEILING = 1.0
+
+
+def clamp_margin_threshold(value: float) -> float:
+    """Clamp a caller/config margin threshold to ``[0.15, 1.0]``.
+
+    The single choke point for the Phase 32 margin gate (Phase 35
+    M-1): no construction path, config value, or direct
+    ``gated_weapon`` call can loosen the gate below the measured
+    0.15 floor. Values below the floor clamp UP to it; values above
+    1.0 clamp DOWN to it (a stricter-than-1.0 gate could never pass,
+    which would silently disable weapon labels). Non-numeric values
+    and NaN fail closed to the floor; +inf clamps to the ceiling and
+    -inf to the floor. The return is always a finite float in range.
+    """
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return MARGIN_THRESHOLD
+    if math.isnan(v):
+        return MARGIN_THRESHOLD
+    if math.isinf(v):
+        return MARGIN_CEILING if v > 0 else MARGIN_THRESHOLD
+    return min(MARGIN_CEILING, max(MARGIN_THRESHOLD, v))
+
 
 def gated_weapon(
     family: Optional[str],
@@ -118,16 +147,28 @@ def gated_weapon(
 
     Returns the class-level weapon iff the family is identified, the
     score clears ``threshold``, AND ``score - second_score`` clears
-    ``margin_threshold`` (boundary inclusive: margin == threshold
-    is confident). Anything else -> None (UNKNOWN/abstain). Pure so
+    the effective margin threshold. The effective threshold is
+    ``margin_threshold`` clamped to ``[0.15, 1.0]`` by
+    :func:`clamp_margin_threshold` — a caller passing ``-1.0`` (or
+    any value below the measured floor) gets the 0.15 floor, never a
+    loosened gate. Anything else -> None (UNKNOWN/abstain). Pure so
     the gate is unit-testable without cv2 or the template library;
     :meth:`IconMatcher.match_candidates` applies exactly this.
+
+    Boundary honesty (float arithmetic, L-5): the comparison is
+    exact on the COMPUTED float difference ``score - second_score``,
+    not on the decimal values written in source. ``0.80 - 0.65``
+    computes to ``0.15000000000000002`` and is confident, while
+    ``0.70 - 0.55`` computes to ``0.1499999999999999`` and abstains
+    (fail-closed). "Boundary inclusive" therefore holds for the
+    float difference, not for every decimal pair that reads as
+    0.15 — no wrong label is ever emitted either way.
     """
     if family is None or family not in FAMILY_TO_CLASS:
         return None
     if float(score) < float(threshold):
         return None
-    if float(score) - float(second_score) < float(margin_threshold):
+    if float(score) - float(second_score) < clamp_margin_threshold(margin_threshold):
         return None
     return FAMILY_TO_CLASS[family]
 
@@ -188,6 +229,20 @@ class IconMatcher:
         production capture resolution differs from 360p).
     """
 
+    # -- margin gate knob (Phase 35 M-1 clamp) -------------------------
+    # Stored clamped to [0.15, 1.0] on EVERY assignment — construction
+    # and later mutation alike — so ``match_candidates``' abstention
+    # flag and ``gated_weapon`` can never disagree about the gate.
+    # Reading before any assignment (e.g. an ``__new__`` stub) falls
+    # back to the floor rather than raising: fail-closed.
+    @property
+    def margin_threshold(self) -> float:
+        return float(getattr(self, "_margin_threshold", MARGIN_THRESHOLD))
+
+    @margin_threshold.setter
+    def margin_threshold(self, value: float) -> None:
+        self._margin_threshold = clamp_margin_threshold(value)
+
     def __init__(
         self,
         icons_dir: Optional[str] = None,
@@ -203,9 +258,11 @@ class IconMatcher:
         self.preprocess = mode if mode in ("bin", "clahe", "histeq", "none") else "none"
         self.threshold = float(threshold)
         self.marker_threshold = float(marker_threshold)
-        #: Phase 32 strict margin gate (default ON at 0.15). Appended
-        #: last so existing positional construction is unaffected.
-        self.margin_threshold = float(margin_threshold)
+        #: Phase 32 strict margin gate (default ON at 0.15), clamped
+        #: to [0.15, 1.0] by the property setter (Phase 35 M-1).
+        #: Appended last so existing positional construction is
+        #: unaffected.
+        self.margin_threshold = margin_threshold
         self.upscale = max(1, int(upscale))
         self.scales = tuple(float(s) for s in scales) or (1.0,)
         self._templates: Dict[str, list] = {}   # family -> [prepared arrays]
@@ -399,7 +456,10 @@ class IconMatcher:
         IconMatch whose ``weapon`` is set ONLY when the best family is
         an identified weapon family AND its score clears ``threshold``
         AND it beats the best other family by at least
-        ``margin_threshold`` (default 0.15, boundary inclusive). A
+        ``margin_threshold`` (default 0.15, clamped to [0.15, 1.0];
+        the comparison is exact on the computed float difference, so
+        a decimal pair reading as 0.15 may still abstain — see
+        ``gated_weapon``). A
         margin failure yields ``weapon=None`` with
         ``weapon_abstained=True`` (identified + above threshold, but
         abstained — distinct from a low-score or ``unknown_*`` null).
@@ -671,6 +731,8 @@ __all__ = [
     "FAMILY_TO_CLASS",
     "MARKER_FAMILIES",
     "MARGIN_THRESHOLD",
+    "MARGIN_CEILING",
+    "clamp_margin_threshold",
     "gated_weapon",
     "IconMatch",
     "IconMatcher",

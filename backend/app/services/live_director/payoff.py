@@ -2,10 +2,18 @@
 """Phase 31B — Payoff pack: elimination banner + winner preference.
 
 PURE LOGIC, no bus, no I/O, no clock reads: every timestamp arrives
-as an input, so every decision is reproducible in a unit test. This
-module is deliberately NOT wired into service.py — the coordinator
-owns that hook (see HOOK NOTE below); this module only supplies the
-builders the hook calls, so the wiring is one small, reviewable diff.
+as an input, so every decision is reproducible in a unit test. Most
+of this module IS wired into service.py — the elimination banner is
+built in ``_on_team_wipe``, ``apply_winner_preference`` runs in
+``_evaluate``, the clutch-incumbent lock lives in ``_evaluate``'s
+margin rules, and ``_prune`` constructs ``WinnerPreference``
+directly (see HOOK STATUS below). The two exceptions are
+:func:`resolve_winner` / :func:`build_winner_preference`: tested
+pure builders with ZERO production callers. They are kept, not
+deleted, because they are the correct exact-alive-count path for a
+future per-team alive-count provider — but they must never be
+called with counts synthesised from wipe observations (see HOOK
+STATUS step 2).
 
 What was missing (DIRECTOR_SPEC_V2_AUDIT §1 item 5)
 ---------------------------------------------------
@@ -49,123 +57,79 @@ The two fight-over clocks — reconciled honestly
   the director only knows a fight resolved when ``_prune`` drops it.
   Building a winner preference at detector-resolve time would hand
   the director a preference for a fight it still treats as live —
-  and there is no bus message to deliver it on anyway. So
-  ``build_winner_preference`` is called from ``_prune`` (HOOK NOTE),
-  with the alive counts known AT THAT MOMENT. If alive counts are
-  unknown at prune time, the preference is None — an ambiguous
-  winner is never guessed. Do NOT invent a ``fight_ended`` producer
-  to close the gap; that producer does not exist, and this module
-  does not fake one.
+  and there is no bus message to deliver it on anyway. At prune
+  time ``_prune`` builds ``WinnerPreference`` DIRECTLY from
+  wipe-inference (sole fight team not observed wiped, with at
+  least one other fight team observed wiped) — see HOOK STATUS.
+  :func:`build_winner_preference` is NOT called from ``_prune``:
+  it needs exact per-team alive counts and no provider supplies
+  them at prune time (the director holds only an aggregate
+  teams-alive count). If alive counts are unknown at prune time,
+  the exact-count builder returns None — an ambiguous winner is
+  never guessed, and wipe observations must never be converted
+  into synthetic alive counts to feed it. Do NOT invent a
+  ``fight_ended`` producer to close the gap; that producer does
+  not exist, and this module does not fake one.
 
-HOOK NOTE — for the coordinator (service.py is NOT edited here)
+HOOK STATUS — what landed, what did not (Phase 35; this status
+supersedes the original Phase 31B hook instructions)
 ---------------------------------------------------------------
-1. CLUTCH-INCUMBENT LOCK — in ``LiveDirector._evaluate``
-   (service.py, margin-rules section, AFTER the final-zone /
-   cooldown block_rule chain and BEFORE the ``if in_hold_window``
-   margin branch):
-   ::
+1. CLUTCH-INCUMBENT LOCK — LANDED in ``LiveDirector._evaluate``
+   (service.py margin rules): while the incumbent fight is clutch,
+   challengers need the normal hold margin (40), under rule
+   ``margin_clutch_incumbent_lock_40``. The challenger-side clutch
+   margin (5) is unchanged.
 
-       incumbent_fight = (
-           self._fights.get(self._current_fight_id)
-           if self._current_fight_id else None
-       )
-       incumbent_is_clutch = bool(
-           incumbent_fight and incumbent_fight.get("is_clutch")
-       )
-       if (
-           self._eval_config.clutch_incumbent_lock_enabled
-           and incumbent_is_clutch
-           and not challenger_same_fight
-       ):
-           margin_required = self._margin(
-               "margin_fight_hold", MARGIN_FIGHT_HOLD, learned
-           )
-           rule = "margin_clutch_incumbent_lock_40"
+2. PAYOFF ON RESOLVE — DID NOT LAND AS WRITTEN. ``_prune`` does
+   NOT call :func:`build_winner_preference`, and the
+   ``_team_alive_at_resolve`` provider proposed in the original
+   hook note was never built: no code supplies exact per-team
+   alive counts at prune time (the director holds only an
+   aggregate teams-alive count). Instead ``_prune`` constructs
+   ``WinnerPreference`` DIRECTLY from wipe inference: the sole
+   fight team NOT observed wiped, when at least one other fight
+   team WAS observed wiped (``team_wipe_event``). That is
+   elimination inference, not an exact alive count, and it is
+   labelled as such in ``_prune``.
+   Wiring ``_prune`` through :func:`build_winner_preference` was
+   considered and REJECTED in Phase 35 (backlog M-7): it would
+   require converting wipe observations into synthetic alive
+   counts (wiped = 0, not-observed-wiped = 1), which fabricates
+   exact counts that were never measured — "not observed wiped"
+   is not "exactly 1 alive" — and it would change behaviour
+   (a single-team fight with no wipe observed would gain a
+   preference the wipe-inference path correctly withholds).
+   :func:`resolve_winner` / :func:`build_winner_preference`
+   therefore remain TESTED-BUT-UNWIRED pure builders (unit-tested
+   in ``test_phase31_b_clutch_payoff.py``; zero production
+   callers). Do NOT call them from production code until a real
+   per-team alive-count source exists; if one ever lands, it is
+   the builder to call with those counts, and the wipe-inference
+   construction in ``_prune`` must then be re-examined rather
+   than silently kept alongside it.
 
-   Inserted as the FIRST margin branch (before ``in_hold_window``):
-   while the incumbent is clutch, challengers need the normal hold
-   margin (40), never the clutch-challenger margin (5). The
-   ``elif best["is_clutch"]`` branch below it is UNCHANGED — margin 5
-   stays challenger-side only. Rule name for the decision log:
-   ``margin_clutch_incumbent_lock_40``. Note the director's existing
-   OR on ``is_clutch`` (``_on_fight_detected``): a promotion-time
-   clutch flag sticks on the director side even if the detector
-   later clears it on revive — that stickiness is pre-existing
-   director behaviour, not something this module changes.
+3. PREFERENCE AS TIE-BREAK ONLY — LANDED in ``_evaluate``:
+   ``apply_winner_preference`` reorders ONLY exact first-place
+   score ties; it never changes a score, never manufactures a
+   switch, and never bypasses the margin/hold gates. The
+   preference is one-shot: consumed (and cleared) after the
+   first evaluation that runs with it set.
 
-2. PAYOFF ON RESOLVE — in ``LiveDirector._prune`` (service.py),
-   inside the ``if now - fight["last_activity_at"] >
-   FIGHT_RESOLVE_IDLE_S`` branch, BEFORE ``del self._fights[fight_id]``
-   (so the fight's teams are still readable):
-   ::
-
-       from .payoff import build_elimination_banner  # (top import)
-       from .payoff import build_winner_preference
-       preference = build_winner_preference(
-           resolved_fight={
-               "fight_id": fight_id,
-               "teams_involved": list(fight["teams"]),
-           },
-           teams_alive=self._team_alive_at_resolve(fight["teams"]),
-           now=now,
-           ttl_s=self._eval_config.payoff_preference_ttl_s,
-       )
-       if preference is not None:
-           self._payoff_preference = preference  # new instance attr
-
-   ``_team_alive_at_resolve`` does not exist yet — the coordinator
-   adds it as a tiny provider: per-team ALIVE-only counts at prune
-   time (from the same source as ``_teams_alive``/alive-count
-   updates), or None per team when unknown. If the provider cannot
-   supply exact counts, ``build_winner_preference`` returns None —
-   that is the honest outcome, not a gap to paper over. The
-   preference is then consumed in ``_evaluate``'s challenger sort
-   (see step 3) and marked consumed after the first evaluation that
-   runs with it set, whether or not it changed the outcome
-   (one-shot: ``self._payoff_preference.mark_consumed()`` in a
-   finally-style position at the end of ``_evaluate``'s challenger
-   handling, guarded by ``is not None``).
-
-3. PREFERENCE AS TIE-BREAK ONLY — in ``_evaluate``, where
-   challengers are sorted (``challengers.sort(key=lambda e:
-   (-e["score"], e["team_id"]))``), replace the sort with:
-   ::
-
-       from .payoff import apply_winner_preference
-       preference = getattr(self, "_payoff_preference", None)
-       challengers, _applied = apply_winner_preference(
-           challengers, preference, now
-       )
-
-   ``apply_winner_preference`` reorders ONLY exact score ties for
-   first place; it never changes a score, never manufactures a
-   switch, and never bypasses the margin/hold gates that run after
-   the sort. A preferred team that is behind on score stays behind.
-
-4. ELIMINATION BANNER — the ``team.eliminated`` consumer that owns
-   the lower-third write (DirectorService lower-third state via
-   ``system_publish`` / the manual lower-third path — NOT this
-   module, which has no bus access) calls:
-   ::
-
-       banner = build_elimination_banner(event_data)
-       if banner is not None:
-           publish_lower_third(**banner.to_lower_third_payload())
-           # and select template id "lowerthird-eliminated" for the
-           # overlay (registry id; see the frontend template)
-
-   ``event_data`` is the raw ``team.eliminated`` payload (canonical
-   aliases resolve to the ``team_wipe_event`` shape). The banner
+4. ELIMINATION BANNER — LANDED IN PART: ``_on_team_wipe`` builds
+   the banner via :func:`build_elimination_banner`; in semi_auto
+   it becomes a lower-third suggestion for operator approval, and
+   in every other mode it is logged only (DirectorService
+   lower-third writes are manual-gated by design). The banner
    title is always ``"ELIMINATED"``; the subtitle is
-   ``"<TAG> ELIMINATED"`` plus ``" • #<placement>"`` ONLY when the
-   event carried a placement. There is currently NO automatic
-   team.eliminated -> lower-third path in the frontend (the overlay
-   page renders commentary lines, the director page renders manual
-   lower-third state) — step 4 is the wiring that creates it, and
-   until it lands the template is selectable via
-   ``?template=lowerthird-eliminated`` on /overlays/lower-third and
-   via the graphics template picker. The template alone does not
-   auto-appear on elimination; claiming otherwise would be false.
+   ``"<TAG> ELIMINATED"`` plus ``" • #<placement>"`` ONLY when
+   the event carried a placement. There is currently NO automatic
+   team.eliminated -> lower-third path in the frontend (the
+   overlay page renders commentary lines, the director page
+   renders manual lower-third state) — until one lands, the
+   template is selectable via ``?template=lowerthird-eliminated``
+   on /overlays/lower-third and via the graphics template
+   picker. The template alone does not auto-appear on
+   elimination; claiming otherwise would be false.
 """
 
 from __future__ import annotations
@@ -357,6 +321,12 @@ def resolve_winner(
 ) -> Optional[str]:
     """Sole-survivor winner from exact alive counts, or None.
 
+    STATUS (Phase 35, backlog M-7): tested-but-unwired pure
+    builder — zero production callers. It must only ever be fed
+    exact per-team alive counts that were actually measured; wipe
+    observations must never be converted into synthetic counts
+    for it (see module HOOK STATUS step 2).
+
     Candidates are the fight's teams when given, else every key in
     ``teams_alive``. The winner is the ONE team with alive > 0 while
     every other candidate is exactly 0. ANY unknown candidate (None /
@@ -427,6 +397,13 @@ def build_winner_preference(
     ttl_s: float = DEFAULT_PAYOFF_PREFERENCE_TTL_S,
 ) -> Optional[WinnerPreference]:
     """Build the winner preference for a director-resolved fight.
+
+    STATUS (Phase 35, backlog M-7): tested-but-unwired — zero
+    production callers; ``_prune`` builds ``WinnerPreference``
+    directly from wipe inference instead (see module HOOK STATUS
+    step 2). Call only with exact per-team alive counts that were
+    actually measured, never with counts synthesised from wipe
+    observations.
 
     ``resolved_fight`` carries ``fight_id`` and ``teams_involved``
     (or ``teams``). Returns None when the fight id is missing or
