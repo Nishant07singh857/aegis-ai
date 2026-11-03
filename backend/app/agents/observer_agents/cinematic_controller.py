@@ -22,17 +22,42 @@ logger = structlog.get_logger("aegis.agents.cinematic")
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 class TransitionType(str, Enum):
-    """Camera transition types"""
+    """Camera transition types (Bible-legal only).
+
+    Visual Broadcast Bible §3.2: every camera change is a HARD CUT.
+    FADE, CROSSFADE and SWIPE existed here before (Phase 36, L-3)
+    and were REMOVED: fades and swipes are banned, so they are no
+    longer enum members, have no entries in ``transition_rules``,
+    and no preset may name them. Do not re-add them;
+    :func:`CinematicController.apply_transition` and
+    :meth:`CinematicController.apply_preset` also reject their
+    names/values explicitly (``BannedTransitionError``) in case a
+    banned transition is constructed elsewhere (e.g. a raw string
+    from a config file). The remaining members are cut-family /
+    movement transitions, never fades.
+    """
     CUT = "cut"               # Instant cut
-    FADE = "fade"            # Fade to black
-    CROSSFADE = "crossfade"  # Smooth blend
-    SWIPE = "swipe"          # Directional swipe
     ZOOM_IN = "zoom_in"      # Zoom into target
     ZOOM_OUT = "zoom_out"    # Zoom out from target
     PAN = "pan"              # Pan across
     WHIP_PAN = "whip_pan"    # Fast pan
     DUTCH_ANGLE = "dutch_angle"  # Tilted angle
     SMOOTH = "smooth"        # Smooth interpolation
+
+
+#: Names and type-values banned by the Visual Broadcast Bible.
+#: (Mirrors ``app.broadcast.transition_controller``'s ban — the two
+#: controllers must never disagree about what may go on air.)
+BANNED_TRANSITION_NAMES = frozenset({
+    "fade", "crossfade", "cross fade", "swipe",
+})
+BANNED_TRANSITION_VALUES = frozenset({
+    "fade", "crossfade", "swipe",
+})
+
+
+class BannedTransitionError(ValueError):
+    """Raised when a Bible-banned transition (fade/swipe) is requested."""
 
 class CameraMovement(str, Enum):
     """Camera movement patterns"""
@@ -123,12 +148,10 @@ class CinematicController(BaseAgent):
         self.active_sequences: Dict[str, CinematicSequence] = {}
         self.sequence_history: deque = deque(maxlen=20)
         
-        # Transition rules
+        # Transition rules (Bible-legal only: no fade/swipe entries —
+        # FADE/CROSSFADE/SWIPE were removed in Phase 36, L-3).
         self.transition_rules = {
             TransitionType.CUT: {"duration": 0.0, "smooth": False},
-            TransitionType.FADE: {"duration": 0.5, "smooth": True},
-            TransitionType.CROSSFADE: {"duration": 0.75, "smooth": True},
-            TransitionType.SWIPE: {"duration": 0.5, "smooth": False},
             TransitionType.ZOOM_IN: {"duration": 1.0, "smooth": True},
             TransitionType.ZOOM_OUT: {"duration": 1.0, "smooth": True},
             TransitionType.PAN: {"duration": 0.75, "smooth": True},
@@ -156,12 +179,16 @@ class CinematicController(BaseAgent):
                 "effects": [CinematicEffect.VIGNETTE],
             },
             "replay": {
-                "transition": TransitionType.FADE,
+                # Was FADE before Phase 36 (L-3): a replay is still a
+                # hard cut on air — Bible §3.2 bans fades outright.
+                "transition": TransitionType.CUT,
                 "movement": CameraMovement.STATIC,
                 "effects": [CinematicEffect.SLOW_MOTION],
             },
             "cinematic": {
-                "transition": TransitionType.CROSSFADE,
+                # Was CROSSFADE before Phase 36 (L-3): a crossfade is
+                # a fade, and fades are banned — hard cut instead.
+                "transition": TransitionType.CUT,
                 "movement": CameraMovement.ORBIT,
                 "fov": 85,
                 "effects": [CinematicEffect.COLOR_GRADE],
@@ -202,13 +229,41 @@ class CinematicController(BaseAgent):
         broadcast is a HARD CUT (1 frame). Zero fades, zero wipes were
         observed — so the director always cuts, regardless of situation
         (clutch, fight change, final circle). The TransitionType enum
-        keeps the other members for camera *movement* presets, which are
-        not scene transitions; none of them may be used on a cut.
+        holds only Bible-legal transitions since Phase 36 (L-3):
+        FADE/CROSSFADE/SWIPE were removed as members and are rejected
+        by :meth:`apply_transition` / :meth:`apply_preset`.
         """
         return TransitionType.CUT
-    
+
+    @staticmethod
+    def _reject_banned_transition(transition: Any) -> None:
+        """Raise BannedTransitionError for a fade/swipe value.
+
+        Accepts a TransitionType member or a raw string (a config or
+        caller may pass ``"fade"`` even though the enum no longer has
+        the member). Anything else passes through untouched.
+        """
+        value = getattr(transition, "value", transition)
+        if isinstance(value, str) and value.strip().lower() in BANNED_TRANSITION_VALUES:
+            raise BannedTransitionError(
+                f"Transition {transition!r} is banned by the Visual "
+                "Broadcast Bible (no fades, no swipes — hard cuts only)."
+            )
+        if isinstance(transition, str) and transition.strip().lower() in BANNED_TRANSITION_NAMES:
+            raise BannedTransitionError(
+                f"Transition {transition!r} is banned by the Visual "
+                "Broadcast Bible (no fades, no swipes — hard cuts only)."
+            )
+
     async def apply_transition(self, transition: TransitionType) -> None:
-        """Apply a camera transition"""
+        """Apply a camera transition.
+
+        Raises:
+            BannedTransitionError: if ``transition`` is a Bible-banned
+                fade/swipe. A banned transition is a clear error, never
+                a silent activation.
+        """
+        self._reject_banned_transition(transition)
         rules = self.transition_rules.get(transition, {"duration": 0.5})
         
         # Save previous camera state
@@ -308,14 +363,22 @@ class CinematicController(BaseAgent):
             self.camera.rotation_yaw = math.degrees(math.atan2(dy, dx))
     
     def apply_preset(self, preset_name: str) -> None:
-        """Apply a cinematic preset"""
+        """Apply a cinematic preset.
+
+        Raises:
+            BannedTransitionError: if the preset names a Bible-banned
+                fade/swipe transition (defensive: all shipped presets
+                are clean since Phase 36, L-3 — this guards a future
+                preset edit from silently re-introducing one).
+        """
         preset = self.presets.get(preset_name)
         if not preset:
             self._log.warning(f"Preset not found: {preset_name}")
             return
-        
+
         # Apply transition
         if "transition" in preset:
+            self._reject_banned_transition(preset["transition"])
             self.camera.transition_duration = self.transition_rules.get(
                 preset["transition"], {"duration": 0.5}
             )["duration"]

@@ -1045,6 +1045,52 @@ class DirectorService:
         await self._broadcast({"type": WS_SUGGESTION_TYPE, "data": outgoing})
         return outgoing
 
+    async def retract_suggestions(
+        self, *, created_by: str, reason: str
+    ) -> List[Dict[str, Any]]:
+        """Retract every still-pending suggestion from one creator.
+
+        Phase 36 (L-2): a queued suggestion used to stay alive until
+        the 60 s TTL prune even after the world that justified it
+        ended (a fight starting while a lull-loop suggestion sat
+        queued). The caller that owns the trigger — LiveDirector's
+        lull abort — retracts its own creator's queue entries here
+        instead. Matching is by exact ``created_by`` so one source's
+        retraction can never sweep another source's suggestions
+        (zone-beat ``"live_director"`` vs lull ``"live_director:lull_loop"``).
+
+        Retracted entries are marked ``"retracted"`` (with
+        ``decided_at`` + ``retracted_reason``) and broadcast on the
+        suggestion WS channel exactly like a rejection, so consoles
+        drop them from the queue; they stay in the capped history for
+        audit. Deliberately NOT a learning fate: the fate vocabulary
+        (``SUGGESTION_FATES``) has no "retracted", and a system
+        supersede is not a human decision — the caller logs the
+        retraction in the decision log. Returns the retracted
+        suggestions (deep copies), oldest first; empty when nothing
+        was pending for that creator.
+        """
+        reason = (reason or "").strip() or "superseded"
+        async with self._lock:
+            self._prune_expired()
+            retracted: List[Dict[str, Any]] = []
+            for suggestion in self._suggestions.values():
+                if (
+                    suggestion["status"] == "pending"
+                    and suggestion.get("created_by") == created_by
+                ):
+                    suggestion["status"] = "retracted"
+                    suggestion["decided_at"] = _utcnow_iso()
+                    suggestion["decided_by"] = None
+                    suggestion["retracted_reason"] = reason
+                    retracted.append(copy.deepcopy(suggestion))
+            retracted.sort(key=lambda s: s["created_at"])
+        for outgoing in retracted:
+            await self._broadcast(
+                {"type": WS_SUGGESTION_TYPE, "data": outgoing}
+            )
+        return retracted
+
     # ── phase-aware suggestions (Phase 24, W3) ─────────────────
     # Pre-existing director suggestion sources: the match simulator's
     # fight path in app/main.py (kill/knock -> killfeed_focus) — that

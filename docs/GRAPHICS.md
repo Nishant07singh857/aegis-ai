@@ -7,7 +7,7 @@ Operators pick the active template per graphic type in the
 the choice is stored in the director state (`graphics` block) and
 broadcast to every surface over WS `director.state`.
 
-## The 15 templates
+## The 16 templates (Phase 36 recount, 2026-11-01)
 
 | Type        | ID                 | Name               | Default |
 |-------------|--------------------|--------------------|---------|
@@ -17,6 +17,7 @@ broadcast to every surface over WS `director.state`.
 | lower-third | `lowerthird-slide` | Lower-third — Slide| ✓       |
 | lower-third | `lowerthird-rise`  | Lower-third — Rise |         |
 | lower-third | `lowerthird-banner`| Lower-third — Banner|        |
+| lower-third | `lowerthird-eliminated`| Lower-third — Eliminated |  |
 | standings   | `standings-table`  | Standings — Table  | ✓       |
 | standings   | `standings-cards`  | Standings — Cards  |         |
 | standings   | `standings-mvp`    | Standings — MVP Board |      |

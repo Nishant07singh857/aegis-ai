@@ -29,12 +29,9 @@ secrets: all key/password values below are test fixtures only.
 
 from __future__ import annotations
 
-import sys
-import types
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
-from enum import Enum
 
 import pytest
 from fastapi import FastAPI, WebSocket
@@ -44,44 +41,38 @@ from sqlalchemy import JSON, select
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-# --- fpdf stub (same pattern as the Phase 32 tests) ----------------------
+# --- fpdf stub: REUSED from the Phase 33 DB-boot suite (N-2 pattern) ----
 # app.main pulls in the dossiers router, which imports fpdf2. fpdf2 is
 # not installed in this environment and PDF generation is not exercised
-# here, so a minimal stub is installed before importing app.main. This
-# stubs an optional dependency, not product behaviour.
-_fpdf_stub = types.ModuleType("fpdf")
-_fpdf_stub.__path__ = []
+# here, so app.main is imported under the teardown-guarded stub
+# context from the Phase 33 DB-boot suite: on exit sys.modules is
+# restored exactly and stub-bound app.main / app.dossiers.* modules
+# are evicted, so this file installs NO import-time stub of its own
+# (the old sys.modules.setdefault stub was the import-time leak
+# behind the dossier-PDF order-dependence). The import happens ONCE
+# at module level because the whole file exercises app.main; the
+# skip is ImportError-only — any other import failure propagates
+# and fails loudly.
+from test_phase33_db_boot_fail_fast import _fpdf_stub_if_absent  # noqa: E402
 
 
-class _FPDF:
-    def __init__(self, *args, **kwargs):
-        pass
+def _load_main_module():
+    """Import app.main under the teardown-guarded fpdf stub.
+
+    Skip ONLY on a missing-module import failure. Every other import
+    failure propagates and FAILS loudly: a real setup/configuration
+    error must never be reported as a skip.
+    """
+    with _fpdf_stub_if_absent():
+        try:
+            import app.main as main_module
+        except ImportError as exc:
+            pytest.skip(f"app.main not importable here (missing dependency): {exc}")
+        return main_module
 
 
-class _MethodReturnValue(Enum):
-    NONE = 0
+main_module = _load_main_module()
 
-
-class _XPos(Enum):
-    LEFT = 0
-    RIGHT = 1
-    LMARGIN = 2
-
-
-class _YPos(Enum):
-    TOP = 0
-    NEXT = 1
-
-
-_fpdf_stub.FPDF = _FPDF
-_enums_stub = types.ModuleType("fpdf.enums")
-_enums_stub.MethodReturnValue = _MethodReturnValue
-_enums_stub.XPos = _XPos
-_enums_stub.YPos = _YPos
-sys.modules.setdefault("fpdf", _fpdf_stub)
-sys.modules.setdefault("fpdf.enums", _enums_stub)
-
-import app.main as main_module  # noqa: E402
 from app.api import deps as deps_module  # noqa: E402
 from app.api.deps import (  # noqa: E402
     authenticate_checked,

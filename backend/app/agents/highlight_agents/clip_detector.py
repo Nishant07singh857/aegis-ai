@@ -359,15 +359,22 @@ class ClipDetector(BaseAgent):
         """
 
         player_name = data.get("player_name", "Unknown")
-        kill_count = data.get("kill_count")
-        time_span = data.get("time_span")
+        # Phase 36 (R-8): same fail-closed evidence pattern as the
+        # other creators — a string kill_count ("3") parses, junk /
+        # None / a non-integer never raises the old TypeError on the
+        # ``kill_count < 3`` / ``time_span < 5`` comparisons (the
+        # raise used to be swallowed by handle_event's bare except,
+        # silently dropping the clip). Behaviour for real numbers is
+        # unchanged: missing/insufficient still skips + logs.
+        kill_count = self._evidence_positive_count(data, "kill_count", minimum=1)
+        time_span = self._evidence_positive_number(data, ("time_span",))
 
         if kill_count is None or time_span is None:
             self._log.warning(
                 "multi_kill event skipped: missing kill_count/time_span "
                 "(no defaults are invented)",
-                kill_count=kill_count,
-                time_span=time_span,
+                kill_count=data.get("kill_count"),
+                time_span=data.get("time_span"),
             )
             return None
         if kill_count < 3:
@@ -476,6 +483,35 @@ class ClipDetector(BaseAgent):
     # nesting depth.
     _WEAPON_UNWRAP_KEYS = ("name", "label", "weapon", "weapon_class")
 
+    # Evidenced weapon vocabulary (Phase 36, R-3). A weapon value
+    # renders ONLY when its normalised form (stripped, lowercased) is
+    # in this set:
+    #   * the class-level ids the Phase 23 icon matcher can emit
+    #     (FAMILY_TO_CLASS values in vision/detectors/icon_matcher.py:
+    #     "ar", "smg", "sniper", "dmr", "pistol", and the grenade
+    #     class, whose DISPLAY spelling is "Frag Grenade" — the
+    #     underscore spelling "frag_grenade" is the family-id spelling
+    #     and is NOT in this set), and
+    #   * the spellings the replay highlight triggers already accept
+    #     as truthful sniper/grenade evidence (SNIPER_CLASSES /
+    #     GRENADE_WEAPONS in services/replay/highlight_triggers.py).
+    # Every raw family id ("ar_a", "ar_b", "smg_compact",
+    # "sniper_bolt", "dmr_long", "frag_grenade", "pistol_t") is
+    # therefore rejected, as is any other unlisted string (a future
+    # gun model, a foreign detector's label): it renders gun-less,
+    # the safe direction. The set is deliberately closed — a new
+    # producer vocabulary belongs here explicitly, never implicitly.
+    _EVIDENCED_WEAPON_VALUES = frozenset({
+        # Icon-matcher class ids.
+        "ar", "smg", "sniper", "dmr", "frag grenade", "pistol",
+        # Replay-trigger sniper spellings (specific models accepted
+        # as sniper evidence there; AWM/Kar98K/M24 pinned as
+        # evidenced by the Phase 34 suite).
+        "sr", "kar98k", "m24", "awm", "mini14", "sks", "mk14",
+        # Grenade spellings accepted by the replay grenade trigger.
+        "grenade", "frag",
+    })
+
     @staticmethod
     def _evidence_weapon(data: Dict[str, Any]) -> Optional[str]:
         """Return the evidenced weapon display name, or None.
@@ -496,7 +532,12 @@ class ClipDetector(BaseAgent):
         abstention glyphs) and non-strings mean NO evidence — the
         caller gets gun-less rendering, never a default gun. The
         value is returned verbatim (stripped); nothing here maps a
-        class to a specific gun or vice versa.
+        class to a specific gun or vice versa. Finally, the value
+        must be in the evidenced vocabulary
+        (``_EVIDENCED_WEAPON_VALUES``, Phase 36 R-3): a raw family
+        id (``"ar_a"``, ``"frag_grenade"`` in its underscore
+        spelling, ...) or any other unlisted string is NO evidence,
+        even when it arrived as a plain top-level ``weapon`` string.
         """
         raw: Any = None
         for key in ("weapon", "weapon_name", "weapon_class"):
@@ -538,6 +579,12 @@ class ClipDetector(BaseAgent):
         value = raw.strip()
         lowered = value.lower()
         if lowered in ClipDetector._NO_WEAPON_TOKENS or lowered.startswith("unknown_"):
+            return None
+        # Phase 36 (R-3): allowlist of evidenced weapon spellings.
+        # A raw family id or any unlisted string is NO evidence, even
+        # as a plain top-level string — it renders gun-less, never
+        # verbatim as a gun name.
+        if lowered not in ClipDetector._EVIDENCED_WEAPON_VALUES:
             return None
         return value
 
@@ -787,15 +834,26 @@ class ClipDetector(BaseAgent):
         data: Dict[str, Any],
         context: Dict[str, Any],
     ) -> HighlightClip:
-        """Create final circle highlight"""
-        
+        """Create final circle highlight — evidence-gated (Phase 36, R-2).
+
+        ``teams_alive`` comes ONLY from evidence passed into
+        ``data``; there is no default anymore (the old
+        ``teams_alive=2`` inflated excitement to 90/LEGENDARY with
+        no number in the text). The count must be a positive int
+        >= 1. The <= 2 bonus (+20) applies ONLY when the count is
+        evidenced — an unevidenced clip scores the base 70. Explicit
+        ``None`` and junk are no evidence, never a TypeError (the
+        old direct call raised, masked by ``handle_event``'s bare
+        except).
+        """
+
         winner = data.get("winner_team", "Unknown")
-        teams_alive = data.get("teams_alive", 2)
-        
+        teams_alive = self._evidence_positive_count(data, "teams_alive", minimum=1)
+
         excitement = 70
-        if teams_alive <= 2:
+        if teams_alive is not None and teams_alive <= 2:
             excitement += 20
-        
+
         return HighlightClip(
             clip_id=f"clip_final_{int(time.time())}",
             category=HighlightCategory.FINAL_CIRCLE,
@@ -819,14 +877,26 @@ class ClipDetector(BaseAgent):
         data: Dict[str, Any],
         context: Dict[str, Any],
     ) -> HighlightClip:
-        """Create funny moment highlight"""
-        
+        """Create funny moment highlight — no caller-supplied text (Phase 36, R-4).
+
+        The old code rendered ``data["title"]`` / ``data["description"]``
+        verbatim, so any caller could inject arbitrary text as a
+        broadcast fact. No producer of funny moments exists today
+        (not reachable via ``handle_event`` — title/description were
+        never forwarded there), and there is no allowlisted
+        vocabulary of funny-moment labels to gate caller text
+        against, so the clip renders fixed generic text. Caller
+        title/description are ignored entirely. If a real funny-moment
+        producer lands, it should pass a ``moment_type`` from an
+        allowlist, not free text.
+        """
+
         return HighlightClip(
             clip_id=f"clip_funny_{int(time.time())}",
             category=HighlightCategory.FUNNY_MOMENT,
             quality=ClipQuality.GOOD,
-            title=data.get("title", "Funny Moment! 😂"),
-            description=data.get("description", "You have to see this!"),
+            title="Funny Moment! 😂",
+            description="You have to see this!",
             start_timestamp_ms=data.get("timestamp_ms", 0) - 5000,
             end_timestamp_ms=data.get("timestamp_ms", 0) + 5000,
             duration_seconds=10,
@@ -842,18 +912,38 @@ class ClipDetector(BaseAgent):
         data: Dict[str, Any],
         context: Dict[str, Any],
     ) -> HighlightClip:
-        """Create comeback highlight"""
-        
+        """Create comeback highlight — evidence-gated (Phase 36, R-1).
+
+        ``from_position`` comes ONLY from evidence passed into
+        ``data``; there is no default anymore (the old
+        ``from_position=8`` invented a "rises from #8!"). The
+        position must be a positive int >= 2 — a comeback means
+        rising from a non-top position, so #1 is no evidence of one.
+        With no evidenced position the clip renders position-less
+        ("THE COMEBACK! {team}!") and the excitement score gets NO
+        position contribution (base 60). Explicit ``None`` and junk
+        are no evidence, never a TypeError.
+        """
+
         team_name = data.get("team_name", "Unknown")
-        from_position = data.get("from_position", 8)
-        
-        excitement = 60 + from_position * 3
-        
+        from_position = self._evidence_positive_count(data, "from_position", minimum=2)
+
+        excitement = 60
+        if from_position is not None:
+            excitement += from_position * 3
+
+        quality = self._determine_quality(excitement)
+
+        if from_position is not None:
+            title = f"THE COMEBACK! {team_name} rises from #{from_position}!"
+        else:
+            title = f"THE COMEBACK! {team_name}!"
+
         return HighlightClip(
             clip_id=f"clip_comeback_{int(time.time())}",
             category=HighlightCategory.COMEBACK,
-            quality=self._determine_quality(excitement),
-            title=f"THE COMEBACK! {team_name} rises from #{from_position}!",
+            quality=quality,
+            title=title,
             description=f"An incredible comeback story - {team_name} defies all odds!",
             start_timestamp_ms=data.get("start_time_ms", 0) - 10000,
             end_timestamp_ms=data.get("end_time_ms", 0) + 5000,
@@ -921,7 +1011,7 @@ class ClipDetector(BaseAgent):
             clip.description = (
                 f"{player} lands a frag-grenade "
                 f"{'knock' if is_knock else 'elimination'} on "
-                f"{event_data.get('victim') or 'Unknown'} (kill-feed icon verified)."
+                f"{event_data.get('victim') or 'Unknown'} (kill-feed icon match)."
             )
             self._process_clip(clip)
             return clip
@@ -941,7 +1031,7 @@ class ClipDetector(BaseAgent):
                     title=f"SNIPER TRIPLE! {player} — 3 sniper kills in {span:.0f}s!",
                     description=(
                         f"{player} lands 3 sniper-class eliminations within "
-                        f"{span:.1f}s (kill-feed icon verified per kill)."
+                        f"{span:.1f}s (kill-feed icon match per kill)."
                     ),
                     start_timestamp_ms=int((now - span) * 1000) - 4000,
                     end_timestamp_ms=int(now * 1000) + 3000,

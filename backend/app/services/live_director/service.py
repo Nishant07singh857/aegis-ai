@@ -1667,7 +1667,40 @@ class LiveDirector:
                     self.engagement.precombat_teams()),
                 top_team_id=_top_team, top_team_slot=_top_slot,
             )
-            if _lull["action"] == "suggest":
+            if _lull["action"] == "abort":
+                # Phase 36 (L-2): a fight/precombat signal supersedes
+                # any queued lull suggestion — retract it now instead
+                # of leaving it approvable until the 60s TTL prune.
+                # created_by is lull-scoped so zone-beat / phase
+                # suggestions are never swept by this retraction.
+                _retracted = await self._director.retract_suggestions(
+                    created_by="live_director:lull_loop",
+                    reason=(
+                        "fight/precombat started; lull suggestion "
+                        "superseded"
+                    ),
+                )
+                if _retracted:
+                    self._log_decision(
+                        {"timestamp": _utcnow_iso(), "trigger": trigger,
+                         "mode": mode, "phase": phase,
+                         "candidates": [], "incumbent": {},
+                         "challenger": {},
+                         "outcome": "lull_suggestion_retracted",
+                         "rule": "lull_loop_15_30s",
+                         "margin_required": None, "margin_actual": None,
+                         "reason": (
+                             "Lull loop aborted by "
+                             f"{_lull.get('reason')}; retracted "
+                             f"{len(_retracted)} queued lull "
+                             "suggestion(s)."
+                         ),
+                         "lull": _lull,
+                         "retracted_suggestion_ids": [
+                             s["id"] for s in _retracted
+                         ]}
+                    )
+            elif _lull["action"] == "suggest":
                 if not (_lull["leg"] == "top_team_pov"
                         and _lull.get("active_camera") is None):
                     await self._director.propose_suggestion(
@@ -1676,7 +1709,7 @@ class LiveDirector:
                                  "active_camera": _lull.get("active_camera"),
                                  "team_id": _lull.get("team_id")},
                         reason=_lull["reason"], confidence=0.6,
-                        created_by="live_director",
+                        created_by="live_director:lull_loop",
                     )
                     return self._log_decision(
                         {"timestamp": _utcnow_iso(), "trigger": trigger,

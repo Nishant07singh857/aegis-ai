@@ -32,6 +32,8 @@ from .team_intelligence import TeamIntelligence  # noqa: F401
 from .broadcast_session import BroadcastSession  # noqa: F401
 from .user import User  # noqa: F401
 from .api_key import ApiKey  # noqa: F401
+# Phase 36 (N-4): durable revoked-static-key records (digest-only).
+from .revoked_api_key import RevokedApiKey  # noqa: F401
 from .audit_log import AuditLog  # noqa: F401
 from .observer_slot import ObserverSlot  # noqa: F401
 from .event_store import EventStore  # noqa: F401

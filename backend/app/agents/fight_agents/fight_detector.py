@@ -1346,7 +1346,7 @@ class FightDetector(BaseAgent):
         summary = {
             "fight_id": fight.fight_id,
             "fight_type": fight.fight_type.value,
-            "teams_involved": list(fight.teams_involved),
+            "teams_involved": sorted(fight.teams_involved),
             "duration_seconds": round(duration, 1),
             "total_damage": fight.total_damage,
             "total_kills": fight.total_kills,
@@ -1423,7 +1423,7 @@ class FightDetector(BaseAgent):
                 "fight_id": f.fight_id,
                 "type": f.fight_type.value,
                 "phase": f.phase.value,
-                "teams": list(f.teams_involved),
+                "teams": sorted(f.teams_involved),
                 "duration": round(f.get_duration(), 1),
                 "intensity": round(f.current_intensity, 1),
                 "peak_intensity": round(f.peak_intensity, 1),
@@ -1448,7 +1448,7 @@ class FightDetector(BaseAgent):
             "fight_id": fight.fight_id,
             "type": fight.fight_type.value,
             "phase": fight.phase.value,
-            "teams": list(fight.teams_involved),
+            "teams": sorted(fight.teams_involved),
             "primary_attacker": fight.primary_attacker,
             "primary_defender": fight.primary_defender,
             "duration": round(fight.get_duration(), 1),
@@ -1484,7 +1484,7 @@ class FightDetector(BaseAgent):
         return [
             {
                 "fight_id": f.fight_id,
-                "opponents": list(f.teams_involved - {team_id}),
+                "opponents": sorted(f.teams_involved - {team_id}),
                 "intensity": round(f.current_intensity, 1),
                 "phase": f.phase.value,
                 "duration": round(f.get_duration(), 1),

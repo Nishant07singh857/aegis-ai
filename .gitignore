@@ -50,3 +50,8 @@ audio_out/
 # Local analysis junk: never commit (venv 462MB + 17GB datasets)
 analysis-env/
 data/
+
+# Phase 36 (L-7): coverage artifacts are local run output, never tracked
+# (backend/.coverage was tracked at 112 KB until 2026-11-01; untracked
+# with `git rm --cached` — the file itself stays on disk, ignored now).
+.coverage

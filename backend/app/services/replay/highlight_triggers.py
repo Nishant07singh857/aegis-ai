@@ -99,6 +99,18 @@ def _grenade_multi_kill(events: List[BufferedEvent]) -> List[Any]:
 
 
 def _sniper_triple(events: List[BufferedEvent]) -> List[Any]:
+    """Sniper-triple detector: 3 sniper/DMR-class kills, one player, 30 s.
+
+    Phase 36 (R-6): the reason must NOT claim "long-range". No
+    distance producer exists on this path — kill-feed payloads carry
+    weapon/killer/victim only, and no measured distance is attached
+    to a kill anywhere in the replay stack — so "3 long-range
+    eliminations" asserted a measurement nobody made. What IS
+    evidenced is the weapon class (sniper/DMR, margin-gated icon
+    match) on 3 kills; the reason says exactly that. If a measured
+    distance ever lands on this path, the reason may claim range
+    only for kills that carry it — never from the class alone.
+    """
     from .highlights import ScoredMoment
 
     kills = sorted(
@@ -117,7 +129,7 @@ def _sniper_triple(events: List[BufferedEvent]) -> List[Any]:
                     ScoredMoment(
                         kind="sniper_triple",
                         score=85,
-                        reason=f"Sniper triple by {killer} — 3 long-range eliminations in {window[-1].ts - window[0].ts:.1f}s",
+                        reason=f"Sniper triple by {killer} — 3 sniper-class eliminations in {window[-1].ts - window[0].ts:.1f}s",
                         player=killer,
                         team=window[0].payload.get("killerTeam"),
                         opponents=[k.payload.get("victim") or "Unknown" for k in window],

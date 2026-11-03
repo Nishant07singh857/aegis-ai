@@ -9,9 +9,14 @@ range and a forced mid-fight cut breaks grammar rule U9. The
 grammar-true adapted form, decided here:
 
   * NO promoted fight active AND NOT final circle -> a 15s ``map_cam``
-    beat (inside the Bible 15–30s range; the 30s cap is enforced by
-    :func:`clamp_map_beat_duration` and by DirectorService's
-    ``enforce_scene_holds``). The beat shows the winners/losers
+    beat (inside the Bible 15–30s range; the live 30s cap is
+    DirectorService's ``enforce_scene_holds`` — MAP_CAM_MAX_HOLD_SECONDS
+    = 30.0 — NOT :func:`clamp_map_beat_duration`, which has NO
+    production caller: the live duration is always the fixed 15.0
+    constant below, so there is no requested value to clamp. The
+    helper is a tested utility for a future caller, not a live gate;
+    see the 2026-11-01 correction addendum in
+    docs/PHASE31_FINAL_LEDGER.md §7, L-1).
     graphic alongside the map; it is a scene beat, never a cut to a
     team's feed.
   * A promoted fight IS active -> graphic only (winners/losers

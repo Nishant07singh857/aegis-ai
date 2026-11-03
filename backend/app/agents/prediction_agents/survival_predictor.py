@@ -3,6 +3,16 @@
 AEGIS AI - Survival Predictor
 Predicts team survival probability and time-to-elimination.
 Analyzes zone position, team strength, and match context.
+
+⚠ DORMANT — NEVER WIRE WITHOUT CALIBRATION (Phase 36, L-3). This
+agent is NOT live in production: its scores are uncalibrated
+heuristics presented as probabilities (including hard-coded values
+such as 0.9 for "edge of zone"), with no measured precision / recall
+on real matches behind them. Wiring it to any broadcast surface
+would present invented precision as fact. Before any wiring:
+calibrate the scores against labelled real-match outcomes, publish
+the measured numbers, and gate the output on them. Until then this
+module stays dormant.
 """
 
 import time

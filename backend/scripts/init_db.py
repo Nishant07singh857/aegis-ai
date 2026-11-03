@@ -15,9 +15,21 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 import structlog
 from sqlalchemy import text
 
+from app.config import settings
 from app.db.base import engine, Base, init_db
+from app.db.error_scrub import scrub_db_error_text
 
 logger = structlog.get_logger("aegis.scripts.init_db")
+
+
+def _scrubbed(exc: BaseException) -> str:
+    """Scrub a DB exception for logging (Phase 36, W1 / N-1).
+
+    Driver errors can embed the DATABASE_URL (username + password);
+    the configured URL is passed as a known secret so even a verbatim
+    echo in an unrecognised shape is redacted.
+    """
+    return scrub_db_error_text(exc, secrets=[settings.DATABASE_URL or ""])
 
 
 async def create_extensions():
@@ -35,7 +47,7 @@ async def create_extensions():
                 await conn.execute(text(f"CREATE EXTENSION IF NOT EXISTS \"{ext}\""))
                 logger.info(f"Extension created: {ext}")
             except Exception as e:
-                logger.warning(f"Extension {ext} not available: {e}")
+                logger.warning(f"Extension {ext} not available: {_scrubbed(e)}")
 
 
 async def create_tables():
@@ -84,7 +96,7 @@ async def create_indexes():
             try:
                 await conn.execute(text(idx_sql))
             except Exception as e:
-                logger.warning(f"Index creation warning: {e}")
+                logger.warning(f"Index creation warning: {_scrubbed(e)}")
         
         logger.info(f"Created {len(indexes)} performance indexes")
 
@@ -103,7 +115,7 @@ async def verify_connection():
             
             return True
     except Exception as e:
-        logger.error(f"Database connection failed: {e}")
+        logger.error(f"Database connection failed: {_scrubbed(e)}")
         return False
 
 
@@ -140,7 +152,7 @@ async def main():
         logger.info("=" * 60)
         
     except Exception as e:
-        logger.error(f"Database initialization failed: {e}")
+        logger.error(f"Database initialization failed: {_scrubbed(e)}")
         sys.exit(1)
     finally:
         await engine.dispose()

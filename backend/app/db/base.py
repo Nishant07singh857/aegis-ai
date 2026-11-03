@@ -25,8 +25,36 @@ from sqlalchemy.exc import SQLAlchemyError, OperationalError, DisconnectionError
 from sqlalchemy import event as sa_event
 
 from ..config import settings
+from .error_scrub import scrub_db_error_text, scrubbed_exception
 
 logger = logging.getLogger("aegis.db")
+
+
+def _db_secrets() -> list:
+    """Known secret values for verbatim redaction (Phase 36, W1 / N-1).
+
+    The configured DATABASE_URL itself, so a driver message echoing
+    it in a shape no scrubber pattern recognises is still redacted.
+    The scrubber ignores blank/short entries, so an unconfigured URL
+    is safe to pass.
+    """
+    return [settings.DATABASE_URL or ""]
+
+
+def _scrubbed_exc_info(exc: BaseException):
+    """``exc_info`` tuple whose formatted traceback prints ONLY the
+    scrubbed message (Phase 36, W1 / N-1).
+
+    ``exc_info=True`` would print the ORIGINAL exception's message as
+    the traceback's final line, so scrubbing only the log-message
+    f-string is not enough — the secret would still reach the log
+    via the traceback. This keeps the original frames (traceback
+    source lines never carry values) but substitutes the scrubbed
+    surrogate as the exception value, so the traceback's final line
+    is scrubbed too. (The printed type name becomes the surrogate's
+    plain ``Exception``; the log call's own text still names the site.)
+    """
+    return (type(exc), scrubbed_exception(exc, secrets=_db_secrets()), exc.__traceback__)
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # NAMING CONVENTIONS FOR CONSTRAINTS
@@ -328,11 +356,17 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
             await session.commit()
         except SQLAlchemyError as e:
             await session.rollback()
-            logger.error(f"Database session error: {e}", exc_info=True)
+            logger.error(
+                f"Database session error: {scrub_db_error_text(e, secrets=_db_secrets())}",
+                exc_info=_scrubbed_exc_info(e),
+            )
             raise
         except Exception as e:
             await session.rollback()
-            logger.error(f"Unexpected session error: {e}", exc_info=True)
+            logger.error(
+                f"Unexpected session error: {scrub_db_error_text(e, secrets=_db_secrets())}",
+                exc_info=_scrubbed_exc_info(e),
+            )
             raise
         finally:
             await session.close()
@@ -353,7 +387,10 @@ async def get_db_context() -> AsyncGenerator[AsyncSession, None]:
             await session.commit()
         except Exception as e:
             await session.rollback()
-            logger.error(f"Database context error: {e}", exc_info=True)
+            logger.error(
+                f"Database context error: {scrub_db_error_text(e, secrets=_db_secrets())}",
+                exc_info=_scrubbed_exc_info(e),
+            )
             raise
         finally:
             await session.close()
@@ -377,7 +414,8 @@ async def get_db_with_retry(
         except (OperationalError, DisconnectionError) as e:
             last_exception = e
             logger.warning(
-                f"Database connection attempt {attempt + 1}/{max_retries} failed: {e}"
+                f"Database connection attempt {attempt + 1}/{max_retries} failed: "
+                f"{scrub_db_error_text(e, secrets=_db_secrets())}"
             )
             if attempt < max_retries - 1:
                 await asyncio.sleep(retry_delay * (2 ** attempt))  # Exponential backoff
@@ -385,13 +423,25 @@ async def get_db_with_retry(
         except Exception as e:
             last_exception = e
             await session.rollback()
-            logger.error(f"Database error (non-retryable): {e}", exc_info=True)
-            raise
+            logger.error(
+                f"Database error (non-retryable): {scrub_db_error_text(e, secrets=_db_secrets())}",
+                exc_info=_scrubbed_exc_info(e),
+            )
+            # Re-raise the SCRUBBED surrogate, never the raw exception:
+            # a driver message can embed the DATABASE_URL, and any
+            # upstream logger printing this exception would leak it.
+            # ``from None`` suppresses the raw exception as context so
+            # no formatted chain can carry it either.
+            raise scrubbed_exception(e, secrets=_db_secrets()) from None
         finally:
             await session.close()
     
     logger.error(f"All {max_retries} database connection attempts failed")
-    raise last_exception
+    if last_exception is None:
+        # Degenerate max_retries=0: preserve the prior behaviour
+        # (``raise None`` -> TypeError) instead of inventing an error.
+        raise last_exception
+    raise scrubbed_exception(last_exception, secrets=_db_secrets())
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -416,7 +466,10 @@ async def init_db() -> None:
                 await conn.execute(text("CREATE EXTENSION IF NOT EXISTS \"pgcrypto\""))
                 await conn.execute(text("CREATE EXTENSION IF NOT EXISTS \"pg_trgm\""))
         except Exception as e:
-            logger.info(f"Skipping PostgreSQL extensions (non-fatal): {e}")
+            logger.info(
+                f"Skipping PostgreSQL extensions (non-fatal): "
+                f"{scrub_db_error_text(e, secrets=_db_secrets())}"
+            )
 
     try:
         async with engine.begin() as conn:
@@ -427,7 +480,10 @@ async def init_db() -> None:
         logger.info(f"Tables created: {len(Base.metadata.tables)}")
         
     except Exception as e:
-        logger.error(f"❌ Database initialization failed: {e}", exc_info=True)
+        logger.error(
+            f"❌ Database initialization failed: {scrub_db_error_text(e, secrets=_db_secrets())}",
+            exc_info=_scrubbed_exc_info(e),
+        )
         raise
 
 
@@ -440,7 +496,10 @@ async def close_db() -> None:
         await engine.dispose()
         logger.info("✅ Database connections closed")
     except Exception as e:
-        logger.error(f"Error closing database: {e}", exc_info=True)
+        logger.error(
+            f"Error closing database: {scrub_db_error_text(e, secrets=_db_secrets())}",
+            exc_info=_scrubbed_exc_info(e),
+        )
 
 
 async def check_db_health() -> Dict[str, Any]:
@@ -469,10 +528,12 @@ async def check_db_health() -> Dict[str, Any]:
                 "timestamp": time.time(),
             }
     except Exception as e:
-        logger.error(f"Database health check failed: {e}")
+        logger.error(
+            f"Database health check failed: {scrub_db_error_text(e, secrets=_db_secrets())}"
+        )
         return {
             "status": "unhealthy",
-            "error": str(e),
+            "error": scrub_db_error_text(e, secrets=_db_secrets()),
             "timestamp": time.time(),
         }
 
@@ -516,8 +577,10 @@ async def get_db_stats() -> Dict[str, Any]:
                 "timestamp": time.time(),
             }
     except Exception as e:
-        logger.error(f"Failed to get DB stats: {e}")
-        return {"error": str(e)}
+        logger.error(
+            f"Failed to get DB stats: {scrub_db_error_text(e, secrets=_db_secrets())}"
+        )
+        return {"error": scrub_db_error_text(e, secrets=_db_secrets())}
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

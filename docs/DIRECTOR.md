@@ -1,4 +1,4 @@
-# Director Service (Phase 7)
+# Director Service (Phase 7; scenes + clone mode updated Phase 36, 2026-11-01)
 
 The director service (`backend/app/services/director_service.py`) is the
 **single source of truth for what's on the broadcast output page**. The
@@ -10,8 +10,8 @@ renders it.
 
 ```jsonc
 {
-  "mode": "full_auto",               // "full_auto" | "semi_auto" | "manual"
-  "scene": "main",                   // "main" | "standings" | "killfeed_focus" | "commentary"
+  "mode": "full_auto",               // "full_auto" | "semi_auto" | "manual" | "clone"
+  "scene": "main",                   // "main" | "standings" | "killfeed_focus" | "commentary" | "map_cam"
   "overlays": {"scorebug": true, "killfeed": true},
   "lower_third": {"visible": false, "title": "", "subtitle": ""},
   "graphics": {"scorebug_template_id": "scorebug-classic",
@@ -40,6 +40,17 @@ renders it.
 - **MANUAL**: operator API writes are authoritative. `system_publish()`
   and `propose_suggestion()` are both **no-ops**, so the AI is fully
   silent.
+- **CLONE** (Phase 27): the learned profile drives the director — the
+  same auto-publish behaviour as FULL_AUTO, but with the LEARNED knob
+  values instead of factory defaults (`full_auto` always uses factory
+  defaults, forever). A human can grab control instantly inside clone
+  (`clone_grabbed` — the clone then writes nothing, manual semantics);
+  120s of inactivity auto-releases the grab. With no learned profile
+  yet (cold start) the clone behaves as factory defaults and the
+  director console says so plainly: "Abhi style seekha nahi gaya —
+  pehle kam se kam 10 faislo par director feedback chahiye."
+  (ClonePanel; the API surface is `GET /director-learning/status`,
+  `profile.exists`.)
 - **Graphics exception**: template selection
   (`POST /director/graphics`, `set_graphics()`) is a direct operator
   write allowed in **MANUAL and SEMI-AUTO** — the AI never chooses
@@ -73,7 +84,11 @@ A suggestion is:
   "confidence": 0.8,                 // 0.0–1.0
   "created_at": "2026-10-18T00:00:00+00:00",
   "expires_at": "2026-10-18T00:01:00+00:00",  // default: created_at + 60s
-  "status": "pending"                // "pending" | "applied" | "rejected" | "expired"
+  "status": "pending"                // "pending" | "applied" | "rejected" | "expired" | "retracted"
+                                     // ("retracted": Phase 36, L-2 — the
+                                     // system superseded it, e.g. a fight
+                                     // started while a lull suggestion
+                                     // sat queued; not a human fate)
 }
 ```
 
@@ -93,14 +108,27 @@ Lifecycle:
 3. **Reject** (`POST /director/suggestions/{id}/reject`, operator+) —
    marked `rejected`, logged (decided_by/decided_at), dropped from the
    queue.
-4. **Expiry** — dropped silently. Pruned lazily on every read and on
+4. **Expiry** — marked `expired` and pruned lazily on every read and on
    every propose (the janitor); decided/expired records are kept in a
-   capped in-memory history for audit.
+   capped in-memory history for audit, and expiry is recorded as a
+   learning-journal fate (not dropped silently).
+5. **Retraction** (Phase 36, L-2) — the system may retract a still-pending
+   suggestion when the world that justified it ends: LiveDirector's lull
+   loop retracts its queued lull suggestions the moment a fight/precombat
+   signal arrives, so a stale lull suggestion can never be approved
+   after the fight started. Retraction is scoped by creator
+   (`retract_suggestions(created_by=...)`) and never sweeps another
+   source's queue; retracted entries stay in the capped history with
+   `retracted_reason`, and the retraction is logged in the decision log.
 
 Current genuine suggestion sources (all derived from real match events,
 never invented): a fight event from the match simulator proposes a
 `killfeed_focus` scene suggestion, with confidence derived from the
-Director AI's event priority (CRITICAL 0.9 / HIGH 0.75 / MEDIUM 0.6).
+Director AI's event priority (CRITICAL 0.9 / HIGH 0.75 / MEDIUM 0.6);
+LiveDirector proposes phase suggestions (`map_cam` etc. from the live
+phase), zone-reveal map-beat suggestions, and lull-loop scene
+suggestions in idle loot/early phases (the lull loop's queued
+suggestions are retracted on fight/precombat — see step 5 above).
 
 ## API (`/api/v1/director`, tag `Director`)
 
@@ -108,7 +136,7 @@ Director AI's event priority (CRITICAL 0.9 / HIGH 0.75 / MEDIUM 0.6).
 |--------|-----------------------------------|-----------------|------------------------------------|
 | GET    | `/state`                          | any logged-in   | viewers included                   |
 | GET    | `/suggestions`                    | operator+       | pending AI proposals               |
-| POST   | `/mode`                           | operator+       | `{"mode": "full_auto"\|"semi_auto"\|"manual"}`; legacy `"auto"` → `"full_auto"` |
+| POST   | `/mode`                           | operator+       | `{"mode": "full_auto"\|"semi_auto"\|"manual"\|"clone"}`; legacy `"auto"` → `"full_auto"` |
 | POST   | `/scene`                          | operator+       | manual only                        |
 | POST   | `/overlays`                       | operator+       | manual only, partial update        |
 | POST   | `/lower-third`                    | operator+       | manual only                        |

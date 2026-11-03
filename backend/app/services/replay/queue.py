@@ -78,8 +78,10 @@ SOURCES OF MOMENTS
       opponents (list[str], remaining teams),
       slot_number (int, challenger candidate's observer slot).
     The consumer requires kind + a window (flat window_start/window_end,
-    or ts, or the nested window dict as a fallback); an underspecified
-    candidate is dropped, never padded out. Candidate kinds are gated
+    or ts, or the nested window dict as a fallback) + a positive score;
+    an underspecified or scoreless candidate is dropped, never padded
+    out (a missing/zero/non-numeric score is NO score, never the old
+    default 80 — Phase 36, R-7). Candidate kinds are gated
     by CANDIDATE_ACCEPTED_KINDS (detector QUALIFYING_KINDS plus the
     director-curated "fight"); the detector poll path's
     QUALIFYING_KINDS gate stays detector-only.
@@ -113,6 +115,7 @@ explicit operator actions via the API.
 
 from __future__ import annotations
 
+import math
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -163,6 +166,35 @@ def _iso(ts: Optional[float]) -> Optional[str]:
     if ts is None:
         return None
     return datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
+
+
+def _candidate_score(raw: Any) -> Optional[int]:
+    """Parse a ``replay.candidate`` score, or None when it is no score.
+
+    Phase 36 (R-7): the score is a REQUIRED field — a missing, zero,
+    non-numeric or non-finite score is NO score, never the old
+    ``or 80`` default (a scoreless candidate used to queue as if it
+    were high-value). Accepts real numbers and plain numeric strings
+    (mirroring the clip evidence helpers); bools, None, non-numeric
+    strings, dicts/lists, NaN/inf, zero and negatives are NO score.
+    Zero means "no score was measured", not "lowest priority". No
+    upper bound is asserted — the live publisher sends
+    int(intensity) — the queue's bounded policy orders by the score
+    it is given.
+    """
+    if raw is None or isinstance(raw, bool):
+        return None
+    if isinstance(raw, str):
+        try:
+            raw = float(raw.strip())
+        except (TypeError, ValueError):
+            return None
+    if not isinstance(raw, (int, float)):
+        return None
+    value = float(raw)
+    if not math.isfinite(value) or value <= 0:
+        return None
+    return int(value)
 
 
 class ReplayTakeRefused(RuntimeError):
@@ -648,6 +680,10 @@ class ReplayQueue:
         reason / source for context). Kind must be in
         CANDIDATE_ACCEPTED_KINDS — detector kinds plus the
         director-curated "fight" ("clutch" when the fight is_clutch).
+        The score is REQUIRED and fail-closed (Phase 36, R-7): a
+        missing, zero, non-numeric or non-finite score drops the
+        candidate — it is never defaulted to 80, and a zero score is
+        not "lowest priority", it is no score at all.
         """
         kind = str(payload.get("kind") or payload.get("moment_kind") or "").strip()
         window_start = payload.get("window_start", payload.get("window_start_ts"))
@@ -675,6 +711,15 @@ class ReplayQueue:
                 kind=kind, payload_keys=sorted(payload.keys()),
             )
             return None
+        # Phase 36 (R-7): the score is required, fail-closed. A
+        # scoreless candidate is dropped (same pattern as an
+        # underspecified one) — never queued at the old default 80.
+        # The live publisher always sends int(intensity), so a drop
+        # here means a broken/foreign publisher, not a real fight.
+        score = _candidate_score(payload.get("score"))
+        if score is None:
+            logger.info("replay_candidate_dropped_no_score", payload_keys=sorted(payload.keys()))
+            return None
         slot = payload.get("slot_number", payload.get("observer_slot"))
         # team/opponents: explicit flat fields win; the publisher's
         # teams list is the fallback (first = team, rest = opponents).
@@ -686,7 +731,7 @@ class ReplayQueue:
                 opponents = list(payload["teams"][1:])
         return self.enqueue_moment(
             kind=kind,
-            score=int(payload.get("score") or 80),
+            score=score,
             reason=str(payload.get("reason") or f"Director candidate: {kind} (simultaneous fight)"),
             window_start=float(window_start),
             window_end=float(window_end),

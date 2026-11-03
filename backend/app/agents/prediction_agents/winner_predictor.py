@@ -3,6 +3,16 @@
 AEGIS AI - Winner Predictor
 Predicts the overall match winner based on team performance,
 positioning, momentum, and historical data.
+
+⚠ DORMANT — NEVER WIRE WITHOUT CALIBRATION (Phase 36, L-3). This
+agent is NOT live in production: its scores are uncalibrated
+heuristics presented as probabilities, with no measured precision /
+recall on real matches behind them. Wiring it to any broadcast
+surface (overlay, commentary, director suggestion) would present
+invented precision as fact. Before any wiring: calibrate the scores
+against labelled real-match outcomes, publish the measured numbers,
+and gate the output on them — exactly the honesty-gate pattern the
+vision detectors follow. Until then this module stays dormant.
 """
 
 import time

@@ -7,27 +7,31 @@ Where a count could not be verified exactly, that is stated.
 the headline table below was re-measured at that HEAD; per-module
 detail in §1/§5/§7/§9 is the 2026-10-20 snapshot unless a line below
 was individually corrected and says so.
+**Phase 36 recount (2026-11-01, HEAD `cdf4046`):** the rows marked
+"(Phase 36 recount)" below were re-measured at that HEAD with the
+method in the "How verified" column; everything else keeps its
+earlier recount date.
 
 ## Headline counts
 
 | Metric | Count | How verified |
 |---|---|---|
-| Backend Python files (`backend/app/`) | 459 | `find` |
-| Backend LOC (`backend/app/**/*.py`) | ~126,322 | `wc -l` |
+| Backend Python files (`backend/app/`) | 461 | `git ls-tree -r --name-only 9bcc587 -- backend/app` (Phase 36 fix-up recount 2026-11-01, at the Phase 36 commit — 460 was HEAD cdf4046; +1 `revoked_api_key.py`) |
+| Backend LOC (`backend/app/**/*.py`) | 128,611 | `git archive 9bcc587 backend/app` + `wc -l` (Phase 36 fix-up recount 2026-11-01, at the Phase 36 commit — 127,757 was HEAD cdf4046) |
 | Frontend TS/TSX LOC (app+components+lib) | ~31,430 | `wc -l` |
 | API endpoints | **211** (209 HTTP + 2 WebSocket) | 212 decorator matches; 1 is a false positive inside `db/base.py` text |
 | Agent classes (BaseAgent subclasses) | **41** in 9 families | grep `class …(BaseAgent)` per family dir |
-| DB tables | **33** (30 explicit `__tablename__` + User/ApiKey/AuditLog auto-named) | grep across `backend/app` |
-| Alembic migrations | **13 files** (001, 005–016) | `ls backend/alembic/versions/` |
+| DB tables | **34** (30 explicit `__tablename__` + User/ApiKey/AuditLog/RevokedApiKey auto-named) | grep across `backend/app` (Phase 36 fix-up recount 2026-11-01 — +1 auto-named `revoked_api_key`, migration 018) |
+| Alembic migrations | **15 files** (001, 005–018) | `ls backend/alembic/versions/` (Phase 36 fix-up recount 2026-11-01 — +017 Phase 35, +018 Phase 36) |
 | Vision detectors on disk | 16 modules; **10 wired live** | `vision/runtime.py` imports + docstring |
 | Frontend page routes | **34** | `find app -name page.tsx` |
 | Frontend component files | 55 | `find components -name '*.tsx'` |
-| Graphics templates | **17 templates + 7 animated story graphics** | `components/graphics/**` |
-| Backend tests | **2062 collected** (pytest --collect-only; 0 collection errors) | pytest + grep |
-| Docs | 44 top-level `docs/*.md` | `ls docs/` |
+| Graphics templates | **16 registered + 9 animated story graphics** | `components/graphics/registry.ts` TEMPLATES (16 ids) + `animated/*.tsx` (9); `templates/` holds 20 files (16 templates + 4 `_`-helpers, not registered); 35 files under `components/graphics/` in total (Phase 36 recount) |
+| Backend tests | **2587 collected** (pytest --collect-only; 0 collection errors) | pytest + grep (Phase 36 fix-up recount 2026-11-01, at the Phase 36 commit 9bcc587 — 2585 was the pre-commit shared-tree count; +2 fix-up caplog tests) |
+| Docs | 49 top-level tracked `docs/*.md` | `git ls-files ":(glob)docs/*.md"` (Phase 36 fix-up recount 2026-11-01, at the Phase 36 commit — 47 was HEAD cdf4046; +2 `PHASE36_FINAL_LEDGER.md`, `API_KEY_REVOCATION_RUNBOOK.md`; on-disk count is also 49) |
 | Piper voices installed | 2 (Hindi `hi_IN-pratham-medium`, English `en_US-amy-medium`) | `.local-voices/` |
 | Commentary modes | 5 | `audio/commentary_modes.py` |
-| Feed event types (NormalizedEvent) | 15 | `feed_adapter/schemas.py` |
+| Feed event types (NormalizedEvent) | 17 | `feed_adapter/schemas.py` `FeedEventType` (Phase 36 recount; +2 Phase-24 spotter types) |
 | Anti-cheat checks registered | 14 (**3 live**, 11 disabled-with-reason) | `vision_intelligence/anti_cheat.py` |
 | Training notebooks | 5 | `ls notebooks/` |
 
@@ -189,22 +193,38 @@ Components (55 files, Phase 33 recount; subgroup counts below are the 2026-10-20
 top-center-stats), live ×7 (DirectorPanel, KillFeed, StandingsTable, MatchHeader,
 AgentChatter, SystemHealth, ConnectionBanner), graphics-staging ×10 (map-cam, PiP
 layout, player/team panels, preshow view+controls, WWCD ceremony, zone timer,
-matchpoint badge), graphics ×26, plus lib ×14 modules (api, auth, director, graphics,
-stories, socket/commentary/stats/zone hooks).
+matchpoint badge), graphics ×26 counted (16 registered templates + 9 animated
+`.tsx` + `registry.ts`; 35 files on disk under `components/graphics/` once the
+4 template `_`-helpers, 4 animated support files and `graphics.css` are
+counted — Phase 36 recount), plus lib ×18 modules (Phase 36 recount: 18 files
+under `frontend/lib/` — api, auth, director, director-learning, graphics,
+observer-pilot, overlay-params, stories, source, audio, guard, multiview,
+plus useCommentary/useLiveSocket/usePlayerStats/useRole/useWinProbability/
+useZoneClock hooks).
 
-## 8. Graphics library — 26 files
+## 8. Graphics library — 26 counted files (35 files on disk)
 
-**Templates (17):** standings ×7 (table, cards, MVP board, Eliminator race, Best IGL,
+**Templates (16):** standings ×7 (table, cards, MVP board, Eliminator race, Best IGL,
 Finals MVP, team spotlight — with ▲▼ movement), scorebug ×3 (classic, modern, minimal),
-lower-third ×3 (banner, rise, slide) + standby + player board, killfeed ×2 (stack, ticker).
-**Animated story graphics (9 files):** WinProbBar, H2HCards, MilestoneAlert, FormGuide,
+lower-third ×4 (banner, rise, slide, eliminated — the 4th is the Phase-31
+ELIMINATED banner; the 2026-10-20 count of 3 predates it) + 4 underscore
+helpers in `templates/` that are NOT registered templates (`_anim.ts`,
+`_lowerthird-standby.tsx`, `_player-board.tsx`, `_scorebug-data.ts`),
+killfeed ×2 (stack, ticker).
+**Animated story graphics (9 `.tsx` files):** WinProbBar, H2HCards, MilestoneAlert, FormGuide,
 ZoneAdvantage, WWCD cards, StoryGraphic shell, TemplatePicker, animation-style system
-(slide/fade/scale, 2–3 templates per story type).
+(slide/fade/scale, 2–3 templates per story type). `animated/` also holds 4 support
+files (`_hooks.ts`, `animated.css`, `index.ts`, `types.ts`); `registry.ts` +
+`graphics.css` sit at the `components/graphics/` root. Counted files:
+16 templates + 9 animated `.tsx` + `registry.ts` = 26; on-disk total 35.
 
 ## 9. Tests & docs & infra
 
-- **Tests:** Phase 33 recount at HEAD `877cc7a`: `pytest --collect-only` = **2062 tests collected, 0 collection errors** (run with `-o addopts=""` because the system Python lacks pytest-cov, which `tests/pytest.ini` requests). The 2026-10-20 snapshot below it (947 collected, 12 errors) is superseded.
-- **Docs (44 top-level `docs/*.md`, Phase 33 recount):** VISUAL_BROADCAST_BIBLE, PRD_GAP_ANALYSIS, PHASE22_FINAL_LEDGER,
+- **Tests:** Phase 36 fix-up recount (2026-11-01, at the Phase 36 commit 9bcc587): `pytest --collect-only` = **2587 tests collected, 0 collection errors** (run with `-o addopts=""` because the system Python lacks pytest-cov, which `tests/pytest.ini` requests). Full run on the same tree: 2522 passed / 63 failed / 3 skipped — the 63rd failure was the W5 inventory-count test asserting the stale 47-doc count; this re-measurement fixes it (W5 file re-run green after the fix). The other 62 are the pre-existing/env inventory (e2e 13, OBS 19, dossier-PDF 5, event-bus 1, commentary 7, observer 6, team 3, coordinate-mapper 3, minimap 2, player-tracker 2, fight-agent 1).
+- **Docs (49 top-level tracked `docs/*.md`, Phase 36 fix-up recount 2026-11-01):** VISUAL_BROADCAST_BIBLE, PRD_GAP_ANALYSIS, PHASE22_FINAL_LEDGER,
+  PHASE31_FINAL_LEDGER, PHASE32_FINAL_LEDGER, PHASE33_FINAL_LEDGER,
+  PHASE34_FINAL_LEDGER, PHASE35_FINAL_LEDGER, PHASE36_FINAL_LEDGER,
+  API_KEY_REVOCATION_RUNBOOK,
   BETTER_THAN_KRAFTON, BGMI_TERMS_AZ, BGMI_EXPERT_PROMPTS, AI_STORYTELLER,
   ANIMATED_GRAPHICS, GRAPHICS, DIRECTOR, ROLES, CLUSTER, STREAMING, AUDIO, VISION,
   VISION_MODEL, GAME_FEED, OBSERVER_SETUP, ANALYSIS_PRODUCT, KAGGLE_TRAINING, TRAINING,

@@ -3,6 +3,17 @@
 AEGIS AI - Cheating Detector
 Detects suspicious behavior patterns that may indicate cheating.
 Analyzes aim patterns, movement anomalies, and statistical outliers.
+
+⚠ DORMANT — NEVER WIRE WITHOUT CALIBRATION (Phase 36, L-3). This
+agent is NOT live in production, and its confidence is FABRICATED
+by construction: fixed additive constants per signal (+25 / +20 /
++30 / +25, +10 base, capped at 95) with no measurement behind them,
+over telemetry a spectator-mode feed cannot even supply (aim
+patterns, recoil, wallhack evidence). Wiring it would accuse real
+players on invented numbers. Before any wiring: prove the signals
+are observable from spectator capture alone, calibrate every
+constant against labelled clean/cheating play, and publish the
+measured false-positive rate. Until then this module stays dormant.
 """
 
 import time

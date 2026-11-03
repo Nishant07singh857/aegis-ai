@@ -1,11 +1,22 @@
 # AEGIS AI — ML Training Guide (Phase 15)
 
+> **Status note (Phase 36, 2026-11-01):** the LIVE training path is
+> Kaggle, not Colab — see `docs/KAGGLE_TRAINING.md`. The real dataset
+> is the QA-verified **44,034-frame** killfeed set on Kaggle
+> (`vivekyadav54/aegis-killfeed-dataset`, ~1.5 GB; Train 34,435 /
+> Val 8,599 / Test 1,000 from a separate VOD), trained with the
+> RF-DETR-Nano notebook as primary and YOLO26 as backup. This doc
+> stays as the YOLOv8/Colab fallback path and the export-to-ONNX
+> reference — its dataset-size language ("W1 dataset", "50k+ frames")
+> is generic guidance, not the measured dataset. One correction
+> inside: the kill feed sits **top-LEFT**, not top-right (Phase 23).
+
 Train the kill-feed detector (YOLOv8-nano) on free GPU, evaluate it honestly,
 export it to ONNX, and drop it into AEGIS. No paid services anywhere in this
 pipeline: Colab's free T4 GPU, open-source ultralytics, onnxruntime on CPU.
 
 **What you're training and why.** The kill feed is the structured UI region
-(top-right overlay) that lists every kill: *killer → victim*. The model learns
+(top-left overlay) that lists every kill: *killer → victim*. The model learns
 two classes:
 
 | class | what it is | used for |

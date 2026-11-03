@@ -15,20 +15,27 @@ Phase 1 auth model (honest and minimal):
         (settings.API_KEY_HEADER). Compared with secrets.compare_digest.
         Static-allowlist keys are dev/demo grade; a hashed store belongs in
         the DB-backed auth that replaces this in Phase 2.
-  * Phase 35 (M-4): static keys CAN now be revoked at runtime, without a
-    restart, through the in-memory revocation registry below
-    (``revoke_api_key``). The registry is consulted by ``_verify_api_key``,
-    the single choke point for the REST and WebSocket API-key paths, so a
-    revoked key is rejected (401) on the very next request. HONEST LIMIT:
-    the registry is IN-MEMORY ONLY — a process restart resurrects a
-    revoked key unless the key has also been removed from ADMIN_API_KEYS
-    (the environment/config source). Permanent revocation is therefore
-    "revoke in-process AND remove from ADMIN_API_KEYS"; revoking
-    in-process alone buys immediate protection for the running process
-    only. No REST/WS endpoint wires ``revoke_api_key`` yet — the WS
-    ``revoke_key`` action in ``app/main.py`` still reports the old
-    restart-only message until it is rewired to call this registry.
-    Revoked keys are stored as SHA-256 digests only, never as raw keys.
+  * Phase 36 (N-4): static keys are revoked PERSISTENTLY through
+    ``revoke_api_key_persistent`` — the key's SHA-256 digest is
+    written to the ``revoked_api_key`` table (migration 018) AND to
+    the in-memory registry below, and the lifespan seeds the
+    registry from the table at startup, so a revoked key stays
+    revoked across restarts. ``_verify_api_key`` — the single choke
+    point for the REST and WebSocket API-key paths — consults the
+    in-memory registry, which is therefore DB-backed as long as the
+    startup seed ran (and as long as revokes go through the
+    persistent path; the sync ``revoke_api_key`` remains as the
+    in-memory-only primitive for tests and for the degraded case
+    where the DB write fails). Revoked keys are stored as SHA-256
+    digests only, never as raw keys. Honest limits: the verify
+    path is sync so it cannot consult the DB per request — a key
+    revoked by another process/instance after this process started
+    is not visible until re-seed/restart; and if the DB is
+    unreachable at startup the seed loads nothing (logged), so
+    pre-restart revocations are not enforced until the DB is back
+    and the process restarts. Removing the key from ADMIN_API_KEYS
+    remains recommended: a DB reset (table dropped/recreated)
+    would otherwise resurrect it.
 
 Dependencies:
   * get_current_user  — accepts a valid JWT (Authorization: Bearer <token>)
@@ -114,11 +121,14 @@ from typing import Optional
 from fastapi import Depends, Header, HTTPException, WebSocket, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 
 from ..config import settings
 from ..core.security import VALID_ROLES, security_manager, TokenPayload
-from ..db.base import AsyncSessionLocal
+from ..db.base import AsyncSessionLocal, _scrubbed_exc_info
+from ..db.error_scrub import scrub_db_error_text
 from ..db.models.enums import UserRole
+from ..db.models.revoked_api_key import RevokedApiKey
 from ..db.models.user import User
 
 logger = logging.getLogger("aegis.api.deps")
@@ -142,9 +152,13 @@ def _hash_api_key(raw_key: str) -> str:
 
 
 #: Phase 35 (M-4) — runtime revocation registry for static ADMIN_API_KEYS.
-#: In-memory ONLY (see module docstring): a restart clears it, so a
-#: revoked key comes back unless it was also removed from ADMIN_API_KEYS.
-#: Membership is by digest, never by raw key value.
+#: Phase 36 (N-4): this set is now the in-memory CACHE of the durable
+#: ``revoked_api_key`` table (migration 018), not the store of record.
+#: The lifespan seeds it from the DB at startup
+#: (``seed_revoked_api_key_cache``) and every persistent revoke writes
+#: the DB row first and then updates this set, so ``_verify_api_key``
+#: (sync, cache-only by necessity) enforces revocations that survive
+#: restarts. Membership is by digest, never by raw key value.
 _REVOKED_API_KEY_HASHES: set = set()
 _REVOKED_API_KEY_LOCK = threading.Lock()
 
@@ -162,10 +176,12 @@ def revoke_api_key(raw_key: str) -> bool:
     restart with the key present in ADMIN_API_KEYS and no revocation
     recorded in the fresh process).
 
-    HONEST LIMIT: in-memory only. A restart resurrects the key unless
-    it was also removed from ADMIN_API_KEYS. Permanent revocation is
-    "revoke here AND remove from the environment/config source". The
-    raw key is never stored or logged; only its digest is retained.
+    HONEST LIMIT: this sync primitive is in-memory only. Prefer
+    ``revoke_api_key_persistent`` (DB row + this set) for every
+    operator revoke — it is what the REST/WS endpoints call. A
+    restart resurrects a key revoked ONLY through this function
+    unless it was also removed from ADMIN_API_KEYS. The raw key is
+    never stored or logged; only its digest is retained.
     """
     if not raw_key:
         return False
@@ -181,6 +197,195 @@ def revoke_api_key(raw_key: str) -> bool:
         "remove the key from ADMIN_API_KEYS for permanent revocation)"
     )
     return was_configured
+
+
+async def load_revoked_api_key_digests(session) -> set:
+    """Read every recorded revocation digest from the DB table.
+
+    Raises on any DB error (missing table included) — the caller
+    decides whether that is fatal or degraded. Returns digests only;
+    no raw key value ever exists in this table.
+    """
+    result = await session.execute(select(RevokedApiKey.key_digest))
+    return set(result.scalars().all())
+
+
+async def seed_revoked_api_key_cache(session_factory=None) -> int:
+    """Seed the in-memory revocation cache from the DB table.
+
+    Called by the app lifespan at startup (after ``init_db``) and by
+    tests simulating a fresh process. Unions the DB digests into the
+    cache — it never removes an entry, so a revoke made earlier in
+    this process lifetime cannot be undone by a re-seed. Returns the
+    number of digests loaded.
+
+    Degraded, never fatal: any DB error (unreachable DB, table not
+    yet migrated) is logged and returns 0, leaving the cache as-is.
+    That is an honest gap, not a silent success — a process that
+    cannot read the table at startup does NOT enforce pre-restart
+    revocations until the DB is back and the process restarts (or
+    this function is called again). The verify path still enforces
+    every in-memory entry.
+    """
+    factory = session_factory or AsyncSessionLocal
+    try:
+        async with factory() as session:
+            digests = await load_revoked_api_key_digests(session)
+    except Exception as e:
+        # Phase 36 QA fix (P6): NEVER log the raw exception here — a
+        # DB driver message can echo the connection URL (and its
+        # password) verbatim. W1 pattern (db/base.py): scrubbed text
+        # in the message plus a scrubbed exc_info tuple, so the
+        # traceback's final line cannot leak it either.
+        logger.warning(
+            "Could not load revoked API keys from the database; "
+            "pre-restart revocations are NOT enforced by this process "
+            "until the database is reachable and the cache is re-seeded. "
+            "In-memory revocations still apply. "
+            f"(DB error: {scrub_db_error_text(e, secrets=[settings.DATABASE_URL])})",
+            exc_info=_scrubbed_exc_info(e),
+        )
+        return 0
+    with _REVOKED_API_KEY_LOCK:
+        _REVOKED_API_KEY_HASHES.update(digests)
+    return len(digests)
+
+
+async def is_api_key_revoked_in_db(raw_key: str, session=None) -> bool:
+    """True when the key's digest has a row in the DB table.
+
+    Direct DB consult (not the cache). ``session`` may be a supplied
+    ``AsyncSession`` (the caller owns commit/rollback) or None, in
+    which case a session is opened from ``AsyncSessionLocal``.
+    Raises on DB error — callers that must not fail use the cache
+    (``is_api_key_revoked``) instead.
+    """
+    if not raw_key:
+        return False
+    digest = _hash_api_key(raw_key)
+    if session is not None:
+        result = await session.execute(
+            select(RevokedApiKey.id).where(RevokedApiKey.key_digest == digest)
+        )
+        return result.scalar_one_or_none() is not None
+    async with AsyncSessionLocal() as _session:
+        return await is_api_key_revoked_in_db(raw_key, session=_session)
+
+
+async def revoke_api_key_persistent(
+    raw_key: str,
+    *,
+    revoked_by: Optional[str] = None,
+    reason: Optional[str] = None,
+    session=None,
+) -> dict:
+    """Revoke a static API key persistently: DB row + in-memory cache.
+
+    This is the operator path (REST ``POST /api/v1/admin/api-keys/revoke``
+    and the WS ``revoke_key`` action both call it). The digest is
+    written to ``revoked_api_key`` (migration 018) and added to the
+    in-memory registry, so ``_verify_api_key`` rejects the key on the
+    next request AND after a restart (once the startup seed runs).
+    ``revoked_by`` / ``reason`` are audit metadata only; the raw key
+    is never stored or logged.
+
+    ``session`` may be a supplied ``AsyncSession`` — it is committed
+    inside this function — or None, in which case a session is opened
+    from ``AsyncSessionLocal``.
+
+    Returns a dict (never raises for a DB failure):
+      * ``revoked`` — True when the key is now revoked in this
+        process (always True for a non-empty key: the in-memory
+        entry is added even when the DB write fails).
+      * ``was_configured`` — the key was in ADMIN_API_KEYS at
+        revocation time.
+      * ``persisted`` — the DB row was written (or already existed).
+        False means the revocation is in-memory only for this
+        process lifetime: the operator must still remove the key
+        from ADMIN_API_KEYS (and fix the DB) or it resurrects on
+        restart.
+      * ``already_revoked`` — a row for this digest already existed.
+    Re-revoking is a safe no-op (unique digest; the row is kept).
+    """
+    if not raw_key:
+        return {
+            "revoked": False,
+            "was_configured": False,
+            "persisted": False,
+            "already_revoked": False,
+        }
+    digest = _hash_api_key(raw_key)
+    was_configured = any(
+        secrets.compare_digest(raw_key, allowed)
+        for allowed in settings.ADMIN_API_KEYS
+    )
+
+    persisted = False
+    already_revoked = False  # True only when a DB row already existed.
+    try:
+        if session is not None:
+            session.add(
+                RevokedApiKey(
+                    key_digest=digest, revoked_by=revoked_by, reason=reason
+                )
+            )
+            await session.commit()
+        else:
+            async with AsyncSessionLocal() as _session:
+                _session.add(
+                    RevokedApiKey(
+                        key_digest=digest, revoked_by=revoked_by, reason=reason
+                    )
+                )
+                await _session.commit()
+        persisted = True
+    except IntegrityError:
+        # A row for this digest already exists (unique constraint):
+        # the key was already revoked durably. Roll back so the
+        # session stays usable, and treat it as persisted.
+        try:
+            if session is not None:
+                await session.rollback()
+            # (own-session branch: the context manager rolls back on
+            # exit after the exception propagates out of its block —
+            # the except here runs after that cleanup.)
+        except Exception:
+            pass
+        persisted = True
+        already_revoked = True
+    except Exception as e:
+        # DB write failed (table missing, DB down, ...): the key is
+        # still revoked in-memory below, so the running process is
+        # protected — but the revocation will NOT survive a restart.
+        # Logged loudly; the caller must surface persisted=False.
+        # Phase 36 QA fix (P7): scrubbed surrogate, same as the seed
+        # path — the raw driver message must never reach the log.
+        logger.warning(
+            "Persistent API-key revocation FAILED to write the DB row "
+            "(revocation applies in-memory only for this process; "
+            "remove the key from ADMIN_API_KEYS for permanence). "
+            f"(DB error: {scrub_db_error_text(e, secrets=[settings.DATABASE_URL])})",
+            exc_info=_scrubbed_exc_info(e),
+        )
+        persisted = False
+        if session is not None:
+            try:
+                await session.rollback()
+            except Exception:
+                pass
+
+    with _REVOKED_API_KEY_LOCK:
+        _REVOKED_API_KEY_HASHES.add(digest)
+    logger.warning(
+        "API key revoked (digest recorded; persisted=%s)",
+        persisted,
+    )
+    return {
+        "revoked": True,
+        "was_configured": was_configured,
+        "persisted": persisted,
+        "already_revoked": already_revoked,
+    }
 
 
 def is_api_key_revoked(raw_key: str) -> bool:
@@ -201,8 +406,14 @@ def clear_revoked_api_keys_for_tests() -> None:
 def _verify_api_key(raw_key: str) -> bool:
     """Constant-time check of a raw key against the static allowlist.
 
-    A key in the Phase 35 runtime revocation registry is rejected even
-    though it is still in ADMIN_API_KEYS (fail closed: revoked = 401).
+    A key in the revocation registry is rejected even though it is
+    still in ADMIN_API_KEYS (fail closed: revoked = 401). Phase 36
+    (N-4): the registry is the in-memory cache of the durable
+    ``revoked_api_key`` table — seeded from the DB at startup and
+    updated by every persistent revoke — so this sync check enforces
+    revocations that survive restarts. It cannot consult the DB per
+    request (sync choke point): a key revoked by another process
+    after this one started is invisible until re-seed/restart.
     This is the single choke point for API-key auth on both REST
     (``authenticate_checked``) and WebSocket (``authenticate_websocket``),
     so revocation takes effect on every path on the next request.

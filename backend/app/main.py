@@ -25,6 +25,8 @@ from app.api.deps import (
     authenticate_websocket,
     principal_role,
     require_admin,
+    revoke_api_key_persistent,
+    seed_revoked_api_key_cache,
     verify_admin_login,
 )
 from app.api.v1.teams.demo_data import DEMO_TEAMS
@@ -99,10 +101,18 @@ from app.intelligence.director_ai import DirectorAIEngine, BroadcastEvent, Event
 from app.intelligence.commentary_engine import get_commentary_engine
 from app.db.session import init_db
 from app.db.base import get_db_context
-# Phase 35 (M-5): DB-error scrub — every DB exception logged/raised
-# from this module passes through app.db.error_scrub first, so a
-# driver message embedding the DATABASE_URL/password can never reach
-# a log line, a WS/HTTP payload, or a raised exception.
+# Phase 35 (M-5) / Phase 36 (N-1): DB-error scrub — the DB-backed
+# boundaries in this module pass their exceptions through
+# app.db.error_scrub first, so a driver message embedding the
+# DATABASE_URL/password can never reach a log line, a WS/HTTP payload,
+# or a raised exception from THOSE sites: the boot gate
+# (_init_database_or_fail_fast), first-admin seeding, the two login
+# helpers (_authenticate_db_user, _is_deactivated_db_user), the WS
+# action-error choke point, and the live-match read. That is the exact
+# scrubbed scope: the other ``except`` blocks in this module log
+# service-construction/subscriber failures, not DB driver errors, and
+# are NOT scrubbed. If a new DB-backed boundary is added here, scrub
+# its exception too — and only then extend this comment.
 from app.db.error_scrub import scrub_db_error_text, scrubbed_exception
 from app.db.models.enums import UserRole
 from app.db.models.user import User
@@ -260,7 +270,14 @@ MATCH_STATE = {
     # keeps only the most recent N entries; every reader below serializes via
     # list(...) so JSON encoding is unchanged.
     "kill_feed": deque(maxlen=500),
-    "director_state": {"current_pov": "t1", "reason": "Initial", "action": "HOLD"},
+    # Phase 36 (L-4): PLACEHOLDER initial value, not a measured director
+    # decision — no live match has chosen POV "t1". It is marked
+    # "source": "placeholder" wherever it is sent (WS connect frame
+    # and GET /api/v1/broadcast/status) until a real decision (e.g.
+    # lock_pov or the live director) replaces the whole dict. In
+    # DEMO_MODE the connect frame is instead marked "source": "demo"
+    # by _demo_frame.
+    "director_state": {"current_pov": "t1", "reason": "Initial", "action": "HOLD", "source": "placeholder"},
     "agents_state": [
         {"id": "fight", "name": "Fight Detection Agent", "status": "active", "cpu": "12%", "mem": "145MB", "latency": "8ms", "tasks": 1204},
         {"id": "director", "name": "Master Director AI", "status": "active", "cpu": "24%", "mem": "310MB", "latency": "15ms", "tasks": 450},
@@ -332,7 +349,14 @@ class ConnectionManager:
         # otherwise an honest empty list (live names come from /api/v1/teams).
         await websocket.send_json({"type": "standings", "data": _live_teams()})
         await websocket.send_json({"type": "kill_feed_init", "data": list(MATCH_STATE["kill_feed"])[-100:]})
-        await websocket.send_json({"type": "director_state", "data": MATCH_STATE["director_state"]})
+        # Phase 36 (L-4): the initial director_state is a placeholder,
+        # not a measured decision. DEMO_MODE on → the C6 demo-marked
+        # frame; off → the literal as-is, which now carries
+        # "source": "placeholder" inside the payload (see MATCH_STATE).
+        if DEMO_MODE:
+            await websocket.send_json(_demo_frame("director_state", MATCH_STATE["director_state"]))
+        else:
+            await websocket.send_json({"type": "director_state", "data": MATCH_STATE["director_state"]})
         # Phase 6: current director output state on connect.
         await websocket.send_json({"type": "director.state", "data": director_service.snapshot()})
         # Phase 10: seed new domain states on connect.
@@ -714,18 +738,56 @@ async def handle_action(data: dict, user: Optional[TokenPayload] = None):
         )
 
     elif action == "revoke_key":
-        # H4 (critical): this handler used to broadcast a freshly invented
-        # "sk_live_…" key and claim success while revoking nothing. API
-        # keys here are a static allowlist (settings.ADMIN_API_KEYS) plus
-        # JWTs — there is no runtime revocation service. Honest error,
-        # and NEVER a fabricated key in any frame.
-        return await _action_error(
+        # Phase 36 (N-4): real persistent revocation. The key to revoke
+        # arrives in the frame as "api_key" (or "key"); its SHA-256
+        # digest is written to the revoked_api_key table AND to the
+        # in-memory registry, so the key is rejected on the next
+        # request and stays revoked across restarts. NEVER a fabricated
+        # key in any frame, and the raw key is never echoed back.
+        # H4 history: this handler used to broadcast a freshly invented
+        # "sk_live_…" key and claim success while revoking nothing.
+        raw_key = data.get("api_key") or data.get("key")
+        if not isinstance(raw_key, str) or not raw_key:
+            return await _action_error(
+                "revoke_key",
+                "No API key supplied: pass the key to revoke as "
+                "'api_key' (or 'key'). Nothing was revoked and no new "
+                "key was issued.",
+            )
+        result = await revoke_api_key_persistent(
+            raw_key,
+            revoked_by=getattr(user, "username", None) or user.user_id,
+            reason=data.get("reason") if isinstance(data.get("reason"), str) else None,
+        )
+        if result["was_configured"]:
+            detail = (
+                "API key revoked: the key is rejected on the next "
+                "request and stays revoked across restarts "
+                "(digest recorded in the database)."
+                if result["persisted"]
+                else "API key revoked for this running process only: "
+                "the database write failed, so the revocation will "
+                "NOT survive a restart. Remove the key from "
+                "ADMIN_API_KEYS for permanent revocation."
+            )
+        else:
+            detail = (
+                "Key digest recorded as revoked, but the key was not "
+                "in the configured ADMIN_API_KEYS allowlist, so it "
+                "was not an active key."
+                if result["persisted"]
+                else "Key digest recorded in-memory only (database "
+                "write failed) and the key was not in the configured "
+                "ADMIN_API_KEYS allowlist."
+            )
+        return await _action_ack(
             "revoke_key",
-            "API keys cannot be revoked at runtime on this server: keys "
-            "are the static ADMIN_API_KEYS allowlist (and JWTs expire on "
-            "their own). Remove the key from ADMIN_API_KEYS and restart "
-            "the server to revoke it. No key was revoked and no new key "
-            "was issued.",
+            "success",
+            revoked=True,
+            was_configured=result["was_configured"],
+            persisted=result["persisted"],
+            already_revoked=result["already_revoked"],
+            message=detail,
         )
 
     elif action == "stop_training":
@@ -1239,7 +1301,12 @@ async def _authenticate_db_user(username: str, password: str) -> Optional[User]:
             user.locked_until = None
             return user
     except Exception as e:
-        logger.warning(f"DB credential check unavailable, skipping: {e}")
+        # Phase 36 (N-1): scrub — a DB driver error can embed the
+        # DATABASE_URL (username + password) in its message.
+        logger.warning(
+            f"DB credential check unavailable, skipping: "
+            f"{scrub_db_error_text(e, secrets=[settings.DATABASE_URL])}"
+        )
         return None
 
 
@@ -1268,7 +1335,12 @@ async def _is_deactivated_db_user(username: str) -> bool:
             user = (await db.execute(stmt)).scalars().first()
             return user is not None and not user.is_active
     except Exception as e:
-        logger.warning(f"Deactivation check unavailable, skipping: {e}")
+        # Phase 36 (N-1): scrub — a DB driver error can embed the
+        # DATABASE_URL (username + password) in its message.
+        logger.warning(
+            f"Deactivation check unavailable, skipping: "
+            f"{scrub_db_error_text(e, secrets=[settings.DATABASE_URL])}"
+        )
         return False
 
 
@@ -1360,6 +1432,26 @@ async def lifespan(app: FastAPI):
     # database must abort startup; wrapping this in try/warn (the old
     # code) is exactly the silent in-memory boot this fix removes.
     await _init_database_or_fail_fast()
+
+    # Phase 36 (N-4): seed the API-key revocation cache from the DB so
+    # keys revoked before the last restart stay revoked. Failure-isolated
+    # by design (seed logs and returns 0 when the DB/table is missing):
+    # startup never blocks on this, and a failed seed only means
+    # pre-restart revocations are not enforced until the DB is back and
+    # the process restarts (or the cache is re-seeded).
+    try:
+        _revoked_seeded = await seed_revoked_api_key_cache()
+        logger.info(
+            f"Revoked API-key cache seeded: {_revoked_seeded} digest(s) from DB"
+        )
+    except Exception as e:
+        # Phase 36 QA fix: scrub — a DB driver message can echo the
+        # connection URL (and its password) verbatim; the raw
+        # exception must never reach the log.
+        logger.warning(
+            "Revoked API-key cache seed failed (continuing): "
+            f"{scrub_db_error_text(e, secrets=[settings.DATABASE_URL])}"
+        )
 
     # Phase 6: fan director.state changes out over /ws/live, and seed the
     # first admin user when ADMIN_EMAIL/ADMIN_PASSWORD are configured.
@@ -2493,6 +2585,72 @@ async def get_admin_system(_user: TokenPayload = Depends(require_admin)):
     # C6: same honest payload as /api/v1/system/status — the fabricated
     # health block appears only in DEMO_MODE, marked "source": "demo".
     return JSONResponse(_system_status_payload())
+
+
+@app.post("/api/v1/admin/api-keys/revoke")
+async def revoke_admin_api_key(request: Request, _user: TokenPayload = Depends(require_admin)):
+    """Operator-only static API-key revocation (Phase 36, N-4).
+
+    Body: {"api_key": "<raw key to revoke>", "reason": "<optional>"}.
+    The key's SHA-256 digest is written to the ``revoked_api_key``
+    table AND to the in-memory registry, so the key is rejected on
+    the next request and stays revoked across restarts (the startup
+    lifespan re-seeds the registry from the table). The raw key is
+    never stored, logged, or echoed back. ``persisted: false`` in
+    the response means the DB write failed and the revocation is
+    in-memory only for this process lifetime — the operator must
+    still remove the key from ADMIN_API_KEYS (and fix the DB) or it
+    resurrects on restart. Revoking never affects other keys or JWT
+    auth. There is no un-revoke endpoint by design.
+    """
+    try:
+        data = await request.json()
+    except Exception:
+        data = {}
+    if not isinstance(data, dict):
+        data = {}
+    raw_key = data.get("api_key") or data.get("key")
+    if not isinstance(raw_key, str) or not raw_key:
+        return JSONResponse(
+            {
+                "status": "error",
+                "message": (
+                    "No API key supplied: pass the key to revoke as "
+                    "'api_key' (or 'key'). Nothing was revoked."
+                ),
+            },
+            status_code=400,
+        )
+    result = await revoke_api_key_persistent(
+        raw_key,
+        revoked_by=_user.username or _user.user_id,
+        reason=data.get("reason") if isinstance(data.get("reason"), str) else None,
+    )
+    payload = {
+        "status": "success",
+        "revoked": True,
+        "was_configured": result["was_configured"],
+        "persisted": result["persisted"],
+        "already_revoked": result["already_revoked"],
+    }
+    if result["persisted"]:
+        payload["detail"] = (
+            "API key revoked: rejected on the next request and "
+            "persistent across restarts (digest recorded in the "
+            "database). Removing the key from ADMIN_API_KEYS is still "
+            "recommended so a database reset cannot resurrect it."
+            if result["was_configured"]
+            else "Key digest recorded as revoked, but the key was not "
+            "in the configured ADMIN_API_KEYS allowlist."
+        )
+    else:
+        payload["detail"] = (
+            "API key revoked for this running process only: the "
+            "database write failed, so the revocation will NOT survive "
+            "a restart. Remove the key from ADMIN_API_KEYS for "
+            "permanent revocation."
+        )
+    return JSONResponse(payload)
 
 @app.get("/api/v1/admin/agents")
 @app.get("/api/v1/agents")

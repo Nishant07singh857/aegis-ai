@@ -270,3 +270,24 @@ Koi bhi inme se code me nahi hai.
 - QA gate: independent QA/security reviewer ka verdict is ledger
   se alag report me aayega; QA PASS ke bina Phase 31 complete
   nahi mana jayega.
+
+## 7. Correction addendum — 2026-11-01 (Phase 36, L-1)
+
+Item 4 ki line "7s/8s clamp-up hote hain" OVERSTATED thi — purana
+text upar waisa hi rehne diya gaya hai, ye addendum sach batata hai:
+
+- `clamp_map_beat_duration()` (`zone_beat.py:64`) ka **koi
+  production caller nahi hai**. Live path me kabhi koi requested
+  duration aata hi nahi: `decide_zone_beat()` hamesha fixed
+  `MAP_BEAT_DURATION_S = 15.0` deta hai, aur `service.py` ka zone-beat
+  hook wahi value `completes_at` me istemal karta hai. 7s/8s ka
+  clamp-up sirf helper ke unit tests me hota hai, live behaviour me
+  nahi — isliye helper ko live path me "wire" karna sahi nahi hota
+  (wire karne ke liye koi input hi nahi hai).
+- Live 30s cap **asal me** `DirectorService.enforce_scene_holds()`
+  se aata hai (`MAP_CAM_MAX_HOLD_SECONDS = 30.0`,
+  `director_service.py:111,1215`): map_cam 30s se zyada on-air
+  rahe to hard-cut back to `main`. Ye cap har mode me lagta hai.
+- Sahi padhai: zone beat hamesha 15.0s hota hai; 30s cap scene-hold
+  enforcement hai, clamp helper ka kaam nahi. Helper tested utility
+  ke roop me rehta hai (future caller ke liye), live claim nahi.

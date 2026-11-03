@@ -249,20 +249,19 @@ class LullLoop:
 #                          "active_camera": lull["active_camera"],
 #                          "team_id": lull["team_id"]},
 #                 reason=lull["reason"], confidence=0.6,
-#                 created_by="live_director")
+#                 created_by="live_director:lull_loop")
 #             # suggestion None (duplicate/no-op) -> fall through to
 #             # the existing idle return; log the lull tick either way
 #             # via _log_decision with outcome "lull_suggestion" /
 #             # "lull_hold" so the loop is visible in the decision log.
-#         return None  # "none" and "abort" both mean: stay idle here;
-#                      # "abort" additionally means any queued lull
-#                      # suggestion must NOT be approved blindly —
-#                      # propose_suggestion dedup does not retract an
-#                      # already-queued one, so ops should treat a
-#                      # fight starting as superseding it (the normal
-#                      # fight decision path already outranks it).
-#   NOTE on abort semantics, stated honestly: tick-level abort stops
-#   NEW lull suggestions the moment a fight/precombat signal exists.
-#   Retracting an already-queued suggestion is DirectorService's
-#   queue behaviour, not this module's — the hook must not claim the
-#   loop retracts queue entries it did not create.
+#         elif lull["action"] == "abort":
+#             # Phase 36 (L-2): retract this source's queued lull
+#             # suggestion(s) NOW — a fight starting must not leave an
+#             # approvable lull suggestion sitting until the 60s TTL
+#             # prune. DirectorService.retract_suggestions matches on
+#             # the lull-scoped created_by above, so no other source's
+#             # queue entries are swept. Log outcome
+#             # "lull_suggestion_retracted" when anything was
+#             # retracted; "none" and an empty retract both mean: stay
+#             # idle here.
+#         return None  # "none" and "abort" both mean: stay idle here.

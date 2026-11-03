@@ -414,13 +414,19 @@ def _create_all_schema(tmp_path: Path, name: str):
 
 
 class TestMigration017:
+    # NOTE (Phase 36, coordinator integration): the chain head is now
+    # 018_revoked_api_keys (W2, N-4). These tests stamp at 016 and run
+    # `upgrade head`, which now applies 017 AND 018, so the version
+    # assertion is 018. The 017-owned tables are still compared exactly
+    # as before; 018's own table is proven by its own scratch-DB proof
+    # in the W2 revocation suite (stamp-at-017 → upgrade head).
     def test_upgrade_from_016_creates_exact_model_schema(self, tmp_path):
         db_path = tmp_path / "from016.db"
         proc = _run_alembic(db_path, "stamp", "016_pov_pilot")
         assert proc.returncode == 0, proc.stderr[-1000:]
         proc = _run_alembic(db_path, "upgrade", "head")
         assert proc.returncode == 0, proc.stderr[-1000:]
-        assert _version(db_path) == ["017_match_stats_tables"]
+        assert _version(db_path) == ["018_revoked_api_keys"]
 
         migrated = {
             t: _pragma_snapshot(db_path, t)
@@ -445,7 +451,7 @@ class TestMigration017:
         }
         proc = _run_alembic(db_path, "upgrade", "head")
         assert proc.returncode == 0, proc.stderr[-1000:]
-        assert _version(db_path) == ["017_match_stats_tables"]
+        assert _version(db_path) == ["018_revoked_api_keys"]
         after = {
             t: _pragma_snapshot(db_path, t)
             for t in ("match_team_stats", "match_player_stats")
@@ -483,7 +489,7 @@ class TestMigration017:
         assert proc.returncode == 0, proc.stderr[-1000:]
         proc = _run_alembic(db_path, "upgrade", "head")
         assert proc.returncode == 0, proc.stderr[-1000:]
-        assert _version(db_path) == ["017_match_stats_tables"]
+        assert _version(db_path) == ["018_revoked_api_keys"]
         after = {
             t: _pragma_snapshot(db_path, t)
             for t in ("match_team_stats", "match_player_stats")

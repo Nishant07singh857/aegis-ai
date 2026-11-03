@@ -3,9 +3,15 @@
 Ye guide **non-technical** bhasha me batati hai ki kill-feed detection model ko **Kaggle ke free GPU** par kaise train karna hai — account banane se lekar trained model ko AEGIS server me lagane tak.
 
 **Pehle ye samajh lo (2 minute):**
-- Hamara dataset **100,000 frames** ka hai, **10 chunk zips** me aayega (~800MB each: images + labels).
+- Hamara dataset **44,034 frames** ka hai — QA-verified killfeed set,
+  Kaggle par published: `vivekyadav54/aegis-killfeed-dataset` (~1.5 GB;
+  Train 34,435 / Val 8,599 / Test 1,000, test ek bilkul alag VOD se).
+  (Phase 36 correction, 2026-11-01: is doc ka purana "100,000 frames /
+  10 chunk zips" daawa stale tha — dataset pehle hi publish ho chuka
+  hai; neeche Step 2 ka chunk-upload section ab dobara upload ke liye
+  hai, pehli baar ke liye nahi.)
 - Training **Kaggle** par hogi (free GPU: hafte me ~30 ghante, Tesla T4).
-- 3 notebooks hain (`notebooks/` folder me) — neeche bataya hai kaunsa kab chalana hai.
+- 5 notebooks hain (`notebooks/` folder me) — neeche bataya hai kaunsa kab chalana hai.
 - Aakhri me ek `best.onnx` file milegi — wahi AEGIS ke vision pipeline me lagegi.
 
 ---
@@ -24,15 +30,21 @@ Notebook khulne ke baad right side me **Settings** (gear icon) me jao:
 - **Internet** → ON rakho (pip install ke liye zaroori hai).
 - **Persistence** → default rehne do.
 
-**Quota note (paise wali baat nahi, time wali hai):** Kaggle hafte me **~30 ghante free GPU** deta hai — poori tarah free, paise nahi lagte. Ye quota Kaggle → Settings me dikhta hai. 100k images × 50 epochs me **kai ghante** lagenge, isliye training shuru karne se **pehle** bacha hua quota dekh lo.
+**Quota note (paise wali baat nahi, time wali hai):** Kaggle hafte me **~30 ghante free GPU** deta hai — poori tarah free, paise nahi lagte. Ye quota Kaggle → Settings me dikhta hai. 44,034 images × 50 epochs me **kai ghante** lagenge, isliye training shuru karne se **pehle** bacha hua quota dekh lo.
 
 **Session limit (imaandaar note):** Ek GPU session **max ~9-12 ghante** chalta hai (Kaggle ke docs me 12 ghante likha hai, GPU tips page par 9 ghante) — uske baad session apne aap band ho jata hai. Ghabrana nahi: hamare notebooks **checkpoints** save karte rehte hain, to beech me ruki training **wahi se resume** ho jati hai (tarika notebooks me likha hai).
 
 ## Step 2 — Dataset Kaggle par upload karo 📦 (chunk zips)
 
+> **2026-11-01 note:** dataset pehle hi Kaggle par published hai
+> (`vivekyadav54/aegis-killfeed-dataset`) — aam taur par ye step
+> dobara karne ki zaroorat nahi hai. Ye section sirf tab kaam aata
+> hai jab dataset ka naya version upload karna ho (naye frames jodne
+> par). Pehli baar seedha Step 3 se shuru karo (dataset attach karo).
+
 Dataset 10 chunk zips me aayega (`chunk_01.zip` … `chunk_10.zip`, har ek ~800MB). Inhe Kaggle par **Kaggle API** se upload karna sabse aasan hai. Commands **isi order** me chalao (apne computer ke terminal me):
 
-> **Test split note:** Chunks me `train/` aur `val/` ke saath **`test/` folder** bhi hona chahiye (500-1000 clean frames, ek bilkul alag tournament se — training me kabhi use nahi hoga). Notebook isko khud pehchan lega; agar na mile to Hinglish warning dega (fail nahi hoga).
+> **Test split note:** Chunks me `train/` aur `val/` ke saath **`test/` folder** bhi hona chahiye (1,000 clean frames, ek bilkul alag tournament/VOD se — training me kabhi use nahi hoga; asal dataset me test = 1,000 frames, alag VOD). Notebook isko khud pehchan lega; agar na mile to Hinglish warning dega (fail nahi hoga).
 
 ```bash
 # 1. Kaggle API tool install karo
@@ -100,11 +112,13 @@ Kaggle ne datasets ke liye **koi chhota hard size limit publicly document nahi k
 |---|----------|---------|------------|
 | 1 | `train_rfdetr_nano_killfeed.ipynb` | **PRIMARY** model (RF-DETR-Nano, Apache 2.0 license — commercial-safe) | Pehle ye |
 | 2 | `train_yolo26_nano_killfeed.ipynb` | **ALTERNATIVE** (YOLO26-nano, CPU-friendly; iska ONNX seedha lagta hai) | Uske baad |
-| 3 | `qwen3_vl_director.ipynb` | **OPTIONAL/advanced** — director reasoning (vision-language model) | Sirf agar chaho |
+| 3 | `kaggle_train_rfdetr_best.ipynb` | RF-DETR "best" variant — Kaggle session ke liye parallel copy | Primary ke saath/alternative |
+| 4 | `kaggle_train_yolo26_best.ipynb` | YOLO26 "best" variant — Kaggle session ke liye parallel copy | Alternative ke saath |
+| 5 | `qwen3_vl_director.ipynb` | **OPTIONAL/advanced** — director reasoning (vision-language model) | Sirf agar chaho |
 
 Har notebook me upar se neeche tak **Run** dabate jao. Pehle cell me `!pip install` hai (~2-4 min), phir GPU check, phir chunk unzip (~10-15 min, 8GB hai), phir training.
 
-**Training time (imaandaar note):** 100,000 images × 50 epochs T4 par **kai ghante** lagenge — exact time pehle se nahi bataya ja sakta; Run ke baad jo ETA dikhe use dekho. Session 9-12 ghante me band ho jata hai — **checkpoints** `/kaggle/working/` me safe rehte hain:
+**Training time (imaandaar note):** 44,034 images × 50 epochs T4 par **kai ghante** lagenge — exact time pehle se nahi bataya ja sakta; Run ke baad jo ETA dikhe use dekho. Session 9-12 ghante me band ho jata hai — **checkpoints** `/kaggle/working/` me safe rehte hain:
 - RF-DETR: `/kaggle/working/rfdetr_output/` me `.pth` → resume ke liye training cell ki `resume=` wali line uncomment karo.
 - YOLO: `/kaggle/working/runs/aegis_killfeed/weights/last.pt` → resume ke liye `resume=True` lagao.
 - Time kam ho to `epochs=50` ko 25-30 kar sakte ho — **default 50 hi rakha hai**.
@@ -115,7 +129,7 @@ Training + evaluation + export ke baad `/kaggle/working/best.onnx` ban jayegi. N
 
 **Kaunsa best.onnx rakhu?** Dono notebooks chalane ke baad results compare karo (precision/recall/mAP) — jo behtar ho, wahi final. Ek practical farak yaad rakho:
 - **YOLO wala ONNX** seedha AEGIS ke `VISION_MODEL_PATH` me lagta hai — koi extra kaam nahi.
-- **RF-DETR wala ONNX** raw object queries deta hai (har query ke liye box + class scores) — is par threshold + box scaling ka **chhota post-processing wrapper** backend me chahiye hoga. (Agar ye wrapper abhi nahi bana hai to YOLO wala istemal karo.)
+- **RF-DETR wala ONNX** raw object queries deta hai (har query ke liye box + class scores) — iska post-processing wrapper backend me **ban chuka hai** (`backend/app/ml/trained_detector.py`, `_decode_rfdetr`, Phase 33), par **gated** hai: registry abhi bhi `yolov8` par hai; RF-DETR flip sirf tab jab asli `best.onnx` ka smoke test pass ho (input `(1,3,384,384)`, outputs `dets (1,Q,4)` / `labels (1,Q,3)`) — details `docs/PHASE33_FINAL_LEDGER.md` §4 me.
 
 ## Step 6 — AEGIS server me lagao 🔧
 
@@ -133,7 +147,7 @@ Matlab: `VISION_MODEL_PATH` set nahi hai ya file missing hai to system **purane 
 ## Accuracy expectations (bina jhoothe vaade) 📊
 
 - **Koi accuracy number pehle se promise nahi kiya ja sakta** — asli precision/recall/mAP training ke baad evaluation cell me dikhega, wahi sach hai.
-- Itna keh sakte hain: **100,000 frames kaafi bada dataset** hai, aur kill-feed **single class + screen par lagbhag fixed jagah** par aata hai — ye aasan detection tasks me gina jata hai.
+- Itna keh sakte hain: **44,034 frames kaafi bada dataset** hai, aur kill-feed **single class + screen par lagbhag fixed jagah** par aata hai — ye aasan detection tasks me gina jata hai.
 - **Seedha niyam:** Data zyada + alag-alag tarah ke frames (alag maps, alag kill-feed styles, din/raat) = behtar model. Galat detections dikhen to waise frames dataset me jodho aur dobara train karo (dataset me `kaggle datasets version -m "..."` se naya version jodho).
 
 ## 95%+ ka rasta (bina jhoothe vaade) 🛤️
@@ -160,8 +174,8 @@ Matlab: `VISION_MODEL_PATH` set nahi hai ya file missing hai to system **purane 
 | `No space left on device` | Disk bhar gaya | `/kaggle/working` me purani/bekaar files delete karo |
 | `pip install` ke baad import error | Kernel purana env pakde hai | **Kernel → Restart** karke cells dobara chalao |
 | `kaggle.json` permission error | Token file galat jagah/mode | `~/.kaggle/kaggle.json` + `chmod 600` dobara karo |
-| ONNX export fail (RF-DETR) | export extra missing | Cell 1 me `"rfdetr[onnxexport]"` install hua? Check karo |
+| ONNX export fail (RF-DETR) | export extra missing | `rfdetr[onnxexport]` **koi real extra nahi hai** (rfdetr 1.11.2) — Cell 1 me `!pip install "rfdetr[train,loggers]"` chalao, phir Cell 5 dobara chalao (kernel restart ki zaroorat nahi — dataset already prepared hai). |
 
 ---
 
-*Related: `notebooks/README.md` (notebook list), `notebooks/train_rfdetr_nano_killfeed.ipynb`, `notebooks/train_yolo26_nano_killfeed.ipynb`, `notebooks/qwen3_vl_director.ipynb`.*
+*Related: `notebooks/README.md` (notebook list), `notebooks/train_rfdetr_nano_killfeed.ipynb`, `notebooks/train_yolo26_nano_killfeed.ipynb`, `notebooks/kaggle_train_rfdetr_best.ipynb`, `notebooks/kaggle_train_yolo26_best.ipynb`, `notebooks/qwen3_vl_director.ipynb`.*

@@ -540,6 +540,39 @@ class TrainedDetector:
         except Exception:
             return []
 
+    def _match_rfdetr_pair_by_shape(
+        self, outputs: List[np.ndarray]
+    ) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
+        """Shape fallback for a name-less rfdetr graph (Phase 36, L-8).
+
+        Returns the (dets, labels) pair ONLY when exactly one ordered
+        pair of outputs is jointly consistent: dets (B,Q,4), labels
+        (B,Q,C'+1) with the same B and Q, where C' is the configured
+        class count (the +1 is the background slot). Zero pairs or
+        more than one pair -> (None, None) and the caller raises
+        instead of guessing. The ambiguity case is real: with 3
+        classes, labels are (B,Q,4) too, so shape alone cannot tell
+        dets from labels — a named graph is required there.
+        """
+        num_classes = len(self.config.classes)
+        arrays = [np.asarray(o) for o in outputs]
+        pairs: List[Tuple[int, int]] = []
+        for i, d in enumerate(arrays):
+            if d.ndim != 3 or d.shape[-1] != 4:
+                continue
+            for j, lab in enumerate(arrays):
+                if j == i or lab.ndim != 3:
+                    continue
+                if lab.shape[-1] != num_classes + 1:
+                    continue
+                if lab.shape[0] != d.shape[0] or lab.shape[1] != d.shape[1]:
+                    continue
+                pairs.append((i, j))
+        if len(pairs) != 1:
+            return None, None
+        i, j = pairs[0]
+        return outputs[i], outputs[j]
+
     def _decode_rfdetr(self, outputs: List[np.ndarray]) -> np.ndarray:
         """Decode an RF-DETR export → (N, 6) xyxy+conf+class_id, model-input pixels.
 
@@ -548,10 +581,16 @@ class TrainedDetector:
         export layout). Mirrors rfdetr's PostProcess._select_topk: per-class
         sigmoid, drop bg, global ranking over Q*C' query/class pairs — a
         per-query argmax would drop extra classes a query scores on.
-        Output tensors are matched by name ("dets"/"labels") with a
-        shape-based fallback ((*,*,4) = dets). No thresholding here:
-        the shared path in _decode_outputs applies conf_threshold,
-        NMS, the max_detections cap and the letterbox-undo.
+        Output tensors are matched by EXACT name ("dets"/"labels",
+        case-insensitive) with a shape-based fallback that only fires
+        when exactly one (dets, labels) pair is jointly consistent
+        (dets (B,Q,4), labels (B,Q,C'+1) with the same B/Q — the +1 is
+        the background slot). Substring matching ("det" in name) and
+        the old shape fallback (any (*,*,4) = dets, any other 3-D
+        array = labels) were removed in Phase 36 (L-8): both could
+        silently swap the tensors — e.g. a 3-class model makes labels
+        (B,Q,4), indistinguishable from dets by shape alone. When the
+        pair is ambiguous or absent, decode raises instead of guessing.
 
         NOTE on the draft (drafts/aegis-rfdetr-decode-patch.md §1e):
         ranking uses a full descending argsort instead of the draft's
@@ -565,18 +604,17 @@ class TrainedDetector:
         names = self._session_output_names()
         dets = labels = None
         for out, name in zip(outputs, names):
-            n = (name or "").lower()
-            if "det" in n and dets is None:
+            # Phase 36 (L-8): EXACT name match only. The old substring
+            # test ("det" in name / "label" in name) would accept
+            # "detections", "label_scores" or any other near-miss and
+            # silently decode the wrong tensor as dets/labels.
+            n = (name or "").strip().lower()
+            if n == "dets" and dets is None:
                 dets = out
-            elif "label" in n and labels is None:
+            elif n == "labels" and labels is None:
                 labels = out
-        if dets is None or labels is None:  # name-less graph: match by shape
-            for out in outputs:
-                arr = np.asarray(out)
-                if arr.ndim == 3 and arr.shape[-1] == 4 and dets is None:
-                    dets = out
-                elif arr.ndim == 3 and labels is None:
-                    labels = out
+        if dets is None or labels is None:  # name-less graph: shape pair
+            dets, labels = self._match_rfdetr_pair_by_shape(outputs)
         if dets is None or labels is None:
             raise ValueError(
                 "rfdetr decode needs dets (B,Q,4) + labels (B,Q,C); got "
