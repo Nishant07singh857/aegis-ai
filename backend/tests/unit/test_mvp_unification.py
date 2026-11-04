@@ -17,50 +17,29 @@ Coverage:
   summary reports ``total_damage: null``.
 
 No network, no real DB, no secrets. Importing ``app.main`` needs the
-same fpdf stub as ``test_demo_mode_gating`` (optional PDF dependency).
+same teardown-guarded fpdf stub context as ``test_demo_mode_gating``
+(optional PDF dependency): the stub from the Phase 33 DB-boot suite
+(``_fpdf_stub_if_absent``) lives only around the two in-test imports
+below and is removed afterwards, so this file installs NO import-time
+stub of its own.
 """
 
 from __future__ import annotations
 
-import sys
-import types
-from enum import Enum
 from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 
-# --- fpdf stub (see module docstring) --------------------------------------
-_fpdf_stub = types.ModuleType("fpdf")
-_fpdf_stub.__path__ = []
-
-
-class _FPDF:
-    def __init__(self, *args, **kwargs):
-        pass
-
-
-class _MethodReturnValue(Enum):
-    NONE = 0
-
-
-class _XPos(Enum):
-    LEFT = 0
-    RIGHT = 1
-    LMARGIN = 2
-
-
-class _YPos(Enum):
-    TOP = 0
-    NEXT = 1
-
-
-_fpdf_stub.FPDF = _FPDF
-_enums_stub = types.ModuleType("fpdf.enums")
-_enums_stub.MethodReturnValue = _MethodReturnValue
-_enums_stub.XPos = _XPos
-_enums_stub.YPos = _YPos
-sys.modules.setdefault("fpdf", _fpdf_stub)
-sys.modules.setdefault("fpdf.enums", _enums_stub)
+# --- fpdf stub: REUSED from the Phase 33 DB-boot suite --------------------
+# app.main is imported INSIDE the two TestDemoEndpointsHonesty tests
+# below (the module-level import is only mvp_calculator, which needs
+# no stub). Each in-test import runs under the teardown-guarded stub
+# context from the Phase 33 DB-boot suite: on exit sys.modules is
+# restored exactly and stub-bound app.main / app.dossiers.* modules
+# are evicted, so this file installs NO import-time stub of its own
+# (the old sys.modules.setdefault stub was the import-time leak
+# behind the dossier-PDF order-dependence).
+from test_phase33_db_boot_fail_fast import _fpdf_stub_if_absent  # noqa: E402
 
 from app.agents.analytics_agents.mvp_calculator import (  # noqa: E402
     compute_mvp_score,
@@ -202,7 +181,8 @@ class TestDemoEndpointsHonesty:
     async def test_demo_mvp_uses_canonical_formula_and_null_damage(self):
         import json
 
-        import app.main as main_module
+        with _fpdf_stub_if_absent():
+            import app.main as main_module
 
         with patch.object(main_module, "DEMO_MODE", True):
             resp = await main_module.get_mvp()
@@ -219,7 +199,8 @@ class TestDemoEndpointsHonesty:
     async def test_demo_summary_damage_is_null_not_estimate(self):
         import json
 
-        import app.main as main_module
+        with _fpdf_stub_if_absent():
+            import app.main as main_module
 
         with patch.object(main_module, "DEMO_MODE", True):
             resp = await main_module.get_analytics_summary()

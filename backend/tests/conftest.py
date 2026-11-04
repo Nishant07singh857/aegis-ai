@@ -72,16 +72,15 @@ async def db_session():
     Nothing written here can leak into another test, or into the
     shared ``./test.db``.
 
-    Scope limit, stated honestly: this isolates only tests that USE
-    this fixture (only the Phase 35 W5 proof tests do so far). It does NOT rebind the production
-    module-global engine / ``AsyncSessionLocal`` in
-    ``app.db.base``, so tests that reach the DB through the app
-    lifespan / ``TestClient`` / ``get_db`` still share ``./test.db``.
-    Suite-wide per-test isolation would require rebinding those
-    globals per test plus per-test create_all/dispose, which is
-    not attempted here: too invasive for this pass, and it would
-    disturb the many tests that monkeypatch
-    ``deps.AsyncSessionLocal``. That gap remains open.
+    Scope note: this fixture isolates only tests that USE it
+    (only the Phase 35 W5 proof tests do so far). It does NOT
+    rebind the production module-global engine /
+    ``AsyncSessionLocal`` in ``app.db.base`` — but that gap is
+    now closed suite-wide by the Phase 37 W3 autouse fixture
+    below (``_isolated_db_per_test``), which rebinds the 5
+    production names for EVERY test, so no test reaches the
+    shared ``./test.db`` any more. This fixture remains as the
+    explicit per-test session for tests that request it.
     """
     from sqlalchemy import JSON
     from sqlalchemy.dialects import postgresql
@@ -122,6 +121,194 @@ async def db_session():
         yield session
         await session.rollback()
     await engine.dispose()
+
+
+# ── Phase 37 W3: suite-wide per-test DB isolation ─────────────────
+# Rebinds the module-global engine / AsyncSessionLocal for EVERY test
+# (autouse), closing the gap the db_session docstring above discloses.
+#
+# DESIGN (verified by grep at implementation time, not assumed):
+# * The production rebind set is exactly 5 names in 3 modules:
+#   ``app.db.base.engine``, ``app.db.base.AsyncSessionLocal``,
+#   ``app.db.session.engine``, ``app.db.session.AsyncSessionLocal``
+#   (by-value re-exports of base), ``app.api.deps.AsyncSessionLocal``
+#   (``deps.py:128`` by-value import). ``app.db.__init__`` re-exports
+#   the same names but has no engine/AsyncSessionLocal consumer, so it
+#   is not rebound. Every other production consumer resolves the
+#   factory lazily — function-local ``from app.db.base import
+#   AsyncSessionLocal`` (director_learning journal/queries/knobs/
+#   labeler/engine, observer_pilot pov_journal/roster, live_stats)
+#   or ``from app.db.session import AsyncSessionLocal``
+#   (vision_intelligence service, live_director build function,
+#   event_bus, main lifespan helper) — so a setattr on the owning
+#   module redirects them at call time. ``base.get_db`` /
+#   ``get_db_context`` / ``init_db`` / ``close_db`` / ``check_db_health``
+#   read the base-module globals ``engine`` / ``AsyncSessionLocal`` at
+#   call time, so they follow the rebind too; the 13 routers that
+#   ``from app.db.session import get_db`` bind the FUNCTION object,
+#   not the engine, and need no change. Zero module-level by-value
+#   captures of the factory exist in production (both
+#   ``DbSlotResolver(AsyncSessionLocal)`` sites sit inside builder
+#   FUNCTIONS). The sessionmaker is bound to its engine at creation,
+#   so rebinding ``engine`` alone would be a lie — both names are
+#   swapped together, atomically per test, via ``monkeypatch``.
+# * Per-test DB is a FILE (``tmp_path/isolated.db``), never ``:memory:``:
+#   sync ``TestClient`` tests run the lifespan in the portal thread's
+#   own event loop, and a StaticPool ``:memory:`` connection created
+#   in one loop cannot be used from another. A file DB with
+#   ``NullPool`` (the Phase 27 Stack precedent: every checkout opens
+#   a fresh connection in the CALLING loop, nothing is pooled across
+#   loops) is loop-safe in both directions. ``asyncio.run`` is used
+#   for create_all/dispose from this SYNC fixture, so it serves sync
+#   and async tests alike (an async autouse fixture cannot serve sync
+#   tests); the same ``asyncio.run`` + NullPool pattern is already
+#   proven in-tree by the Phase 27 Stack and the Phase 32/35-W2/36-W2
+#   fixtures. ``_register_engine_listeners`` is applied for parity
+#   with ``base.create_engine()`` (log-only listeners).
+# * ORDERING: pytest runs autouse fixtures before explicitly requested
+#   ones at the same scope (verified by probe), so tests that
+#   monkeypatch ``deps``/``base`` ``AsyncSessionLocal`` themselves
+#   (vision_intelligence, integrity_credentials_auth,
+#   phase32_ws_dossier_auth incl. its manual save/restore,
+#   phase36_w1/w2) override the per-test factory and ``monkeypatch``
+#   teardown restores it afterwards; tests that build their OWN
+#   engines (Phase 27 learning, repositories, users, ...) are
+#   untouched and already isolated. Lifespan rebuilds its singletons
+#   (live director, vision intelligence, monitor) per ``TestClient``
+#   context, capturing the then-current factory; shutdown never calls
+#   ``close_db`` (verified), so this fixture's dispose is the only
+#   one — no double-dispose.
+# * COST (measured, not estimated): with ``PRAGMA synchronous=OFF``
+#   on the test engine only (Phase 37 W3-fix), fixture setup is
+#   ~0.15 s per test (25 tests in 8.23 s). WITHOUT the pragma the
+#   same file took 148.82 s with setups of 6.02–7.16 s: every DDL
+#   statement fsyncs (~85 ms each) on this VM's home disk. The
+#   earlier "0.12–0.21 s" claim was measured on a path where the
+#   fsync cost did not apply and is FALSE for this fixture — do
+#   not repeat it. No template copy, deliberately: per-test
+#   create_all reads the LIVE metadata, so a test that mutates
+#   ``Base.metadata`` at runtime cannot go stale against a
+#   session-start snapshot.
+# * WHAT IT DOES NOT DO: it does not isolate the nested-subprocess
+#   pytest runs (Phase 35 W5 / Phase 36 W3 proof tests) — those are
+#   separate interpreters with their own conftest load, each test
+#   inside them still gets its own isolated DB the same way. It does
+#   not touch ``./test.db`` at all: the shared engine still exists
+#   (created at import) but nothing under test can reach it any
+#   more, since every path goes through one of the 5 rebound names.
+#   NO test file was edited for the rebind itself (conftest-only
+#   mechanism); the ONE test file edited for this work is
+#   ``tests/integration/test_api/test_tournament_endpoints.py``,
+#   whose 3 tests asserted the OLD premise (reads 503 because the
+#   shared ./test.db was never initialised) — they now assert the
+#   live-DB contract (200/404) plus an explicit dead-DB 503 test.
+#   No test file installs an import-time fpdf stub any more
+#   (verified by grep at implementation time: zero column-0
+#   ``sys.modules.setdefault("fpdf", ...)`` sites remain), so the
+#   Phase 37 W5-ownership constraint on stub files is vacuous here.
+#   If this fixture is ever removed, the suite silently returns to
+#   sharing ``./test.db`` — that is why the docstring states the
+#   mechanism instead of hiding it.
+@pytest.fixture(autouse=True)
+def _isolated_db_per_test(tmp_path, monkeypatch):
+    """Rebind the DB globals to a fresh per-test file DB.
+
+    Setup: build a ``NullPool`` file engine on
+    ``tmp_path/isolated.db``, ``create_all`` the 32-table metadata,
+    rebind the 5 names listed above. Teardown: dispose the engine;
+    ``monkeypatch`` restores the shared ``./test.db`` globals.
+    Note: the 32 tables are ``app.db.base.Base`` metadata only — ``drop_events``/``zone_phases`` (``app.analysis.models``) are NOT created, 2 fewer than the inventory's 34 tables; no test needs them through the fixture.
+    """
+    import asyncio
+
+    from sqlalchemy import JSON
+    from sqlalchemy import event as sa_event
+    from sqlalchemy.dialects import postgresql
+    from sqlalchemy.ext.asyncio import (
+        AsyncSession,
+        async_sessionmaker,
+        create_async_engine,
+    )
+    from sqlalchemy.pool import NullPool
+
+    from app.api import deps as deps_module
+    from app.db import base as base_module
+    from app.db import session as session_module
+
+    # JSONB has no SQLite DDL rendering — swap it for generic JSON.
+    # Same idempotent pattern as the db_session fixture above and
+    # test_repositories.py / test_users.py; production models untouched.
+    for table in base_module.Base.metadata.tables.values():
+        for column in table.columns:
+            if isinstance(column.type, postgresql.JSONB):
+                column.type = JSON()
+
+    db_path = tmp_path / "isolated.db"
+    engine = create_async_engine(
+        f"sqlite+aiosqlite:///{db_path}",
+        poolclass=NullPool,
+    )
+    base_module._register_engine_listeners(engine)
+
+    # TEST-ONLY fsync fix (Phase 37 W3-fix): every DDL statement on
+    # this file DB fsyncs (~85 ms each on this VM's home disk), so
+    # create_all over the 32-table metadata cost ~6 s per test
+    # (measured: 25 tests in 148.82 s, setups 6.02–7.16 s).
+    # PRAGMA synchronous=OFF drops create_all to ~0.14 s (measured
+    # by probe: plain 6.003 s -> synchronous=OFF 0.137 s). The
+    # per-test DBs are throwaway files deleted after each test, so
+    # durability on OS crash is irrelevant and data visibility
+    # within a test is identical. Applied to the TEST engine only —
+    # never to production engines (app/db/base.py untouched).
+    @sa_event.listens_for(engine.sync_engine, "connect")
+    def _disable_sync_for_test_db(dbapi_connection, connection_record):
+        cursor = dbapi_connection.cursor()
+        cursor.execute("PRAGMA synchronous=OFF")
+        cursor.close()
+
+    async def _create_all():
+        async with engine.begin() as conn:
+            await conn.run_sync(base_module.Base.metadata.create_all)
+
+    try:
+        asyncio.run(_create_all())
+    except Exception:
+        # Setup failed (e.g. /tmp full): the file may already exist
+        # as a 0-byte stub — remove it so a failed setup never
+        # leaves debris behind, then propagate the real error.
+        try:
+            asyncio.run(engine.dispose())
+        except Exception:
+            pass
+        try:
+            db_path.unlink()
+        except FileNotFoundError:
+            pass
+        raise
+    maker = async_sessionmaker(
+        engine,
+        class_=AsyncSession,
+        expire_on_commit=False,
+        autocommit=False,
+        autoflush=False,
+    )
+    monkeypatch.setattr(base_module, "engine", engine)
+    monkeypatch.setattr(base_module, "AsyncSessionLocal", maker)
+    monkeypatch.setattr(session_module, "engine", engine)
+    monkeypatch.setattr(session_module, "AsyncSessionLocal", maker)
+    monkeypatch.setattr(deps_module, "AsyncSessionLocal", maker)
+    yield
+    asyncio.run(engine.dispose())
+    # /tmp is a 512 MB tmpfs: a 32-table sqlite file is ~370 KB, so
+    # keeping one per test would exhaust it over a full-suite run
+    # (measured: 1320 files / 489 MB before this unlink existed).
+    # The file is useless after the test — remove it so live /tmp
+    # usage stays at ~1 DB. The empty tmp_path dir itself is left
+    # for pytest's own numbered-dir retention to reap.
+    try:
+        db_path.unlink()
+    except FileNotFoundError:
+        pass
 
 
 @pytest_asyncio.fixture

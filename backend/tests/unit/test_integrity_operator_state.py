@@ -11,56 +11,54 @@ Contract under test (shared with the frontend worker):
     actually happened; otherwise "status": "error" + a reason.
   * revoke_key NEVER broadcasts a fabricated "sk_live_…" key.
 
-No network, no DB writes, no secrets. app.main is imported with the
-same minimal fpdf stub as the other main-importing suites (fpdf2 is
-not installed in this environment and PDF generation is not exercised).
+No network, no DB writes, no secrets. app.main is imported under the
+teardown-guarded fpdf stub context from the Phase 33 DB-boot suite
+(``_fpdf_stub_if_absent``): the stub lives only for the duration of
+the import and is removed afterwards, so this file installs NO
+import-time stub of its own (fpdf2 is not installed in this
+environment and PDF generation is not exercised).
 """
 
 from __future__ import annotations
 
 import json
-import sys
 import types
 from contextlib import asynccontextmanager
-from enum import Enum
 from unittest.mock import AsyncMock, patch
 
 import pytest
 
-# --- fpdf stub (see module docstring) --------------------------------------
-_fpdf_stub = types.ModuleType("fpdf")
-_fpdf_stub.__path__ = []
+# --- fpdf stub: REUSED from the Phase 33 DB-boot suite --------------------
+# app.main pulls in the dossiers router, which imports fpdf2. fpdf2 is
+# not installed in this environment and PDF generation is not exercised
+# here, so app.main is imported under the teardown-guarded stub
+# context from the Phase 33 DB-boot suite: on exit sys.modules is
+# restored exactly and stub-bound app.main / app.dossiers.* modules
+# are evicted, so this file installs NO import-time stub of its own
+# (the old sys.modules.setdefault stub was the import-time leak
+# behind the dossier-PDF order-dependence). The import happens ONCE
+# at module level because the whole file exercises app.main; the
+# skip is ImportError-only — any other import failure propagates
+# and fails loudly.
+from test_phase33_db_boot_fail_fast import _fpdf_stub_if_absent  # noqa: E402
 
 
-class _FPDF:
-    def __init__(self, *args, **kwargs):
-        pass
+def _load_main_module():
+    """Import app.main under the teardown-guarded fpdf stub.
+
+    Skip ONLY on a missing-module import failure. Every other import
+    failure propagates and FAILS loudly: a real setup/configuration
+    error must never be reported as a skip.
+    """
+    with _fpdf_stub_if_absent():
+        try:
+            import app.main as main_module
+        except ImportError as exc:
+            pytest.skip(f"app.main not importable here (missing dependency): {exc}")
+        return main_module
 
 
-class _MethodReturnValue(Enum):
-    NONE = 0
-
-
-class _XPos(Enum):
-    LEFT = 0
-    RIGHT = 1
-    LMARGIN = 2
-
-
-class _YPos(Enum):
-    TOP = 0
-    NEXT = 1
-
-
-_fpdf_stub.FPDF = _FPDF
-_enums_stub = types.ModuleType("fpdf.enums")
-_enums_stub.MethodReturnValue = _MethodReturnValue
-_enums_stub.XPos = _XPos
-_enums_stub.YPos = _YPos
-sys.modules.setdefault("fpdf", _fpdf_stub)
-sys.modules.setdefault("fpdf.enums", _enums_stub)
-
-import app.main as main_module  # noqa: E402
+main_module = _load_main_module()
 from app.api.deps import ADMIN_PRINCIPAL  # noqa: E402
 
 FABRICATED_FRAME_TYPES = {

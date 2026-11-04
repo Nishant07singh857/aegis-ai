@@ -229,15 +229,18 @@ class IconMatcher:
         production capture resolution differs from 360p).
     """
 
-    # -- margin gate knob (Phase 35 M-1 clamp) -------------------------
+    # -- margin gate knob (Phase 35 M-1 clamp, Phase 37 clamp-on-read) --
     # Stored clamped to [0.15, 1.0] on EVERY assignment — construction
     # and later mutation alike — so ``match_candidates``' abstention
     # flag and ``gated_weapon`` can never disagree about the gate.
-    # Reading before any assignment (e.g. an ``__new__`` stub) falls
-    # back to the floor rather than raising: fail-closed.
+    # The getter ALSO clamps on read: a direct write to the private
+    # ``_margin_threshold`` (bypassing the setter) is returned clamped
+    # too, never verbatim. Reading before any assignment (e.g. an
+    # ``__new__`` stub) falls back to the floor rather than raising:
+    # fail-closed.
     @property
     def margin_threshold(self) -> float:
-        return float(getattr(self, "_margin_threshold", MARGIN_THRESHOLD))
+        return clamp_margin_threshold(getattr(self, "_margin_threshold", MARGIN_THRESHOLD))
 
     @margin_threshold.setter
     def margin_threshold(self, value: float) -> None:

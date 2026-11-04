@@ -181,6 +181,10 @@ def _candidate_score(raw: Any) -> Optional[int]:
     upper bound is asserted — the live publisher sends
     int(intensity) — the queue's bounded policy orders by the score
     it is given.
+
+    Sub-1.0 positive scores truncate to 0 and queue at lowest
+    priority; only the live publisher's int scores are expected — a
+    foreign fractional score is not treated as scoreless.
     """
     if raw is None or isinstance(raw, bool):
         return None

@@ -27,70 +27,49 @@ bytes; the 401/403 gates run before any handler body either way).
 from __future__ import annotations
 
 import asyncio
-import sys
-import types
+import importlib
 import uuid
-from enum import Enum
 
 import pytest
 from sqlalchemy import JSON
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-# --- fpdf stub (same pattern as test_live_events.py) -------------------
+# --- fpdf stub: REUSED from the Phase 33 DB-boot suite --------------------
 # app.main pulls in the dossiers router, which imports fpdf2. fpdf2 is not
 # installed in this test environment and PDF generation is not exercised
-# here, so a minimal stub is installed before importing app.main. This
-# stubs an optional dependency, not product behaviour.
-_fpdf_stub = types.ModuleType("fpdf")
-_fpdf_stub.__path__ = []
-
-
-class _FPDF:
-    def __init__(self, *args, **kwargs):
-        pass
-
-
-class _MethodReturnValue(Enum):
-    NONE = 0
-
-
-class _XPos(Enum):
-    LEFT = 0
-    RIGHT = 1
-    LMARGIN = 2
-
-
-class _YPos(Enum):
-    TOP = 0
-    NEXT = 1
-
-
-_fpdf_stub.FPDF = _FPDF
-_enums_stub = types.ModuleType("fpdf.enums")
-_enums_stub.MethodReturnValue = _MethodReturnValue
-_enums_stub.XPos = _XPos
-_enums_stub.YPos = _YPos
-sys.modules.setdefault("fpdf", _fpdf_stub)
-sys.modules.setdefault("fpdf.enums", _enums_stub)
+# here, so the app.* imports below run under the teardown-guarded stub
+# context from the Phase 33 DB-boot suite: on exit sys.modules is
+# restored exactly and stub-bound app.main / app.dossiers.* modules
+# are evicted, so this file installs NO import-time stub of its own
+# (the old sys.modules.setdefault stub was the import-time leak
+# behind the dossier-PDF order-dependence). The skip is ImportError-only
+# — any other import failure propagates and fails loudly.
+from test_phase33_db_boot_fail_fast import _fpdf_stub_if_absent  # noqa: E402
 
 from fastapi.testclient import TestClient  # noqa: E402
 
-from app.api import deps  # noqa: E402
-from app.api.deps import authenticate_websocket  # noqa: E402
-from app.api.v1.users.service import UserService  # noqa: E402
-from app.core.security import security_manager  # noqa: E402
-from app.db.base import Base  # noqa: E402
-from app.db.models.team import Team  # noqa: E402
-from app.db.models.tournament import Tournament  # noqa: E402
-import importlib  # noqa: E402
+try:
+    with _fpdf_stub_if_absent():
+        from app.api import deps  # noqa: E402
+        from app.api.deps import authenticate_websocket  # noqa: E402
+        from app.api.v1.users.service import UserService  # noqa: E402
+        from app.core.security import security_manager  # noqa: E402
+        from app.db.base import Base  # noqa: E402
+        from app.db.models.team import Team  # noqa: E402
+        from app.db.models.tournament import Tournament  # noqa: E402
 
-# NOTE: app.dossiers.__init__ shadows the submodule attribute
-# (``from .router import router`` binds the APIRouter to the package
-# attribute), so fetch the real module from sys.modules instead.
-dossiers_router = importlib.import_module("app.dossiers.router")  # noqa: E402
-from app.dossiers.schemas import DossierOut, MatchReportData  # noqa: E402
-from app.main import app  # noqa: E402
+        # NOTE: app.dossiers.__init__ shadows the submodule attribute
+        # (``from .router import router`` binds the APIRouter to the package
+        # attribute), so fetch the real module from sys.modules instead.
+        dossiers_router = importlib.import_module("app.dossiers.router")  # noqa: E402
+        from app.dossiers.schemas import DossierOut, MatchReportData  # noqa: E402
+        from app.main import app  # noqa: E402
+except ImportError as exc:
+    pytest.skip(
+        f"app.main / app.dossiers not importable here (missing dependency): {exc}",
+        allow_module_level=True,
+    )
 
 pytestmark = pytest.mark.unit
 

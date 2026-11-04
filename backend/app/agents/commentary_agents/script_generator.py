@@ -402,11 +402,17 @@ Keep it informative but casual. Bridge the silence naturally.
         style = style or self.active_style
         tone = tone or self._determine_tone(trigger, context)
         
-        # Fill template with context
+        # Fill template with context. The kill/fight templates require
+        # {intensity}, but it is a derived director-side value — a real
+        # kill-event context does not carry it. Default it to 50, the
+        # same default the hype-spike handler already uses when it builds
+        # its context, instead of raising KeyError (the method promises
+        # None-on-failure, not an exception, for a bad context).
+        filled_context = {"intensity": 50, **context}
         prompt = template.format(
             style=style.value,
             language=language,
-            **context,
+            **filled_context,
         )
         
         # Add few-shot examples

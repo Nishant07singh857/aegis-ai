@@ -262,8 +262,9 @@ class PlayerTracker(BaseDetector):
             if track_id not in matched_tracks:
                 tracked.frames_lost += 1
                 
-                # Remove if lost for too long
-                if tracked.frames_lost > self.max_lost_frames:
+                # Remove if lost for too long — a track lost for
+                # max_lost_frames frames has been lost long enough.
+                if tracked.frames_lost >= self.max_lost_frames:
                     del self.tracked_players[track_id]
     
     def get_tracked_players(self) -> List[TrackedPlayer]:

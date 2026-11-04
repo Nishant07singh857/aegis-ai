@@ -8,7 +8,7 @@ Production-grade with connection pooling, retry logic, health checks
 import asyncio
 import time
 import logging
-from typing import AsyncGenerator, Optional, Any, Dict
+from typing import AsyncGenerator, Optional, Any, Dict, NoReturn
 from contextlib import asynccontextmanager
 
 from sqlalchemy.ext.asyncio import (
@@ -21,11 +21,15 @@ from sqlalchemy.orm import DeclarativeBase, declared_attr
 from sqlalchemy import (
     Column, DateTime, Boolean, func, text, MetaData,
 )
-from sqlalchemy.exc import SQLAlchemyError, OperationalError, DisconnectionError
+from sqlalchemy.exc import SQLAlchemyError, OperationalError, DisconnectionError, DBAPIError
 from sqlalchemy import event as sa_event
 
 from ..config import settings
-from .error_scrub import scrub_db_error_text, scrubbed_exception
+from .error_scrub import (
+    is_credential_key,
+    scrub_db_error_text,
+    scrubbed_exception,
+)
 
 logger = logging.getLogger("aegis.db")
 
@@ -55,6 +59,296 @@ def _scrubbed_exc_info(exc: BaseException):
     plain ``Exception``; the log call's own text still names the site.)
     """
     return (type(exc), scrubbed_exception(exc, secrets=_db_secrets()), exc.__traceback__)
+
+
+def _scrub_params_value(value: Any, *, _depth: int = 0) -> Any:
+    """Recursively scrub string leaves of a DBAPI ``params`` value.
+
+    Bind parameters are application data, not credentials, but a
+    parameter value could still be (or contain) the configured URL
+    string — scrub the strings, keep every other value untouched.
+    Depth-capped so a pathological nested value cannot recurse
+    forever; beyond the cap the value is replaced by its scrubbed
+    string form.
+
+    Phase 37 W1-fix (QA D2/D3):
+    * D2 — a non-``str`` leaf is kept ONLY when its string form
+      survives scrubbing unchanged (``_scrub_arg``'s rule, below):
+      SQLAlchemy renders ``params`` via ``repr()`` in ``str(exc)``,
+      so an opaque object whose ``str()`` echoes the URL would
+      otherwise leak into the surrogate's own ``str()``. Clean
+      values keep their exact type and identity.
+    * D3 — a dict value under a credential-named key
+      (``is_credential_key`` — same pattern family as
+      ``_CREDENTIAL_KV_RE`` in ``error_scrub``) is redacted
+      wholesale: the key IS the context the leaf scrubber
+      previously discarded.
+
+    Phase 37 W1-fix2 (QA re-gate D1r/D2r):
+    * D1r — the D2 rule checked only ``str()``, but SQLAlchemy
+      renders via ``repr()``: an object with a clean ``__str__``
+      and a secret-bearing ``__repr__`` was kept untouched and
+      leaked. A non-``str`` leaf is now kept ONLY when BOTH its
+      ``str()`` and its ``repr()`` survive scrubbing unchanged
+      (see :func:`_scrub_opaque_leaf`).
+    * D2r — the depth cap stringified the value, and a stringified
+      dict ``{'pwd': '<password>'}`` matches no scrub pattern, so
+      a credential-keyed value nested >= 5 deep leaked the bare
+      password. At the cap, credential-keyed values are now
+      redacted first (see :func:`_redact_credential_keys_deep`),
+      so the "redacted at any nesting depth" claim actually holds.
+    """
+    if isinstance(value, str):
+        return scrub_db_error_text(value, secrets=_db_secrets())
+    if _depth >= 4:
+        try:
+            # D2r: redact credential-keyed values at ANY depth
+            # before stringifying — the stringified dict
+            # ``{'pwd': '<password>'}`` matches no scrub pattern,
+            # so the bare password leaked at depth >= 5. The
+            # redaction is iterative (explicit stack), so the cap's
+            # stack-exhaustion protection is not re-opened.
+            return scrub_db_error_text(
+                str(_redact_credential_keys_deep(value)),
+                secrets=_db_secrets(),
+            )
+        except Exception:  # noqa: BLE001 - stringification itself failed
+            return "<redacted db error>"
+    if isinstance(value, dict):
+        return {
+            _scrub_params_value(k, _depth=_depth + 1): (
+                # "<redacted>" mirrors error_scrub._REDACTED.
+                "<redacted>"
+                if is_credential_key(k)
+                else _scrub_params_value(v, _depth=_depth + 1)
+            )
+            for k, v in value.items()
+        }
+    if isinstance(value, (list, tuple)):
+        scrubbed = [_scrub_params_value(v, _depth=_depth + 1) for v in value]
+        return tuple(scrubbed) if isinstance(value, tuple) else scrubbed
+    if isinstance(value, (set, frozenset)):
+        return type(value)(
+            _scrub_params_value(v, _depth=_depth + 1) for v in value
+        )
+    # D2/D1r: opaque leaf — _scrub_opaque_leaf's rule (BOTH str()
+    # and repr() must survive scrubbing unchanged; see the helper).
+    return _scrub_opaque_leaf(value)
+
+
+def _scrub_opaque_leaf(value: Any) -> Any:
+    """Keep-or-replace rule for a non-``str`` bind-param / ``args`` leaf.
+
+    Shared by :func:`_scrub_params_value` and :func:`_scrub_arg` so
+    both channels enforce the same rule. SQLAlchemy renders
+    ``params`` / ``args`` via ``repr()`` in ``str(exc)``, so BOTH
+    ``str()`` and ``repr()`` must survive scrubbing unchanged for
+    the value to be kept — type and identity preserved. Otherwise
+    the value is replaced by its scrubbed ``str()`` form: an object
+    with a clean ``__str__`` but a secret-bearing ``__repr__``
+    (Phase 37 re-gate D1r) is replaced, not kept. A ``repr()`` that
+    raises is treated as unprovable-clean and fails closed to the
+    scrubbed string; a ``str()`` that raises fails closed to
+    ``"<redacted db error>"``.
+    """
+    try:
+        text = str(value)
+    except Exception:  # noqa: BLE001 - stringification itself failed
+        return "<redacted db error>"
+    scrubbed_text = scrub_db_error_text(text, secrets=_db_secrets())
+    try:
+        rep = repr(value)
+    except Exception:  # noqa: BLE001 - repr itself failed; unprovable-clean
+        return scrubbed_text
+    if scrubbed_text == text and (
+        scrub_db_error_text(rep, secrets=_db_secrets()) == rep
+    ):
+        return value
+    return scrubbed_text
+
+
+def _redact_credential_keys_deep(value: Any) -> Any:
+    """Deep copy of *value* with every dict value under a credential
+    key replaced by ``"<redacted>"`` — at ANY nesting depth.
+
+    Used only at the depth cap of :func:`_scrub_params_value`, where
+    the value is about to be stringified: the stringified dict
+    ``{'pwd': '<password>'}`` matches no scrub pattern, so the bare
+    password is the one shape the text scrubber cannot recognise —
+    it is redacted here, structurally, before stringification.
+    Iterative (explicit stack, no recursion), so the cap's
+    stack-exhaustion protection is not re-opened; cyclic containers
+    are cut with ``"<redacted>"``. Non-container leaves pass through
+    untouched (the caller stringifies + text-scrubs the result).
+    Dict keys pass through untouched: a key can never contain a dict
+    (unhashable), so no credential-keyed value can hide inside one.
+    """
+    if not isinstance(value, (dict, list, tuple, set, frozenset)):
+        return value
+    rebuilt: dict[int, Any] = {}
+    active: set[int] = set()
+    stack: list[tuple[Any, bool]] = [(value, False)]
+    while stack:
+        node, processed = stack.pop()
+        if processed:
+            active.discard(id(node))
+            if isinstance(node, dict):
+                rebuilt[id(node)] = {
+                    k: (
+                        "<redacted>"
+                        if is_credential_key(k)
+                        else rebuilt.get(id(v), v)
+                    )
+                    for k, v in node.items()
+                }
+            elif isinstance(node, (list, tuple)):
+                items = [rebuilt.get(id(v), v) for v in node]
+                rebuilt[id(node)] = (
+                    tuple(items) if isinstance(node, tuple) else items
+                )
+            else:  # set / frozenset
+                rebuilt[id(node)] = type(node)(
+                    rebuilt.get(id(v), v) for v in node
+                )
+            continue
+        if id(node) in active:
+            # Cycle back to an ancestor still being rebuilt: cut it.
+            # The ancestor's own (genuine) rebuild overwrites this
+            # placeholder later; the cycle-edge consumer above has
+            # already read "<redacted>" by then.
+            rebuilt[id(node)] = "<redacted>"
+            continue
+        active.add(id(node))
+        stack.append((node, True))
+        children = node.values() if isinstance(node, dict) else node
+        for child in children:
+            if isinstance(child, (dict, list, tuple, set, frozenset)):
+                stack.append((child, False))
+    return rebuilt[id(value)]
+
+
+def _scrub_arg(arg: Any) -> Any:
+    """Scrub one exception ``args`` element for the surrogate rebuild.
+
+    Strings are scrubbed; nested exceptions become scrubbed plain
+    surrogates (never chained to the raw original); containers are
+    scrubbed leaf-wise; any other value is kept ONLY when BOTH its
+    ``str()`` and its ``repr()`` survive scrubbing unchanged,
+    otherwise it is replaced by the scrubbed string — so no secret
+    can hide behind ``str()`` / ``repr()`` of an opaque object
+    (e.g. a DBAPI connection object whose repr echoes the URL).
+    (Phase 37 re-gate D1r: the earlier version of this docstring
+    claimed repr safety while the code checked ``str()`` only —
+    both are now checked, via :func:`_scrub_opaque_leaf`.)
+    """
+    if isinstance(arg, str):
+        return scrub_db_error_text(arg, secrets=_db_secrets())
+    if isinstance(arg, BaseException):
+        return scrubbed_exception(arg, secrets=_db_secrets())
+    if isinstance(arg, (dict, list, tuple, set, frozenset)):
+        return _scrub_params_value(arg)
+    return _scrub_opaque_leaf(arg)
+
+
+def _raise_clean_surrogate(surrogate: BaseException) -> NoReturn:
+    """Raise *surrogate* with ``__context__`` guaranteed ``None``.
+
+    Raising after the ``except`` block exits is NOT enough on its
+    own (Phase 37 W1-fix, QA D1 — probed, not assumed): when the
+    raw exception is thrown INTO an async generator via ``athrow``
+    during unwinding — exactly how ``@asynccontextmanager`` drives
+    ``get_db_context``, and how FastAPI drives ``get_db``'s
+    endpoint-error path — ``sys.exception()`` is STILL the raw
+    exception at the raise point after the block, so a plain
+    ``raise`` re-attaches it as ``__context__`` (``from None``
+    only clears ``__cause__``; pre-clearing ``__context__`` before
+    the raise does not survive it either). The only shape that
+    holds in every case: raise, catch the surrogate itself, clear
+    its ``__context__``, and BARE re-raise — a bare re-raise does
+    not touch ``__context__``, so the cleared value survives the
+    propagation out of this helper, out of the generator, and out
+    of ``__aexit__``. ``__cause__`` is already ``None`` (the
+    surrogate is built fresh, never chained) and is left alone.
+    """
+    try:
+        raise surrogate
+    except BaseException:  # noqa: BLE001 - must catch the surrogate
+        # itself whatever its class (incl. BaseException subclasses).
+        surrogate.__context__ = None
+        raise
+
+
+def _scrubbed_surrogate(exc: BaseException) -> BaseException:
+    """Scrubbed surrogate of *exc*, for re-raising (Phase 37, W1 / N-1).
+
+    Phase 36 scrubbed every DB log line but ``get_db`` /
+    ``get_db_context`` / ``init_db`` still bare-raised the ORIGINAL
+    exception, so any caller (FastAPI, the lifespan, a service) could
+    receive — and log, or render into a 500 — a driver message
+    embedding the DATABASE_URL. This is the raise-site half of the
+    guarantee: the surrogate's message, ``str()``, ``args`` and
+    ``__cause__``/``__context__`` chain can carry no credential —
+    callers raise it via :func:`_raise_clean_surrogate` (compute in
+    the ``except`` block, raise after it exits; the helper clears
+    ``__context__`` on a bare re-raise, which is what makes the
+    guarantee hold even when the raw exception is thrown in via
+    ``athrow`` during unwinding — see the helper). The TYPE is
+    preserved wherever SQLAlchemy's constructor shape allows it:
+
+    * ``DBAPIError`` subclasses (``OperationalError``,
+      ``IntegrityError``, ...) carry structured ``(statement,
+      params, orig)`` — the surrogate is rebuilt from the scrubbed
+      statement, leaf-scrubbed params and a scrubbed ``orig``
+      surrogate, with ``hide_parameters`` carried over. (Probed on
+      SQLAlchemy 2.1.5: ``exc.args`` is a single formatted string,
+      NOT ``(statement, params, orig)``, so args-based rebuild
+      would misplace the values — the structured attributes are the
+      only correct source.)
+    * every other ``SQLAlchemyError`` — including
+      ``DisconnectionError``, which in SQLAlchemy 2.x extends
+      ``SQLAlchemyError`` directly, has no ``statement`` /
+      ``params`` / ``orig`` attributes and takes no keyword
+      arguments — is rebuilt as ``type(exc)(*scrubbed_args)``.
+    * anything else (non-SQLAlchemy) collapses to the plain
+      scrubbed ``Exception`` from ``error_scrub``.
+
+    Any rebuild failure (unknown constructor shape, un-scrubbable
+    arg) falls back to the plain scrubbed ``Exception``: the
+    guarantee is "never a raw credential", not "always the same
+    type". The original exception is never mutated, so the already-
+    scrubbed log line keeps the full traceback for debugging.
+    """
+    if isinstance(exc, DBAPIError) and hasattr(exc, "statement"):
+        try:
+            statement = exc.statement
+            if isinstance(statement, str):
+                statement = scrub_db_error_text(
+                    statement, secrets=_db_secrets()
+                )
+            orig = exc.orig
+            if isinstance(orig, BaseException):
+                orig = scrubbed_exception(orig, secrets=_db_secrets())
+            elif orig is not None:
+                orig = Exception(
+                    scrub_db_error_text(str(orig), secrets=_db_secrets())
+                )
+            kwargs: Dict[str, Any] = {}
+            if bool(getattr(exc, "hide_parameters", False)):
+                kwargs["hide_parameters"] = True
+            return type(exc)(
+                statement,
+                _scrub_params_value(exc.params),
+                orig,
+                **kwargs,
+            )
+        except Exception:  # noqa: BLE001 - rebuild failed; fall back
+            return scrubbed_exception(exc, secrets=_db_secrets())
+    if isinstance(exc, SQLAlchemyError):
+        try:
+            return type(exc)(*(_scrub_arg(a) for a in exc.args))
+        except Exception:  # noqa: BLE001 - rebuild failed; fall back
+            return scrubbed_exception(exc, secrets=_db_secrets())
+    return scrubbed_exception(exc, secrets=_db_secrets())
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # NAMING CONVENTIONS FOR CONSTRAINTS
@@ -351,6 +645,16 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
             ...
     """
     async with AsyncSessionLocal() as session:
+        # Phase 37 W1-fix (QA D1): the surrogate is COMPUTED in the
+        # except block but RAISED after it exits, via
+        # ``_raise_clean_surrogate`` — raising inside the block
+        # would set ``surrogate.__context__`` to the raw exception
+        # (``from None`` clears only ``__cause__``), and raising
+        # after the block alone is still not enough when the raw
+        # exception is thrown in via ``athrow`` during unwinding
+        # (see the helper). The bare re-raise in the generic branch
+        # is unchanged by design.
+        surrogate = None
         try:
             yield session
             await session.commit()
@@ -360,16 +664,35 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
                 f"Database session error: {scrub_db_error_text(e, secrets=_db_secrets())}",
                 exc_info=_scrubbed_exc_info(e),
             )
-            raise
+            # Phase 37 (N-1): re-raise the SCRUBBED surrogate, never
+            # the raw exception — a driver message can embed the
+            # DATABASE_URL, and FastAPI / Starlette log an unhandled
+            # dependency exception with its traceback. The surrogate
+            # keeps the SQLAlchemy type, so upstream ``except
+            # SQLAlchemyError`` handling behaves exactly as before.
+            surrogate = _scrubbed_surrogate(e)
         except Exception as e:
             await session.rollback()
             logger.error(
                 f"Unexpected session error: {scrub_db_error_text(e, secrets=_db_secrets())}",
                 exc_info=_scrubbed_exc_info(e),
             )
+            # Deliberately a BARE re-raise, not a scrubbed surrogate:
+            # this branch catches exceptions from the ENDPOINT body
+            # (HTTPException status semantics, validation errors,
+            # application bugs), which must reach FastAPI untouched —
+            # converting an HTTPException would turn a 404 into a
+            # 500. A DB error always arrives wrapped as
+            # SQLAlchemyError (first branch above); an endpoint that
+            # itself formats a raw DB exception into its own
+            # exception is that endpoint's bug, and this dependency
+            # cannot scrub arbitrary application exceptions without
+            # breaking their types. The log line above is scrubbed.
             raise
         finally:
             await session.close()
+        if surrogate is not None:
+            _raise_clean_surrogate(surrogate)
 
 
 @asynccontextmanager
@@ -382,18 +705,36 @@ async def get_db_context() -> AsyncGenerator[AsyncSession, None]:
             result = await db.execute(query)
     """
     async with AsyncSessionLocal() as session:
+        # Phase 37 W1-fix (QA D1): surrogate computed in the except
+        # block, raised after it exits — see get_db above.
+        surrogate = None
         try:
             yield session
             await session.commit()
+        except SQLAlchemyError as e:
+            await session.rollback()
+            logger.error(
+                f"Database context error: {scrub_db_error_text(e, secrets=_db_secrets())}",
+                exc_info=_scrubbed_exc_info(e),
+            )
+            # Phase 37 (N-1): scrubbed surrogate, same type — see
+            # get_db above.
+            surrogate = _scrubbed_surrogate(e)
         except Exception as e:
             await session.rollback()
             logger.error(
                 f"Database context error: {scrub_db_error_text(e, secrets=_db_secrets())}",
                 exc_info=_scrubbed_exc_info(e),
             )
+            # Bare re-raise by design: this branch catches the
+            # CALLER's own exceptions (HTTPException, application
+            # errors inside the ``async with`` block), which must
+            # propagate untouched — see get_db above.
             raise
         finally:
             await session.close()
+        if surrogate is not None:
+            _raise_clean_surrogate(surrogate)
 
 
 async def get_db_with_retry(
@@ -404,7 +745,11 @@ async def get_db_with_retry(
     Database session with retry logic for transient failures.
     """
     last_exception = None
-    
+    # Phase 37 W1-fix (QA D1): surrogate computed in the except
+    # block, raised after it exits via _raise_clean_surrogate —
+    # see get_db above.
+    surrogate = None
+
     for attempt in range(max_retries):
         try:
             async with AsyncSessionLocal() as session:
@@ -427,21 +772,38 @@ async def get_db_with_retry(
                 f"Database error (non-retryable): {scrub_db_error_text(e, secrets=_db_secrets())}",
                 exc_info=_scrubbed_exc_info(e),
             )
-            # Re-raise the SCRUBBED surrogate, never the raw exception:
-            # a driver message can embed the DATABASE_URL, and any
-            # upstream logger printing this exception would leak it.
-            # ``from None`` suppresses the raw exception as context so
-            # no formatted chain can carry it either.
-            raise scrubbed_exception(e, secrets=_db_secrets()) from None
+            # Phase 37 (N-1): restore the exception TYPE where it is
+            # a SQLAlchemy error (e.g. IntegrityError,
+            # ProgrammingError) — Phase 36 collapsed everything to
+            # plain Exception, which no production caller depended
+            # on (zero callers, grep-verified), but a future caller
+            # catching OperationalError/IntegrityError would have
+            # silently stopped matching. Non-SQLAlchemy errors still
+            # collapse to the plain scrubbed Exception: there is no
+            # endpoint body here whose types must survive, and the
+            # message is preserved scrubbed.
+            if isinstance(e, SQLAlchemyError):
+                surrogate = _scrubbed_surrogate(e)
+            else:
+                surrogate = scrubbed_exception(e, secrets=_db_secrets())
         finally:
             await session.close()
-    
+        if surrogate is not None:
+            _raise_clean_surrogate(surrogate)
+
     logger.error(f"All {max_retries} database connection attempts failed")
     if last_exception is None:
         # Degenerate max_retries=0: preserve the prior behaviour
         # (``raise None`` -> TypeError) instead of inventing an error.
         raise last_exception
-    raise scrubbed_exception(last_exception, secrets=_db_secrets())
+    # Phase 37 (N-1): last_exception is always OperationalError or
+    # DisconnectionError here (the only types the retry branch
+    # catches), so the surrogate preserves that type — Phase 36's
+    # plain-Exception collapse is undone, with the same scrubbed
+    # message and no raw chain. This raise already sits outside any
+    # except block (probe-verified clean pre-fix); it goes through
+    # the helper anyway so every surrogate raise takes one path.
+    _raise_clean_surrogate(_scrubbed_surrogate(last_exception))
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -471,20 +833,38 @@ async def init_db() -> None:
                 f"{scrub_db_error_text(e, secrets=_db_secrets())}"
             )
 
+    # Phase 37 W1-fix (QA D1): surrogate computed in the except
+    # block, raised after it exits via _raise_clean_surrogate —
+    # see get_db above.
+    surrogate = None
     try:
         async with engine.begin() as conn:
             # Create all tables
             await conn.run_sync(Base.metadata.create_all)
-            
+
         logger.info("✅ Database initialized successfully")
         logger.info(f"Tables created: {len(Base.metadata.tables)}")
-        
+
     except Exception as e:
         logger.error(
             f"❌ Database initialization failed: {scrub_db_error_text(e, secrets=_db_secrets())}",
             exc_info=_scrubbed_exc_info(e),
         )
-        raise
+        # Phase 37 (N-1): re-raise the SCRUBBED surrogate, never the
+        # raw exception. Every failure here is DB-originated
+        # (engine.begin / create_all — no endpoint body, no
+        # HTTPException semantics to preserve), and both callers
+        # catch generic Exception (the lifespan re-scrubs and raises
+        # RuntimeError; scripts/init_db.py exits 1), so the type is
+        # preserved for SQLAlchemyError and collapsed to a scrubbed
+        # plain Exception otherwise, with the message preserved
+        # scrubbed.
+        if isinstance(e, SQLAlchemyError):
+            surrogate = _scrubbed_surrogate(e)
+        else:
+            surrogate = scrubbed_exception(e, secrets=_db_secrets())
+    if surrogate is not None:
+        _raise_clean_surrogate(surrogate)
 
 
 async def close_db() -> None:

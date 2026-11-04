@@ -25,12 +25,14 @@ Coverage notes (honest scope):
   the message f-string would still leak through the traceback's
   final line — the production fix substitutes a scrubbed surrogate
   as the ``exc_info`` value (see ``app.db.base._scrubbed_exc_info``).
-* ``get_db`` / ``get_db_context`` / ``init_db`` still re-raise the
-  ORIGINAL exception (bare ``raise``, type-preserving — they are a
-  FastAPI dependency / lifespan path where callers depend on the
-  type). Only their LOG lines are proven here; the re-raise-via-
-  scrubbed-exception change applies to ``get_db_with_retry`` only,
-  per the task. That residual is stated, not hidden.
+* ``get_db`` / ``get_db_context`` / ``init_db`` now re-raise a
+  SCRUBBED surrogate (Phase 37, W1 / N-1): same type for
+  SQLAlchemyError, plain scrubbed ``Exception`` for a non-SQLAlchemy
+  failure in ``init_db``. The one deliberate exception is the
+  generic-``Exception`` branch of ``get_db`` / ``get_db_context``,
+  which catches the ENDPOINT/CALLER's own exceptions (HTTPException
+  status semantics, ...) and bare re-raises them untouched — see
+  the Phase 37 suite for the boundary proof.
 * SQLAlchemy itself pre-redacts a bare ``password=...`` key/value
   inside ``OperationalError.__str__`` (verified in a probe: the
   ``[SQL: ...]`` rendering shows ``password=<redacted>`` while the
@@ -279,15 +281,17 @@ class TestGetDbWithRetryScrub:
         monkeypatch.setattr(
             base_module, "AsyncSessionLocal", lambda: _FakeSessionCM(session)
         )
-        with pytest.raises(Exception) as excinfo:
+        with pytest.raises(OperationalError) as excinfo:
             await _drain(
                 base_module.get_db_with_retry(max_retries=2, retry_delay=0)
             )
         # Retried exactly max_retries times, then stopped.
         assert session.commit.await_count == 2
-        # The re-raised exception is the scrubbed surrogate, NOT the
-        # raw OperationalError: type, message and chain are all clean.
-        assert type(excinfo.value) is Exception
+        # The re-raised exception is the scrubbed surrogate: the
+        # OperationalError TYPE is restored (Phase 37, W1 / N-1 —
+        # Phase 36 collapsed it to plain Exception), while message
+        # and chain are all clean.
+        assert type(excinfo.value) is OperationalError
         _assert_no_leak(str(excinfo.value))
         assert "connection refused" in str(excinfo.value)
         assert excinfo.value.__cause__ is None
@@ -324,13 +328,15 @@ class TestGetDbWithRetryScrub:
         assert type(excinfo.value) is Exception
         _assert_no_leak(str(excinfo.value))
         assert "connection refused" in str(excinfo.value)
-        # ``from None`` sets __cause__ to None and suppresses the
-        # context from display (__suppress_context__); __context__
-        # itself still references the raw exception object, so the
-        # leak proof is the FORMATTED traceback, which must not print
-        # the suppressed chain.
+        # W1-fix (Phase 37, QA D1): the surrogate is raised with NO
+        # context at all (``_raise_clean_surrogate``) — the old
+        # ``from None`` behaviour (``__suppress_context__`` True,
+        # ``__context__`` still referencing the raw exception) is
+        # the defect this fix removes, so the leak proof is now
+        # ``__context__ is None`` itself, plus the formatted
+        # traceback carrying no secret.
         assert excinfo.value.__cause__ is None
-        assert excinfo.value.__suppress_context__ is True
+        assert excinfo.value.__context__ is None
         formatted = "".join(
             traceback.format_exception(
                 excinfo.type, excinfo.value, excinfo.tb
@@ -390,14 +396,21 @@ class TestInitAndCloseDbScrub:
             begin_cm=_FakeBeginCM(enter_side_effect=raw),
         )
         monkeypatch.setattr(base_module, "engine", engine)
-        with pytest.raises(RuntimeError):
+        # Phase 37 (N-1): init_db no longer bare re-raises. A
+        # non-SQLAlchemy failure collapses to the plain scrubbed
+        # Exception (type NOT preserved — documented in base.py);
+        # the message is scrubbed and the original is untouched.
+        with pytest.raises(Exception) as excinfo:
             await base_module.init_db()
+        assert type(excinfo.value) is Exception
+        _assert_no_leak(str(excinfo.value))
+        assert "connection refused" in str(excinfo.value)
         text = _formatted(_db_logs)
         _assert_no_leak(text)
         assert "Database initialization failed" in text
         assert "connection refused" in text
-        # Bare re-raise here is type-preserving by design (see module
-        # docstring); only the log line is proven scrubbed.
+        # The original exception object is untouched (scrub builds
+        # a copy).
         assert _FAKE_PASS in str(raw)
 
     @pytest.mark.asyncio

@@ -390,7 +390,11 @@ class CoordinateMapper:
         zone_radius: float,
     ) -> bool:
         """Check if world position is inside safe zone"""
-        return self.distance_world((world_x, world_y), zone_center) <= zone_radius
+        # distance_world() returns a numpy scalar, so the comparison is
+        # numpy.bool_ — coerce to a real bool (the annotation promises
+        # bool; callers doing `is True` / JSON serialisation break on
+        # numpy.bool_).
+        return bool(self.distance_world((world_x, world_y), zone_center) <= zone_radius)
     
     def get_map_bounds(self) -> Tuple[float, float, float, float]:
         """Get map bounds (min_x, min_y, max_x, max_y)"""

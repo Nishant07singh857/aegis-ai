@@ -508,11 +508,17 @@ async def authenticate_checked(
         return payload
     try:
         is_active = await _db_user_is_active(payload.user_id)
-    except Exception:
+    except Exception as e:
+        # Phase 37 (N-1): the DB lookup can fail with a driver error
+        # whose message embeds the DATABASE_URL — scrub both the
+        # message and the traceback's final line (W1 pattern, same
+        # as the seed/revoke paths in this file), never exc_info=True
+        # on the raw exception. Fail closed, unchanged.
         logger.warning(
-            "is_active check failed for user_id=%s; failing closed",
+            "is_active check failed for user_id=%s; failing closed "
+            f"(DB error: {scrub_db_error_text(e, secrets=[settings.DATABASE_URL])})",
             payload.user_id,
-            exc_info=True,
+            exc_info=_scrubbed_exc_info(e),
         )
         return None
     if is_active is not True:
@@ -744,11 +750,15 @@ async def authenticate_websocket(
             return payload
         try:
             is_active = await _db_user_is_active(payload.user_id)
-        except Exception:
+        except Exception as e:
+            # Phase 37 (N-1): same scrub as the REST is_active check
+            # above — a driver error message can embed the
+            # DATABASE_URL; never exc_info=True on the raw exception.
             logger.warning(
-                "WS is_active check failed for user_id=%s; failing closed",
+                "WS is_active check failed for user_id=%s; failing closed "
+                f"(DB error: {scrub_db_error_text(e, secrets=[settings.DATABASE_URL])})",
                 payload.user_id,
-                exc_info=True,
+                exc_info=_scrubbed_exc_info(e),
             )
             return None
         if is_active is not True:

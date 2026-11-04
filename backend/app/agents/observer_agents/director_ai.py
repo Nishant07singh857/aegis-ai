@@ -944,21 +944,27 @@ class ObserverDirector(BaseAgent):
         if self.director_state.teams_alive == 16 and self.director_state.match_time_seconds < 60:
             self.director_state.broadcast_state = BroadcastState.EARLY_GAME
         
+        # Match end — checked before late game / final circle: with 1 team
+        # alive the match is over regardless of zone phase.
+        elif self.director_state.teams_alive <= 1:
+            self.director_state.broadcast_state = BroadcastState.MATCH_END
+
+        # Final circle — checked before late game: the old order let the
+        # late-game branch (teams <= 5, zone >= 5) swallow every
+        # (zone >= 7, teams <= 3) state, so FINAL_CIRCLE was unreachable.
+        elif self.director_state.zone_phase >= 7 and self.director_state.teams_alive <= 3:
+            self.director_state.broadcast_state = BroadcastState.FINAL_CIRCLE
+        
+
         # Mid game
         elif self.director_state.teams_alive > 5 and self.director_state.zone_phase < 6:
             self.director_state.broadcast_state = BroadcastState.MID_GAME
         
+
         # Late game
         elif self.director_state.teams_alive <= 5 and self.director_state.zone_phase >= 5:
             self.director_state.broadcast_state = BroadcastState.LATE_GAME
         
-        # Final circle
-        elif self.director_state.zone_phase >= 7 and self.director_state.teams_alive <= 3:
-            self.director_state.broadcast_state = BroadcastState.FINAL_CIRCLE
-        
-        # Match end
-        elif self.director_state.teams_alive <= 1:
-            self.director_state.broadcast_state = BroadcastState.MATCH_END
     
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     # QUERIES & CONTROL

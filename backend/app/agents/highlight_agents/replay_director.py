@@ -52,7 +52,7 @@ class ReplayShot:
     target_player: str = ""
     target_team: str = ""
     description: str = ""
-    transition: str = "cut"  # cut, fade, dissolve
+    transition: str = "cut"  # cut only (Bible: hard cuts on air)
 
 @dataclass
 class ReplaySequence:
@@ -192,7 +192,7 @@ class ReplayDirector(BaseAgent):
                 duration_ms=sequence.intro_duration_ms,
                 speed=SpeedPreset.NORMAL,
                 description="Intro",
-                transition="fade",
+                transition="cut",
             )
             sequence.shots.append(intro_shot)
             total_duration_ms += sequence.intro_duration_ms
@@ -218,7 +218,7 @@ class ReplayDirector(BaseAgent):
                 target_player=clip_data.get("primary_player", ""),
                 target_team=clip_data.get("primary_team", ""),
                 description=f"{angle.value} replay",
-                transition="dissolve" if i > 0 else "cut",
+                transition="cut",
             )
             sequence.shots.append(shot)
             total_duration_ms += shots_per_angle * self.speed_multipliers[speed]
@@ -232,7 +232,7 @@ class ReplayDirector(BaseAgent):
                 duration_ms=sequence.outro_duration_ms,
                 speed=SpeedPreset.NORMAL,
                 description="Outro",
-                transition="fade",
+                transition="cut",
             )
             sequence.shots.append(outro_shot)
             total_duration_ms += sequence.outro_duration_ms

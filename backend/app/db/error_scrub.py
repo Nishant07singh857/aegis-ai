@@ -44,7 +44,12 @@ from __future__ import annotations
 import re
 from typing import Iterable
 
-__all__ = ["scrub_db_error_text", "scrub_exception", "scrubbed_exception"]
+__all__ = [
+    "scrub_db_error_text",
+    "scrub_exception",
+    "scrubbed_exception",
+    "is_credential_key",
+]
 
 _REDACTED = "<redacted>"
 _REDACTED_TOKEN = "<redacted-token>"
@@ -78,6 +83,19 @@ _CREDENTIAL_KV_RE = re.compile(
 # password 'value' — space-separated quoted form (driver phrasing).
 _CREDENTIAL_QUOTED_RE = re.compile(
     r"(?P<key>\b(?:password|passwd))\s+['\"][^'\"]+['\"]",
+    re.IGNORECASE,
+)
+
+# Bare credential key (no ``=value`` attached): ``pwd`` / ``DB_PASSWORD``
+# / ``api_key`` / ... — the SAME alternation as _CREDENTIAL_KV_RE, for
+# structured values (dict keys) where the key alone is the context.
+# The trailing ``\b`` mirrors the KV pattern's separator requirement:
+# ``password_hash`` is NOT a credential key (the KV pattern needs a
+# ``=``/``:`` after the key word, and ``_`` is not one), while
+# ``my_password`` / ``DB_PWD`` / ``client_secret`` are.
+_CREDENTIAL_KEY_RE = re.compile(
+    r"(?:password|passwd|pwd|secret|token|api[_-]?key|access[_-]?token"
+    r"|auth[_-]?token|client[_-]?secret|bearer)\b",
     re.IGNORECASE,
 )
 
@@ -161,6 +179,20 @@ def scrub_exception(exc: BaseException, *, secrets: Iterable[str] = ()) -> str:
     if not text.strip():
         return f"{type(exc).__name__} (no detail)"
     return text
+
+
+def is_credential_key(key: object) -> bool:
+    """True when *key* names a credential (dict-key context).
+
+    Used for structured values (DBAPI bind params) where the key
+    alone is the context a bare value cannot carry: ``{"pwd":
+    "<password>"}`` must be redacted wholesale, because no string
+    pattern can recognise the bare password itself. Non-str keys
+    never match.
+    """
+    if not isinstance(key, str):
+        return False
+    return _CREDENTIAL_KEY_RE.search(key) is not None
 
 
 def scrubbed_exception(

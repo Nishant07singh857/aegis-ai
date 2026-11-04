@@ -515,6 +515,10 @@ def test_r7_candidate_score_helper_unit():
     assert _candidate_score(90) == 90
     assert _candidate_score("90") == 90
     assert _candidate_score(72.7) == 72
+    # Phase 37 (R-7, option (c) Document): a positive sub-1.0 score
+    # truncates to 0 and queues at lowest priority — it is NOT
+    # scoreless (only None is dropped).
+    assert _candidate_score(0.5) == 0
     assert _candidate_score(None) is None
     assert _candidate_score(0) is None
     assert _candidate_score(True) is None

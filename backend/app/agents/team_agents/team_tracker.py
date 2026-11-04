@@ -680,6 +680,11 @@ class TeamTracker(BaseAgent):
         self.team.alive_count = alive
         self.team.knocked_count = knocked
         self.team.dead_count = dead
+        # full_dead_count is the same fully-dead population (DEAD state =
+        # cannot be revived); it was never written anywhere, so
+        # is_eliminated() — which requires full_dead_count == 4 — could
+        # never become True.
+        self.team.full_dead_count = dead
     
     def _record_team_hp(self) -> None:
         """Record team HP history"""
@@ -924,6 +929,10 @@ class TeamTracker(BaseAgent):
     
     def reset_for_new_match(self) -> None:
         """Reset tracking for a new match"""
+        # Capture the roster BEFORE replacing the tracker: the old code
+        # read self.team.players after the assignment, i.e. the brand-new
+        # (empty) roster, so the re-created team always lost its players.
+        old_players = list(self.team.players)
         self.team = TeamStateTracker(
             team_id=self.team.team_id,
             team_name=self.team.team_name,
@@ -931,7 +940,6 @@ class TeamTracker(BaseAgent):
         )
         
         # Re-create players
-        old_players = self.team.players
         self.team.players = []
         for old in old_players:
             self.add_player(old.player_id, old.player_name)

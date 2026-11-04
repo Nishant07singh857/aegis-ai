@@ -130,6 +130,34 @@ class TestIconMatcherKnobClamp:
         m.margin_threshold = 0.25
         assert m.margin_threshold == 0.25
 
+    def test_direct_private_write_is_clamped_on_read(self):
+        # Phase 37: the getter clamps on read, so a direct write to
+        # the private attribute (bypassing the setter) can never
+        # loosen the gate below the 0.15 floor or above the 1.0
+        # ceiling. Defence-in-depth: the label stays safe today
+        # because gated_weapon re-clamps, but the knob itself must
+        # never report an out-of-range value.
+        m = IconMatcher(margin_threshold=0.5)
+        m._margin_threshold = -1.0
+        assert m.margin_threshold == 0.15
+        m._margin_threshold = 0.0
+        assert m.margin_threshold == 0.15
+        m._margin_threshold = 2.0
+        assert m.margin_threshold == 1.0
+        m._margin_threshold = 0.25
+        assert m.margin_threshold == 0.25
+
+    def test_direct_private_write_of_junk_fails_closed_on_read(self):
+        # clamp_margin_threshold (not float()) backs the getter, so
+        # a junk direct write reports the floor instead of raising.
+        m = IconMatcher(margin_threshold=0.5)
+        m._margin_threshold = "junk"  # type: ignore[assignment]
+        assert m.margin_threshold == 0.15
+        m._margin_threshold = float("nan")
+        assert m.margin_threshold == 0.15
+        m._margin_threshold = float("inf")
+        assert m.margin_threshold == 1.0
+
     def test_killfeed_config_path_is_clamped(self):
         # killfeed.py itself is untouched (another worker's area);
         # its config value flows through IconMatcher, so the clamp

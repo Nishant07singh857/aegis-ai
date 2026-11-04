@@ -302,6 +302,43 @@ class TestFightDetector:
         fight_type = detector._determine_fight_type(fight)
         
         assert fight_type == FightType.THIRD_PARTY
+
+    def test_third_party_beats_close_quarters_signals(self, detector):
+        """Team count dominates range: a 3-team fight is a third-party
+        fight even when its signals look close-quarters (HP drops +
+        proximity). Regression pin for the pre-Phase-37 ordering bug,
+        where the third-party check sat below the range/ambush checks
+        and was unreachable for any real third-party fight (HP drops
+        forced LONG_RANGE, a knock forced AMBUSH)."""
+        fight = PotentialFight(
+            fight_id="test_fight",
+            teams_involved={"team_001", "team_002", "team_003"},
+        )
+
+        fight.signal_types = {FightSignal.HP_DROP, FightSignal.PROXIMITY, FightSignal.KILL_FEED}
+        fight.hp_drops = 5
+        fight.knocks = 1
+        fight.signal_count = 4
+
+        fight_type = detector._determine_fight_type(fight)
+
+        assert fight_type == FightType.THIRD_PARTY
+
+    def test_two_team_fight_stays_long_range(self, detector):
+        """Guard for the reorder: with only 2 teams the long-range
+        rule must still win over the (now earlier) third-party check
+        — the fix is ordering, not a blanket override."""
+        fight = PotentialFight(
+            fight_id="test_fight",
+            teams_involved={"team_001", "team_002"},
+        )
+
+        fight.signal_types = {FightSignal.HP_DROP}
+        fight.hp_drops = 3
+
+        fight_type = detector._determine_fight_type(fight)
+
+        assert fight_type == FightType.LONG_RANGE
     
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     # FIGHT LIFECYCLE TESTS
@@ -507,3 +544,46 @@ class TestFightDetector:
         
         assert len(detector.detection_state.active_fights) == 0
         assert detector.detection_state.total_fights_detected == 0
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    # PROMOTION DETERMINISM TESTS (Phase 37 §6, option (A) Sort)
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+    def test_promotion_assigns_teams_alphabetically(self, detector):
+        """Promotion sorts teams_involved: attacker/defender and the
+        fight-ID suffix are alphabetical, NOT the tactical aggressor
+        (no signal data at promotion time says who attacked first)."""
+        potential = PotentialFight(
+            fight_id="pf-determinism",
+            teams_involved={"zeta_team", "alpha_team", "mid_team"},
+        )
+        detector.detection_state.potential_fights["pf-determinism"] = potential
+
+        active_id = detector._promote_to_active("pf-determinism")
+
+        # Suffix is the alphabetically-first team, truncated to 8 chars.
+        assert active_id.endswith("_alpha_te")
+        active = detector.detection_state.active_fights[active_id]
+        assert active.primary_attacker == "alpha_team"
+        assert active.primary_defender == "mid_team"
+
+    def test_promotion_determinism_across_detectors(self, mock_event_bus):
+        """Same input -> same fight-ID suffix and same attacker/defender
+        on every run, regardless of set hash order."""
+        results = []
+        for i in range(2):
+            fresh = FightDetector(
+                config=AgentConfig(agent_id="fight_detector", agent_type="fight_detector"),
+                event_bus=mock_event_bus,
+            )
+            fresh.detection_state.potential_fights[f"pf-{i}"] = PotentialFight(
+                fight_id=f"pf-{i}",
+                teams_involved={"zeta_team", "alpha_team"},
+            )
+            active_id = fresh._promote_to_active(f"pf-{i}")
+            active = fresh.detection_state.active_fights[active_id]
+            # active_id is "fight_<ts>_<suffix>"; compare the suffix.
+            results.append(
+                (active_id.split("_", 2)[2], active.primary_attacker, active.primary_defender)
+            )
+        assert results[0] == results[1]
+        assert results[0] == ("alpha_te", "alpha_team", "zeta_team")

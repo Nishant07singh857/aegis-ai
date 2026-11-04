@@ -29,47 +29,136 @@ demo endpoints (inspection §5).
 """
 
 import sys
-import types
 import uuid
-from enum import Enum
+from contextlib import contextmanager
+from types import ModuleType
 
 import pytest
 from httpx import ASGITransport, AsyncClient
 
-# --- fpdf stub: see test_live_events.py / test_main_reliability.py --------
-_fpdf_stub = types.ModuleType("fpdf")
-_fpdf_stub.__path__ = []
+# --- fpdf stub: Phase 33 context-manager treatment (LOCAL COPY) -----------
+# app.main pulls in the dossiers router, which imports fpdf2. fpdf2 is
+# not installed in this test environment and PDF generation is not
+# exercised here. The stub below is the Phase 33 pattern, copied here
+# because this file lives in tests/integration/ and cannot import the
+# helper from tests/unit/test_phase33_db_boot_fail_fast.py (pytest
+# only puts each test file's own directory on sys.path). The stub is
+# installed ONLY inside ``_fpdf_stub_if_absent`` and torn down on
+# exit — sys.modules is restored exactly and stub-bound app.main /
+# app.dossiers.* modules are evicted — so this file installs NO
+# import-time stub of its own (the old sys.modules.setdefault stub
+# was the import-time leak behind the dossier-PDF order-dependence).
+# The import happens ONCE at module level because the whole file
+# exercises app.main; the skip is ImportError-only — any other import
+# failure propagates and fails loudly.
+
+_MISSING = object()  # sentinel: sys.modules entry was absent before the stub
 
 
-class _FPDF:
-    def __init__(self, *args, **kwargs):
+def _build_fpdf_stub():
+    """Build the minimal fpdf package stub (import stand-in only).
+
+    ``app.dossiers.pdf`` imports ``FPDF`` and ``fpdf.enums``
+    (``MethodReturnValue``, ``XPos``, ``YPos``) at module level, so
+    the stub must be a package with an ``enums`` submodule. It is
+    only a stand-in for import: no test here generates a PDF, and
+    the stub's ``FPDF`` has no PDF methods — PDF generation against
+    it fails, honestly, instead of pretending to work.
+    """
+    import enum
+
+    stub = ModuleType("fpdf")
+    stub.__path__ = []  # mark as a package so fpdf.enums can load
+
+    class _FPDF:  # minimal stand-in; no test here touches PDF code
+        def __init__(self, *args, **kwargs):
+            pass
+
+    stub.FPDF = _FPDF
+    enums = ModuleType("fpdf.enums")
+
+    class XPos(enum.Enum):
+        LEFT = "LEFT"
+        CENTER = "CENTER"
+        RIGHT = "RIGHT"
+        LMARGIN = "LMARGIN"
+        RMARGIN = "RMARGIN"
+
+    class YPos(enum.Enum):
+        TOP = "TOP"
+        NEXT = "NEXT"
+        LAST = "LAST"
+        TMARGIN = "TMARGIN"
+        BMARGIN = "BMARGIN"
+
+    class MethodReturnValue(enum.Enum):
+        VALUE = "VALUE"
+
+    enums.XPos = XPos
+    enums.YPos = YPos
+    enums.MethodReturnValue = MethodReturnValue
+    return stub, enums
+
+
+@contextmanager
+def _fpdf_stub_if_absent():
+    """Install the fpdf stub only if fpdf2 is really absent, with teardown.
+
+    On exit, ``sys.modules["fpdf"]`` / ``sys.modules["fpdf.enums"]``
+    are restored to exactly their pre-context state (the previous
+    module object, or absent), and every ``app.main`` /
+    ``app.dossiers.*`` module first imported inside the context is
+    evicted from ``sys.modules``. Eviction matters: without it, a
+    later ``import app.main`` in the same process would return the
+    module bound to the stub's ``FPDF`` even after the stub itself
+    was removed. Modules already present before the context are
+    never evicted — this context only undoes what it caused.
+    """
+    try:
+        import fpdf  # noqa: F401
+
+        yield
+        return
+    except ImportError:
         pass
+    prior_fpdf = sys.modules.get("fpdf", _MISSING)
+    prior_enums = sys.modules.get("fpdf.enums", _MISSING)
+    modules_before = set(sys.modules)
+    stub, enums = _build_fpdf_stub()
+    sys.modules["fpdf"] = stub
+    sys.modules["fpdf.enums"] = enums
+    try:
+        yield
+    finally:
+        for name, prior in (("fpdf", prior_fpdf), ("fpdf.enums", prior_enums)):
+            if prior is _MISSING:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = prior
+        for name in list(sys.modules):
+            if name not in modules_before and (
+                name == "app.main" or name.startswith("app.dossiers")
+            ):
+                sys.modules.pop(name, None)
 
 
-class _MethodReturnValue(Enum):
-    NONE = 0
+def _load_main_module():
+    """Import app.main under the teardown-guarded fpdf stub.
+
+    Skip ONLY on a missing-module import failure. Every other import
+    failure propagates and FAILS loudly: a real setup/configuration
+    error must never be reported as a skip.
+    """
+    with _fpdf_stub_if_absent():
+        try:
+            import app.main as main_module
+        except ImportError as exc:
+            pytest.skip(f"app.main not importable here (missing dependency): {exc}")
+        return main_module
 
 
-class _XPos(Enum):
-    LEFT = 0
-    RIGHT = 1
-    LMARGIN = 2
-
-
-class _YPos(Enum):
-    TOP = 0
-    NEXT = 1
-
-
-_fpdf_stub.FPDF = _FPDF
-_enums_stub = types.ModuleType("fpdf.enums")
-_enums_stub.MethodReturnValue = _MethodReturnValue
-_enums_stub.XPos = _XPos
-_enums_stub.YPos = _YPos
-sys.modules.setdefault("fpdf", _fpdf_stub)
-sys.modules.setdefault("fpdf.enums", _enums_stub)
-
-from app.main import app  # noqa: E402
+main_module = _load_main_module()
+app = main_module.app
 
 pytestmark = [pytest.mark.integration, pytest.mark.api]
 

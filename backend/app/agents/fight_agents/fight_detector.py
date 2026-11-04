@@ -1085,8 +1085,9 @@ class FightDetector(BaseAgent):
         
         potential = self.detection_state.potential_fights.pop(fight_id)
         
-        # Generate active fight ID
-        active_fight_id = f"fight_{int(time.time())}_{list(potential.teams_involved)[0][:8]}"
+        # Generate active fight ID — sorted() so the suffix is
+        # deterministic (alphabetically-first team).
+        active_fight_id = f"fight_{int(time.time())}_{sorted(potential.teams_involved)[0][:8]}"
         
         # Determine fight type
         fight_type = self._determine_fight_type(potential)
@@ -1110,9 +1111,11 @@ class FightDetector(BaseAgent):
             peak_intensity=0.0,
         )
         
-        # Set primary attacker/defender
+        # Set primary attacker/defender. The order is alphabetical,
+        # NOT the tactical aggressor: no signal data at promotion
+        # time says who attacked first.
         if len(potential.teams_involved) >= 2:
-            teams = list(potential.teams_involved)
+            teams = sorted(potential.teams_involved)
             active_fight.primary_attacker = teams[0]
             active_fight.primary_defender = teams[1]
         
@@ -1178,27 +1181,44 @@ class FightDetector(BaseAgent):
         # unchanged by clutch status.
         if fight.utility_used >= 3:
             return FightType.UTILITY_FIGHT
-        
+
+        # Check for third party BEFORE the range/ambush checks: the
+        # number of teams in the fight is the fight's defining
+        # structural fact, while range/ambush are style descriptors.
+        # THIRD_PARTY means "third team joins" (FightType doc) — a
+        # third team producing combat signals in the same fight — and
+        # it is orthogonal to range: a 3-team fight is a third-party
+        # fight whether it is fought up close or at distance. Checked
+        # last, this branch was effectively dead code: any real
+        # third-party fight carries HP drops (→ LONG_RANGE) or a knock
+        # with signal_count < 5 (→ AMBUSH), so THIRD_PARTY could only
+        # fire for a 3-team fight with no HP drop and no knock — a
+        # combination that does not occur in practice. teams_involved
+        # only ever holds teams that dealt/took damage or appeared in
+        # the killfeed for this fight (_create/_update_potential_fight
+        # add signal source/target teams), so >= 3 teams here already
+        # means a third team engaged, matching docs/BGMI_TERMS_AZ.md
+        # ("2 teams fighting + 3rd team kills within 30 sec") and the
+        # Phase 24 derivation (≥3 distinct killer teams).
+        if len(fight.teams_involved) >= 3:
+            return FightType.THIRD_PARTY
+
         # Check for close quarters (multiple HP drops, proximity)
-        if (FightSignal.HP_DROP in fight.signal_types and 
+        if (FightSignal.HP_DROP in fight.signal_types and
             FightSignal.PROXIMITY in fight.signal_types and
             fight.hp_drops >= 3):
             return FightType.CLOSE_QUARTERS
-        
+
         # Check for long range (HP drops without proximity)
-        if (FightSignal.HP_DROP in fight.signal_types and 
+        if (FightSignal.HP_DROP in fight.signal_types and
             FightSignal.PROXIMITY not in fight.signal_types):
             return FightType.LONG_RANGE
-        
+
         # Check for ambush (sudden kill/knock)
         if fight.knocks > 0 or fight.kills > 0:
             if fight.signal_count < 5:
                 return FightType.AMBUSH
-        
-        # Check for third party
-        if len(fight.teams_involved) >= 3:
-            return FightType.THIRD_PARTY
-        
+
         return FightType.MID_RANGE
     
     def _calculate_initial_intensity(self, fight: PotentialFight) -> float:
