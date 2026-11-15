@@ -11,24 +11,34 @@ was individually corrected and says so.
 "(Phase 36 recount)" below were re-measured at that HEAD with the
 method in the "How verified" column; everything else keeps its
 earlier recount date.
+**Phase 38 recount (2026-11-04, HEAD `8f3d33a`):** the headline table
+below was re-measured at that HEAD (method in the "How verified"
+column); §1/§5/§9 lines touched by the recount say so.
+**Correction note (Phase 38):** `docs/PHASE37_FINAL_LEDGER.md` §8
+("VERIFIED UNCHANGED") was measured at `941a13b`, NOT at the Phase 37
+commit `8f3d33a` — the same failure mode as the Phase 36 fix-up (a
+claim true pre-commit, broken the moment the commit landed: +1 doc
+`PHASE37_FINAL_LEDGER.md`, +474 LOC, +52 tests, +1 endpoint). The
+Phase 37 ledger itself is a historical record and is NOT rewritten;
+the correction lives here and in the Phase 38 ledger.
 
 ## Headline counts
 
 | Metric | Count | How verified |
 |---|---|---|
-| Backend Python files (`backend/app/`) | 461 | `git ls-tree -r --name-only 9bcc587 -- backend/app` (Phase 36 fix-up recount 2026-11-01, at the Phase 36 commit — 460 was HEAD cdf4046; +1 `revoked_api_key.py`) |
-| Backend LOC (`backend/app/**/*.py`) | 128,611 | `git archive 9bcc587 backend/app` + `wc -l` (Phase 36 fix-up recount 2026-11-01, at the Phase 36 commit — 127,757 was HEAD cdf4046) |
-| Frontend TS/TSX LOC (app+components+lib) | ~31,430 | `wc -l` |
-| API endpoints | **211** (209 HTTP + 2 WebSocket) | 212 decorator matches; 1 is a false positive inside `db/base.py` text |
+| Backend Python files (`backend/app/`) | 461 | `git ls-tree -r --name-only 8f3d33a -- backend/app` (Phase 38 recount 2026-11-04, at HEAD — unchanged since the Phase 36 fix-up) |
+| Backend LOC (`backend/app/**/*.py`) | 129,085 | `git archive 8f3d33a backend/app` + `wc -l` over `*.py` (Phase 38 recount 2026-11-04, at HEAD — 128,611 was HEAD 9bcc587; +474 in Phase 37) |
+| Frontend TS/TSX LOC (app+components+lib) | ~31,437 | `wc -l` over `frontend/{app,components,lib}/**/*.{ts,tsx}` (Phase 38 recount 2026-11-04 — ~31,430 was the 2026-10-20 snapshot) |
+| API endpoints | **212** (210 HTTP + 2 WebSocket) | AST count of `@router`/`@app` method decorators at HEAD 8f3d33a (Phase 38 recount 2026-11-04). Grep gives 213 matches; the 213th is a FALSE POSITIVE — `@app.get("/items")` inside the `get_db()` docstring in `backend/app/db/base.py:643`, not a real route. The old "211" came from the same grep at an earlier HEAD (212 matches − 1 false positive); at this HEAD the real count is 212. |
 | Agent classes (BaseAgent subclasses) | **41** in 9 families | grep `class …(BaseAgent)` per family dir |
-| DB tables | **34** (30 explicit `__tablename__` + User/ApiKey/AuditLog/RevokedApiKey auto-named) | grep across `backend/app` (Phase 36 fix-up recount 2026-11-01 — +1 auto-named `revoked_api_key`, migration 018) |
-| Alembic migrations | **15 files** (001, 005–018) | `ls backend/alembic/versions/` (Phase 36 fix-up recount 2026-11-01 — +017 Phase 35, +018 Phase 36) |
+| DB tables | **34** (30 explicit `__tablename__` + User/ApiKey/AuditLog/RevokedApiKey auto-named) | grep across `backend/app` (Phase 38 recount 2026-11-04, at HEAD — unchanged since the Phase 36 fix-up; 30 unique `__tablename__` values + 4 auto-named model classes) |
+| Alembic migrations | **15 files** (001, 005–018) | `ls backend/alembic/versions/` (Phase 38 recount 2026-11-04, at HEAD — unchanged since the Phase 36 fix-up) |
 | Vision detectors on disk | 16 modules; **10 wired live** | `vision/runtime.py` imports + docstring |
 | Frontend page routes | **34** | `find app -name page.tsx` |
 | Frontend component files | 55 | `find components -name '*.tsx'` |
 | Graphics templates | **16 registered + 9 animated story graphics** | `components/graphics/registry.ts` TEMPLATES (16 ids) + `animated/*.tsx` (9); `templates/` holds 20 files (16 templates + 4 `_`-helpers, not registered); 35 files under `components/graphics/` in total (Phase 36 recount) |
-| Backend tests | **2587 collected** (pytest --collect-only; 0 collection errors) | pytest + grep (Phase 36 fix-up recount 2026-11-01, at the Phase 36 commit 9bcc587 — 2585 was the pre-commit shared-tree count; +2 fix-up caplog tests) |
-| Docs | 49 top-level tracked `docs/*.md` | `git ls-files ":(glob)docs/*.md"` (Phase 36 fix-up recount 2026-11-01, at the Phase 36 commit — 47 was HEAD cdf4046; +2 `PHASE36_FINAL_LEDGER.md`, `API_KEY_REVOCATION_RUNBOOK.md`; on-disk count is also 49) |
+| Backend tests | **2639 collected** (pytest --collect-only; 0 collection errors with the dossier file ignored — see §9) | pytest + grep (Phase 38 recount 2026-11-04, at HEAD — 2587 was HEAD 9bcc587; +52 in Phase 37) |
+| Docs | 50 top-level tracked `docs/*.md` | `git ls-files ":(glob)docs/*.md"` (Phase 38 recount 2026-11-04, at HEAD — 49 was HEAD 9bcc587; +1 `PHASE37_FINAL_LEDGER.md`) |
 | Piper voices installed | 2 (Hindi `hi_IN-pratham-medium`, English `en_US-amy-medium`) | `.local-voices/` |
 | Commentary modes | 5 | `audio/commentary_modes.py` |
 | Feed event types (NormalizedEvent) | 17 | `feed_adapter/schemas.py` `FeedEventType` (Phase 36 recount; +2 Phase-24 spotter types) |
@@ -38,7 +48,7 @@ earlier recount date.
 ---
 
 ## 1. API surface — 169 endpoints by module (2026-10-20 snapshot; the
-headline total is now 211 — per-module counts below were NOT re-measured
+headline total is now 212 — per-module counts below were NOT re-measured
 in the Phase 33 recount and no longer sum to the headline)
 
 Route decorators counted per file (`@router.*` + `@app.*`):
@@ -135,7 +145,7 @@ kill_feed_ocr module (superseded by the HUD reader / KillFeedDetector).
 Inference: model loader, GPU manager, batch processor, worker; trained-model path via
 `VISION_MODEL_PATH` (RF-DETR/YOLO ONNX — model itself still in Kaggle training).
 
-## 5. Database — 33 tables, 13 migrations
+## 5. Database — 34 tables, 15 migrations (Phase 38 recount 2026-11-04, HEAD `8f3d33a`)
 
 Tables: teams, players, tournaments, user (auto-named), api_key, audit_log, matches,
 match_events, kill_events, fight_events, match_player_stats, match_team_stats,
@@ -160,8 +170,10 @@ director_shadow_divergences, pov_pilot_decisions.
 | 014 | anti_cheat_flags (review workflow) |
 | 015 | Director learning loop — decision journal, suggestion fates, shadow divergences |
 | 016 | Observer auto-pilot — POV pilot decisions |
+| 017 | Match stats tables — `match_team_stats`, `match_player_stats` (Phase 35) |
+| 018 | Revoked API keys — `revoked_api_key` (Phase 36) |
 
-(Numbers 002–004 do not exist as separate files; the chain is linear, single head 016.)
+(Numbers 002–004 do not exist as separate files; the chain is linear, single head 018.)
 
 ## 6. Audio / commentary
 
@@ -220,10 +232,11 @@ files (`_hooks.ts`, `animated.css`, `index.ts`, `types.ts`); `registry.ts` +
 
 ## 9. Tests & docs & infra
 
-- **Tests:** Phase 36 fix-up recount (2026-11-01, at the Phase 36 commit 9bcc587): `pytest --collect-only` = **2587 tests collected, 0 collection errors** (run with `-o addopts=""` because the system Python lacks pytest-cov, which `tests/pytest.ini` requests). Full run on the same tree: 2522 passed / 63 failed / 3 skipped — the 63rd failure was the W5 inventory-count test asserting the stale 47-doc count; this re-measurement fixes it (W5 file re-run green after the fix). The other 62 are the pre-existing/env inventory (e2e 13, OBS 19, dossier-PDF 5, event-bus 1, commentary 7, observer 6, team 3, coordinate-mapper 3, minimap 2, player-tracker 2, fight-agent 1).
-- **Docs (49 top-level tracked `docs/*.md`, Phase 36 fix-up recount 2026-11-01):** VISUAL_BROADCAST_BIBLE, PRD_GAP_ANALYSIS, PHASE22_FINAL_LEDGER,
+- **Tests:** Phase 38 recount (2026-11-04, at HEAD `8f3d33a`): `pytest --collect-only` = **2639 tests collected, 0 collection errors** when `tests/unit/test_dossier_pdf.py` is ignored (run with `-o addopts=""` because the system Python lacks pytest-cov, which `tests/pytest.ini` requests). Without the ignore the same 2639 collect plus **1 collection error** in that file — `fpdf`/`fpdf2` is not installed in this VM, so the dossier-PDF tests cannot be collected here (same handling as the gate's measurement). Full-run outcome counts will differ from the collected count by the module-level `fakeredis` collection skip (see the guard test in `test_phase36_w5_low_backlog.py`, L-9 note).
+- **Docs (50 top-level tracked `docs/*.md`, Phase 38 recount 2026-11-04, HEAD `8f3d33a`):** VISUAL_BROADCAST_BIBLE, PRD_GAP_ANALYSIS, PHASE22_FINAL_LEDGER,
   PHASE31_FINAL_LEDGER, PHASE32_FINAL_LEDGER, PHASE33_FINAL_LEDGER,
   PHASE34_FINAL_LEDGER, PHASE35_FINAL_LEDGER, PHASE36_FINAL_LEDGER,
+  PHASE37_FINAL_LEDGER,
   API_KEY_REVOCATION_RUNBOOK,
   BETTER_THAN_KRAFTON, BGMI_TERMS_AZ, BGMI_EXPERT_PROMPTS, AI_STORYTELLER,
   ANIMATED_GRAPHICS, GRAPHICS, DIRECTOR, ROLES, CLUSTER, STREAMING, AUDIO, VISION,

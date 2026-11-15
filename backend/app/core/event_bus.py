@@ -15,6 +15,19 @@ Redis Streams + Pub/Sub implementation with:
 - Canonical event-name aliases (Phase 22: app.core.event_names) —
   publishing under a legacy name reaches canonical subscribers and
   vice versa.
+- Phase 38 (C-1): REAL in-memory fallback. When Redis is unreachable
+  after all connect retries, the bus keeps running in-process
+  (``_transport == "memory"``): publish/subscribe/dispatch, history
+  and the processing queue all work without Redis, because delivery
+  was always the in-process dispatch — no Redis pub/sub consumer
+  exists in this codebase and Streams are persistence/replay only.
+  What memory mode loses is Redis Stream persistence/replay-from-
+  stream and cross-process broadcast; health_check() and the system
+  status endpoint report mode="memory" / status="degraded" so the
+  degradation is visible, and the health loop probes for Redis
+  recovery (single attempt per 10 s tick) and upgrades back when it
+  returns. The live spine (vision -> bus -> LiveDirector) therefore
+  works with Redis down; it is never silently dead.
 """
 
 import asyncio
@@ -40,6 +53,41 @@ from pydantic import BaseModel
 from ..config import settings
 
 logger = structlog.get_logger("aegis.event_bus")
+
+# Base delay (seconds) between Redis connect retries; doubled each
+# attempt (1 s, 2 s, 4 s, 8 s — 15 s total before the Phase 38 in-memory
+# fallback). Module-level so tests can shrink it without patching
+# asyncio.sleep (which would also speed up the background tickers).
+CONNECT_RETRY_DELAY_S = 1.0
+
+
+def _scrubbed_exc_info(exc: BaseException):
+    """``exc_info`` tuple whose formatted traceback prints ONLY the
+    scrubbed message — the Phase 37 (``app.db.base``) surrogate
+    pattern, delegated so there is exactly one implementation.
+
+    Lazy import: keeps event_bus importable without the DB layer
+    (the same reason ``_persist_event`` lazily imports its session
+    factory). ``exc_info=True`` would print the ORIGINAL exception's
+    message as the traceback's final line, so scrubbing only the
+    log-message f-string is not enough — a DB error embedding
+    DATABASE_URL would still reach the log via the traceback.
+    """
+    from ..db.base import _scrubbed_exc_info as _base_scrubbed_exc_info
+
+    return _base_scrubbed_exc_info(exc)
+
+
+def _scrubbed_text(exc: BaseException) -> str:
+    """Scrubbed ``str(exc)`` for embedding in a log message.
+
+    Same lazy-import reason as ``_scrubbed_exc_info``. The configured
+    DATABASE_URL is passed as a known secret so even a driver message
+    echoing it verbatim is redacted.
+    """
+    from ..db.error_scrub import scrub_db_error_text
+
+    return scrub_db_error_text(exc, secrets=[settings.DATABASE_URL])
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # EVENT DATA MODELS
@@ -165,8 +213,15 @@ class EventBus:
         
         # State
         self._running: bool = False
+        # Phase 38 (C-1): transport mode — "redis" (full: streams +
+        # cross-process broadcast) or "memory" (in-process only; the
+        # live spine keeps working, persistence/broadcast are off).
+        self._transport: str = "redis"
         self._listener_tasks: List[asyncio.Task] = []
         self._health_check_task: Optional[asyncio.Task] = None
+        # Guard so a re-connect (health-loop reconnect, Redis recovery
+        # from memory mode) never duplicates the background tasks.
+        self._background_tasks_started: bool = False
         
         # Statistics
         self._stats = {
@@ -196,10 +251,21 @@ class EventBus:
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     
     async def connect(self) -> None:
-        """Establish Redis connections with retry logic"""
+        """Establish Redis connections with retry logic.
+
+        Phase 38 (C-1): when Redis is unreachable after all retries
+        the bus falls back to REAL in-memory mode instead of raising
+        (see ``_enter_memory_mode``) — the live spine is entirely
+        in-process, so publish/subscribe keep working and the
+        lifespan services gated on ``_running`` still wire up. The
+        fallback is logged loudly and health reports it, so nothing
+        silently pretends Redis is there. ``connect()`` now raises
+        only when even the in-process bus cannot start (e.g. no
+        running event loop for the background tasks).
+        """
         max_retries = 5
-        retry_delay = 1.0
-        
+        retry_delay = CONNECT_RETRY_DELAY_S
+
         for attempt in range(max_retries):
             try:
                 # Main connection
@@ -210,7 +276,7 @@ class EventBus:
                     retry_on_timeout=settings.REDIS_RETRY_ON_TIMEOUT,
                     decode_responses=True,
                 )
-                
+
                 # Pub/Sub connection (separate connection for blocking operations)
                 self._pubsub_redis = redis.Redis.from_url(
                     settings.REDIS_URL,
@@ -218,39 +284,32 @@ class EventBus:
                     socket_timeout=None,  # No timeout for blocking
                     decode_responses=True,
                 )
-                
+
                 # Consumer connection
                 self._consumer_redis = redis.Redis.from_url(
                     settings.REDIS_URL,
                     max_connections=20,
                     decode_responses=True,
                 )
-                
+
                 # Test connections
                 await self._redis.ping()
                 await self._pubsub_redis.ping()
                 await self._consumer_redis.ping()
-                
+
+                self._transport = "redis"
                 self._running = True
-                
+
                 # Start background tasks
-                self._listener_tasks.append(
-                    asyncio.create_task(self._process_event_queue())
-                )
-                self._listener_tasks.append(
-                    asyncio.create_task(self._process_dead_letter_queue())
-                )
-                self._health_check_task = asyncio.create_task(
-                    self._health_check_loop()
-                )
-                
+                self._start_background_tasks()
+
                 logger.info(
                     "EventBus connected successfully",
                     attempt=attempt + 1,
                     max_connections=settings.REDIS_MAX_CONNECTIONS
                 )
                 return
-                
+
             except (ConnectionError, TimeoutError) as e:
                 logger.warning(
                     f"Redis connection attempt {attempt + 1}/{max_retries} failed: {e}"
@@ -259,11 +318,121 @@ class EventBus:
                     await asyncio.sleep(retry_delay * (2 ** attempt))
                 else:
                     logger.error("All Redis connection attempts failed")
-                    raise
-                    
+                    await self._enter_memory_mode()
+                    return
+
             except Exception as e:
-                logger.error(f"Unexpected Redis connection error: {e}", exc_info=True)
-                raise
+                # Phase 38 (M-3): scrub BOTH channels — the message
+                # f-string AND the traceback (see _scrubbed_exc_info).
+                # A DB error whose message embeds DATABASE_URL must
+                # never reach the log via either one. The bus still
+                # falls back to in-memory mode: Redis-independence is
+                # the point of the fallback, whatever the failure was.
+                logger.error(
+                    "Unexpected Redis connection error: "
+                    f"{_scrubbed_text(e)}; continuing in-memory",
+                    exc_info=_scrubbed_exc_info(e),
+                )
+                await self._enter_memory_mode()
+                return
+
+    def _start_background_tasks(self) -> None:
+        """Start the queue / dead-letter / health background tasks once.
+
+        Guarded: connect() can run again (health-loop reconnect, or a
+        Redis recovery from memory mode) and must never duplicate the
+        tasks — the old code appended a fresh set on every connect().
+        disconnect() resets the guard.
+        """
+        if self._background_tasks_started:
+            return
+        self._background_tasks_started = True
+        self._listener_tasks.append(
+            asyncio.create_task(self._process_event_queue())
+        )
+        self._listener_tasks.append(
+            asyncio.create_task(self._process_dead_letter_queue())
+        )
+        self._health_check_task = asyncio.create_task(
+            self._health_check_loop()
+        )
+
+    async def _discard_redis_clients(self) -> None:
+        """Best-effort close + drop of the three Redis clients.
+
+        Used when entering memory mode: the clients are dead or
+        never-connected, and the memory path must never touch them.
+        A failure here is swallowed — a half-dead client must not
+        block the fallback.
+        """
+        for conn in (self._redis, self._pubsub_redis, self._consumer_redis):
+            if conn is not None:
+                try:
+                    await conn.close()
+                except Exception:
+                    pass
+        self._redis = None
+        self._pubsub_redis = None
+        self._consumer_redis = None
+
+    async def _enter_memory_mode(self) -> None:
+        """Enter REAL in-memory mode (Phase 38, C-1).
+
+        The bus keeps serving in-process: publish() dispatches to
+        local subscribers, keeps history and the processing queue —
+        the live spine's actual path, which never needed Redis (no
+        Redis pub/sub consumer exists in this codebase; Streams are
+        persistence/replay only). Lost in this mode: Redis Stream
+        persistence/replay-from-stream and cross-process broadcast.
+        Idempotent: re-entering from an already-memory bus is a no-op
+        (the background tasks are already running).
+        """
+        if self._transport == "memory" and self._running:
+            return
+        await self._discard_redis_clients()
+        self._transport = "memory"
+        self._running = True
+        self._start_background_tasks()
+        logger.warning(
+            "EventBus running IN-MEMORY (Redis unreachable): the live "
+            "spine works in-process (publish/subscribe/dispatch), but "
+            "Redis Stream persistence and cross-process broadcast are "
+            "OFF. Health reports mode=memory / status=degraded until "
+            "Redis returns (auto-recovery probes every 10s)."
+        )
+
+    async def _try_redis_reconnect(self) -> bool:
+        """Single-attempt Redis recovery probe from memory mode.
+
+        Creates ONE throwaway client and pings it; on success hands
+        over to connect() (which rebuilds the three real clients and
+        flips the transport back to Redis). On failure the bus stays
+        in memory mode — nothing is torn down and no retry storm is
+        started (the health loop calls this at most once per 10 s
+        tick). Returns True when the bus is back on Redis.
+        """
+        probe = None
+        try:
+            probe = redis.Redis.from_url(
+                settings.REDIS_URL,
+                max_connections=1,
+                socket_timeout=2,
+                decode_responses=True,
+            )
+            await probe.ping()
+        except Exception:
+            return False
+        finally:
+            if probe is not None:
+                try:
+                    await probe.close()
+                except Exception:
+                    pass
+        try:
+            await self.connect()
+        except Exception:
+            return False
+        return self._transport == "redis"
     
     async def disconnect(self) -> None:
         """Gracefully disconnect from Redis"""
@@ -283,6 +452,15 @@ class EventBus:
                 await self._health_check_task
             except asyncio.CancelledError:
                 pass
+
+        # Phase 38 (C-1): a disconnect is a clean slate — drop the
+        # (cancelled) task handles and the task-start guard, and reset
+        # the transport so a later connect() retries Redis first
+        # instead of assuming the previous mode.
+        self._listener_tasks = []
+        self._health_check_task = None
+        self._background_tasks_started = False
+        self._transport = "redis"
         
         # Close connections
         for conn, name in [
@@ -367,34 +545,40 @@ class EventBus:
             # Compress large events
             if len(event_json) > self.compression_threshold_bytes:
                 event_json = zlib.compress(event_json.encode()).hex()
-            
-            # Store in Redis Stream for persistence
-            stream_name = self._get_stream_name(event)
-            
-            await self._redis.xadd(
-                stream_name,
-                {
-                    "event_id": event.event_id,
-                    "event_type": event.event_type,
-                    "priority": str(event.priority.value),
-                    "timestamp_ms": str(event.timestamp_ms),
-                    "source": event.source,
-                    "match_id": event.match_id or "",
-                    "data": event_json,
-                },
-                maxlen=settings.REDIS_STREAM_MAX_LEN,
-                approximate=True,
-            )
-            
-            # Publish for real-time subscribers
-            channel = f"events:{event.event_type}"
-            if match_id:
-                channel = f"match:{match_id}:{event.event_type}"
-            
-            await self._pubsub_redis.publish(
-                channel,
-                event.model_dump_json()
-            )
+
+            # Phase 38 (C-1): Redis transport only — Stream
+            # persistence + cross-process Pub/Sub. In memory mode
+            # these are skipped: delivery is the in-process dispatch
+            # below, which is the live spine's actual path (no Redis
+            # pub/sub consumer exists in this codebase).
+            if self._transport == "redis":
+                # Store in Redis Stream for persistence
+                stream_name = self._get_stream_name(event)
+
+                await self._redis.xadd(
+                    stream_name,
+                    {
+                        "event_id": event.event_id,
+                        "event_type": event.event_type,
+                        "priority": str(event.priority.value),
+                        "timestamp_ms": str(event.timestamp_ms),
+                        "source": event.source,
+                        "match_id": event.match_id or "",
+                        "data": event_json,
+                    },
+                    maxlen=settings.REDIS_STREAM_MAX_LEN,
+                    approximate=True,
+                )
+
+                # Publish for real-time subscribers
+                channel = f"events:{event.event_type}"
+                if match_id:
+                    channel = f"match:{match_id}:{event.event_type}"
+
+                await self._pubsub_redis.publish(
+                    channel,
+                    event.model_dump_json()
+                )
             
             # Dispatch to local subscribers
             await self._dispatch_to_subscribers(record)
@@ -424,9 +608,17 @@ class EventBus:
             self._stats["events_failed"] += 1
             self._add_to_dead_letter(record, str(e))
             return None
-            
+
         except Exception as e:
-            logger.error(f"Unexpected error publishing event {event_type}: {e}", exc_info=True)
+            # Phase 38 (M-3): scrub BOTH channels — the message
+            # f-string AND the traceback (see _scrubbed_exc_info). A
+            # subscriber/DB error whose message embeds DATABASE_URL
+            # must never reach the log via either one.
+            logger.error(
+                f"Unexpected error publishing event {event_type}: "
+                f"{_scrubbed_text(e)}",
+                exc_info=_scrubbed_exc_info(e),
+            )
             self._stats["events_failed"] += 1
             return None
     
@@ -440,6 +632,26 @@ class EventBus:
         Publish multiple events in batch (more efficient).
         Returns number of successfully published events.
         """
+        if not self._running:
+            return 0
+
+        # Phase 38 (C-1): no Redis pipeline in memory mode — publish
+        # each event through the normal (in-process) path instead.
+        if self._transport == "memory":
+            success_count = 0
+            for event_type, data in events:
+                if (
+                    await self.publish(
+                        event_type,
+                        data,
+                        priority=priority,
+                        match_id=match_id,
+                    )
+                    is not None
+                ):
+                    success_count += 1
+            return success_count
+
         success_count = 0
         
         # Use pipeline for batch Redis operations
@@ -620,10 +832,15 @@ class EventBus:
                 subscriber.last_event_time = time.time()
                 
             except Exception as e:
+                # Phase 38 (M-3): scrub BOTH channels — the message
+                # f-string AND the traceback (see _scrubbed_exc_info).
+                # A subscriber callback can raise a DB error whose
+                # message embeds DATABASE_URL; it must never reach
+                # the log via either one.
                 logger.error(
-                    f"Subscriber {subscriber_id} error: {e}",
+                    f"Subscriber {subscriber_id} error: {_scrubbed_text(e)}",
                     event_type=event_type,
-                    exc_info=True
+                    exc_info=_scrubbed_exc_info(e)
                 )
     
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -696,7 +913,12 @@ class EventBus:
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                logger.error(f"Event processing error: {e}", exc_info=True)
+                # Phase 38 (M-3): scrub BOTH channels — the message
+                # f-string AND the traceback (see _scrubbed_exc_info).
+                logger.error(
+                    f"Event processing error: {_scrubbed_text(e)}",
+                    exc_info=_scrubbed_exc_info(e),
+                )
     
     async def _process_event(self, record: EventRecord) -> None:
         """Process a single event"""
@@ -763,9 +985,13 @@ class EventBus:
                     session.add(row)
         except Exception as e:
             # Never break the event flow on a persistence failure.
+            # Phase 38 (M-3, 5th site — beyond the brief's 4
+            # exc_info=True sites): this is a DB error by
+            # construction, so its raw str() can embed DATABASE_URL;
+            # scrub it like every other DB-error log line.
             logger.warning(
                 "Event persistence failed; continuing without DB write",
-                error=str(e),
+                error=_scrubbed_text(e),
                 event_id=getattr(event, "event_id", None),
                 event_type=getattr(event, "event_type", None),
             )
@@ -967,25 +1193,43 @@ class EventBus:
         while self._running:
             try:
                 await asyncio.sleep(10)
-                
-                if not await self._check_connection():
+
+                if self._transport == "memory":
+                    # Phase 38 (C-1): probe for Redis recovery — a
+                    # single attempt per tick, no retry storm. On
+                    # success the bus upgrades to Redis mode; on
+                    # failure it stays in memory mode and keeps
+                    # serving in-process.
+                    await self._try_redis_reconnect()
+                elif not await self._check_connection():
                     logger.error("Redis connection lost, attempting reconnect...")
                     try:
                         await self.connect()
                     except Exception:
                         pass
-                        
+
             except asyncio.CancelledError:
                 break
             except Exception as e:
                 logger.error(f"Health check error: {e}")
-    
+
     async def health_check(self) -> Dict[str, Any]:
         """Get event bus health status"""
         redis_healthy = await self._check_connection()
-        
+
+        # Phase 38 (C-1): "healthy" ONLY when the bus is running on
+        # Redis. Memory mode keeps the live spine working in-process
+        # but has no stream persistence / cross-process broadcast, so
+        # it is "degraded" — and a stopped bus is "degraded", never
+        # "healthy".
+        if self._running and self._transport == "redis" and redis_healthy:
+            status = "healthy"
+        else:
+            status = "degraded"
+
         return {
-            "status": "healthy" if redis_healthy and self._running else "degraded",
+            "status": status,
+            "mode": self._transport,  # "redis" | "memory"
             "redis_connected": redis_healthy,
             "running": self._running,
             "subscribers": self._stats["active_subscribers"],
@@ -997,11 +1241,12 @@ class EventBus:
             "stats": self._stats,
             "timestamp": time.time(),
         }
-    
+
     def get_stats(self) -> Dict[str, Any]:
         """Get event bus statistics"""
         return {
             **self._stats,
+            "mode": self._transport,  # Phase 38 (C-1): "redis" | "memory"
             "queue_size": self._processing_queue.qsize(),
             "dead_letter_size": len(self._dead_letter_queue),
             "history_size": sum(len(v) for v in self._event_history.values()),

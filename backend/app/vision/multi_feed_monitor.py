@@ -1332,6 +1332,7 @@ class MultiFeedMonitorService:
         clock: Callable[[], float] = time.time,
         band_filter: Any = None,
         roster_provider: Optional[Any] = None,
+        on_air_slot_provider: Optional[Callable[[], Optional[int]]] = None,
     ) -> None:
         self._ingest = ingest
         self.config = config or load_capture_config()
@@ -1372,6 +1373,12 @@ class MultiFeedMonitorService:
         self._grabber_slots: Dict[str, int] = {}
         self._auto_sources: Set[str] = set()
         self._excluded_slots: Set[int] = set()
+        # Phase 38 (M-1): live on-air (primary) slot provider, usually
+        # the multi-device manager's ``get_on_air``. The director can
+        # move on-air mid-match and it starts unset at boot, so the
+        # primary feed is excluded LIVE (see ``excluded_slots``), not
+        # frozen at build time.
+        self._on_air_slot_provider = on_air_slot_provider
         # Honest counters.
         self._events_emitted = 0
         self._duplicates_suppressed = 0
@@ -1383,7 +1390,7 @@ class MultiFeedMonitorService:
     def add_feed(self, spec: FeedSourceSpec) -> FeedMonitor:
         """Register (or replace) one feed's monitor. Fresh readers and
         a fresh voter are built per feed — state never carries over."""
-        if spec.slot_number in self._excluded_slots:
+        if self._slot_is_excluded(spec.slot_number):
             log.info("monitor_feed_excluded", source_id=spec.source_id,
                      slot=spec.slot_number, reason="excluded slot (primary feed)")
             raise ValueError(
@@ -1462,6 +1469,44 @@ class MultiFeedMonitorService:
     def exclude_slots(self, slots: Set[int]) -> None:
         self._excluded_slots |= {int(s) for s in slots}
 
+    def _current_on_air_slot(self) -> Optional[int]:
+        """The manager's on-air (primary) slot right now, or None.
+
+        Best-effort: a raising provider, or a value outside 1..16,
+        means the slot is unknown — never a reason to crash a tick.
+        The static exclusion set still applies in that case.
+        """
+        provider = self._on_air_slot_provider
+        if provider is None:
+            return None
+        try:
+            slot = provider()
+        except Exception:
+            return None
+        if isinstance(slot, bool) or not isinstance(slot, int):
+            return None
+        return slot if 1 <= slot <= 16 else None
+
+    @property
+    def excluded_slots(self) -> Set[int]:
+        """Effective exclusion set: static exclusions + the live
+        on-air slot.
+
+        The on-air slot is the primary/on-air feed, whose full
+        pipeline already emits the cheap readers' events — the monitor
+        watches observer feeds, never the primary. It is consulted
+        live (not frozen at build) because the director can move
+        on-air mid-match, and it is unset at boot.
+        """
+        out = set(self._excluded_slots)
+        on_air = self._current_on_air_slot()
+        if on_air is not None:
+            out.add(on_air)
+        return out
+
+    def _slot_is_excluded(self, slot_number: int) -> bool:
+        return int(slot_number) in self.excluded_slots
+
     # -- grabber sync ------------------------------------------------------
 
     def attach_grabber(
@@ -1488,7 +1533,7 @@ class MultiFeedMonitorService:
             if source_id in self._feeds:
                 continue
             slot = self._grabber_slots.get(source_id) or slot_from_source_id(source_id)
-            if slot is None or slot in self._excluded_slots:
+            if slot is None or self._slot_is_excluded(slot):
                 continue
             grabber = self._grabber
             spec = FeedSourceSpec(
@@ -1505,6 +1550,17 @@ class MultiFeedMonitorService:
         dropped: List[str] = []
         for source_id in list(self._auto_sources):
             if source_id not in captures:
+                self.remove_feed(source_id)
+                dropped.append(source_id)
+                continue
+            # Phase 38 (M-1): the director moved on-air onto a feed we
+            # already adopted — it is the primary now, so the monitor
+            # stops watching it. A later sync re-adopts it once on-air
+            # moves away (it is still a grabber capture then).
+            monitor = self._feeds.get(source_id)
+            if monitor is not None and self._slot_is_excluded(
+                monitor.spec.slot_number
+            ):
                 self.remove_feed(source_id)
                 dropped.append(source_id)
         return {"adopted": adopted, "dropped": dropped}
@@ -1846,6 +1902,7 @@ def build_multi_feed_monitor(
     multi_device_manager: Any = None,
     exclude_slots: Optional[Set[int]] = None,
     slot_by_source: Optional[Dict[str, int]] = None,
+    on_air_slot_provider: Optional[Callable[[], Optional[int]]] = None,
     detector_factory: Optional[ReaderFactory] = None,
     clock: Callable[[], float] = time.time,
     roster_provider: Optional[Any] = None,
@@ -1863,12 +1920,25 @@ def build_multi_feed_monitor(
     pipeline already emits the cheap readers' events) are never
     monitored — that is what prevents double emission when the primary
     feed is also one of the 16.
+
+    Phase 38 (M-1): the on-air slot is ALSO excluded live, via the
+    manager's ``get_on_air`` (or an explicit ``on_air_slot_provider``
+    — explicit wins). The lifespan passes the manager and no static
+    ``exclude_slots``, so this derivation is what keeps the primary
+    feed out of the monitor in production: the slot is unset at boot
+    and the director sets/moves it mid-match, so a build-time-only
+    exclusion would usually be empty and always go stale.
     """
     cfg = config or load_capture_config()
+    if on_air_slot_provider is None and multi_device_manager is not None:
+        get_on_air = getattr(multi_device_manager, "get_on_air", None)
+        if callable(get_on_air):
+            on_air_slot_provider = get_on_air
     service = MultiFeedMonitorService(
         ingest=ingest, config=cfg, match_id=match_id,
         detector_factory=detector_factory, clock=clock,
         roster_provider=roster_provider,
+        on_air_slot_provider=on_air_slot_provider,
     )
     if exclude_slots:
         service.exclude_slots(set(exclude_slots))

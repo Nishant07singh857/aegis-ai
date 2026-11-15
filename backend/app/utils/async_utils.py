@@ -11,7 +11,36 @@ from dataclasses import dataclass, field
 from enum import Enum
 import structlog
 
+from ..config import settings
+from ..db.error_scrub import scrub_exception, scrubbed_exception
+
 logger = structlog.get_logger("aegis.utils.async")
+
+
+def _db_secrets() -> list:
+    """Known secret values for verbatim redaction (Phase 38, M-3).
+
+    Mirror of ``app.db.base._db_secrets``: the configured DATABASE_URL
+    itself, so a driver message echoing it in a shape no scrubber
+    pattern recognises is still redacted. The scrubber ignores
+    blank/short entries, so an unconfigured URL is safe to pass.
+    """
+    return [settings.DATABASE_URL or ""]
+
+
+def _scrubbed_exc_info(exc: BaseException):
+    """``exc_info`` tuple whose formatted traceback prints ONLY the
+    scrubbed message (Phase 38, M-3).
+
+    Mirror of ``app.db.base._scrubbed_exc_info`` (Phase 36, W1 /
+    N-1) — same guarantee, same shape: ``exc_info=True`` would print
+    the ORIGINAL exception's message as the traceback's final line,
+    so scrubbing only the log-message f-string is not enough. This
+    keeps the original frames (traceback source lines never carry
+    values) but substitutes the scrubbed surrogate as the exception
+    value, so the traceback's final line is scrubbed too.
+    """
+    return (type(exc), scrubbed_exception(exc, secrets=_db_secrets()), exc.__traceback__)
 
 
 class CircuitState(str, Enum):
@@ -177,7 +206,15 @@ class AsyncUtils:
             except asyncio.CancelledError:
                 pass
             except Exception as e:
-                logger.error(f"Task '{name}' failed: {e}", exc_info=True)
+                # Phase 38, M-3: scrub BOTH the message and the
+                # traceback — a wrapped task can run a DB callback
+                # whose driver message embeds DATABASE_URL; a raw
+                # ``{e}`` / ``exc_info=True`` would log it verbatim.
+                logger.error(
+                    f"Task '{name}' failed: "
+                    f"{scrub_exception(e, secrets=_db_secrets())}",
+                    exc_info=_scrubbed_exc_info(e),
+                )
         
         return asyncio.create_task(wrapper(), name=name)
     

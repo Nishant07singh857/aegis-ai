@@ -292,6 +292,14 @@ class ClipDetector(BaseAgent):
 
         quality = self._determine_quality(excitement)
 
+        # Phase 38 (M-5): the description superlative must match the
+        # evidenced quality — the old code ended EVERY branch
+        # "LEGENDARY!" even when the evidence only reached EXCELLENT
+        # (base excitement 80; LEGENDARY needs 90, i.e. evidenced
+        # enemy_count >= 4). The suffix is the quality's own label,
+        # so LEGENDARY appears only when the evidence earned it.
+        quality_label = f"{quality.value.upper()}!"
+
         if enemies is not None:
             title = f"IMPOSSIBLE! {player_name} wins 1v{enemies} Clutch!"
         else:
@@ -300,17 +308,17 @@ class ClipDetector(BaseAgent):
         if enemies is not None and probability is not None:
             description = (
                 f"{player_name} defies {probability:.0%} odds to win "
-                f"a 1v{enemies} clutch! LEGENDARY!"
+                f"a 1v{enemies} clutch! {quality_label}"
             )
         elif enemies is not None:
-            description = f"{player_name} wins a 1v{enemies} clutch! LEGENDARY!"
+            description = f"{player_name} wins a 1v{enemies} clutch! {quality_label}"
         elif probability is not None:
             description = (
                 f"{player_name} defies {probability:.0%} odds to win "
-                f"the clutch! LEGENDARY!"
+                f"the clutch! {quality_label}"
             )
         else:
-            description = f"{player_name} wins the clutch! LEGENDARY!"
+            description = f"{player_name} wins the clutch! {quality_label}"
 
         hashtags = ["#Clutch", "#BGMI", "#Impossible"]
         if enemies == 4:
@@ -329,7 +337,11 @@ class ClipDetector(BaseAgent):
             primary_team=data.get("team_name", ""),
             excitement_score=excitement,
             viral_potential=min(100, excitement + 20),
-            replay_value=100,
+            # Phase 38 (M-5): was a hardcoded replay_value=100 — the
+            # maximum regardless of evidence. The evidenced
+            # excitement score is the value, as in the squad-wipe /
+            # multi-kill creators (excitement <= 100 by construction).
+            replay_value=excitement,
             match_id=context.get("match_id", ""),
             suggested_angles=["clutch_player_pov", "enemy_pov", "overhead"],
             suggested_speed=0.5,

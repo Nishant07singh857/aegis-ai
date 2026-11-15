@@ -27,9 +27,28 @@ from dataclasses import dataclass, field
 from collections import deque
 import structlog
 
+from ..config import settings
 from ..core.event_bus import EventBus, EventRecord, EventPriority
+from ..db.error_scrub import scrub_db_error_text
 
 logger = structlog.get_logger("aegis.agents")
+
+
+def _scrub_error_text(value: object) -> str:
+    """Scrubbed ``str()`` of *value* for logs / stored error text
+    (Phase 38, M-3).
+
+    The agent error paths log the raw exception message plus a
+    formatted traceback, and the same raw text is stored in the
+    metrics' ``last_error`` (surfaced via ``get_status()``). A
+    tick/setup/recovery failure raised by a DB-backed call can embed
+    DATABASE_URL in that message, so every such site passes through
+    the ``app.db.error_scrub`` choke point (patterns plus the
+    configured URL as a verbatim secret) before the text is logged
+    or stored. Scrub a formatted traceback BEFORE truncating it —
+    truncating first could cut a credential shape mid-pattern.
+    """
+    return scrub_db_error_text(value, secrets=[settings.DATABASE_URL or ""])
 
 
 class AgentState(str, Enum):
@@ -320,8 +339,8 @@ class BaseAgent(ABC):
             self.state = AgentState.ERROR
             self._log.error(
                 "Failed to start agent",
-                error=str(e),
-                traceback=traceback.format_exc(),
+                error=_scrub_error_text(e),
+                traceback=_scrub_error_text(traceback.format_exc()),
             )
             raise
     
@@ -681,17 +700,17 @@ class BaseAgent(ABC):
     async def _handle_tick_error(self, error: Exception) -> None:
         """Handle errors during tick execution"""
         
-        self.metrics.record_error(str(error))
+        self.metrics.record_error(_scrub_error_text(error))
         self._error_count += 1
         self._error_history.append({
             "time": time.time(),
-            "error": str(error),
-            "traceback": traceback.format_exc()[-200:],
+            "error": _scrub_error_text(error),
+            "traceback": _scrub_error_text(traceback.format_exc())[-200:],
         })
         
         self._log.error(
-            f"Tick error (count: {self._error_count:.1f}/{self.config.max_consecutive_errors}): {error}",
-            traceback=traceback.format_exc()[-300:],
+            f"Tick error (count: {self._error_count:.1f}/{self.config.max_consecutive_errors}): {_scrub_error_text(error)}",
+            traceback=_scrub_error_text(traceback.format_exc())[-300:],
         )
         
         # Check if circuit breaker should open
@@ -744,8 +763,8 @@ class BaseAgent(ABC):
         except Exception as recovery_error:
             self.state = AgentState.ERROR
             self._log.error(
-                f"Recovery failed: {recovery_error}",
-                traceback=traceback.format_exc(),
+                f"Recovery failed: {_scrub_error_text(recovery_error)}",
+                traceback=_scrub_error_text(traceback.format_exc()),
             )
     
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

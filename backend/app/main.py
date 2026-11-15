@@ -100,7 +100,7 @@ from app.services.pip import pip_service
 from app.intelligence.director_ai import DirectorAIEngine, BroadcastEvent, EventPriority as DirPriority
 from app.intelligence.commentary_engine import get_commentary_engine
 from app.db.session import init_db
-from app.db.base import get_db_context
+from app.db.base import get_db_context, _scrubbed_exc_info
 # Phase 35 (M-5) / Phase 36 (N-1): DB-error scrub — the DB-backed
 # boundaries in this module pass their exceptions through
 # app.db.error_scrub first, so a driver message embedding the
@@ -112,7 +112,10 @@ from app.db.base import get_db_context
 # scrubbed scope: the other ``except`` blocks in this module log
 # service-construction/subscriber failures, not DB driver errors, and
 # are NOT scrubbed. If a new DB-backed boundary is added here, scrub
-# its exception too — and only then extend this comment.
+# its exception too — and only then extend this comment. Phase 38
+# (C-1) adds one non-DB exception to the scrubbed set: the event-bus
+# start failure below (exception of unknown provenance — scrubbed the
+# same way, because a wrapped DB error must never be the leak).
 from app.db.error_scrub import scrub_db_error_text, scrubbed_exception
 from app.db.models.enums import UserRole
 from app.db.models.user import User
@@ -227,13 +230,29 @@ def _system_status_payload() -> dict:
     DEMO_MODE flag, the operator-set production modes and whether the
     event bus is running. The fabricated health numbers are included
     ONLY in DEMO_MODE, marked "source": "demo".
+
+    Phase 38 (C-1): "status" is PROCESS liveness only (this HTTP
+    process is up and serving). Live-spine readiness is "live_spine":
+    "ready" (bus running on Redis), "degraded" (bus running
+    in-memory — the spine works in-process but stream persistence
+    and cross-process broadcast are off), or "down" (bus not
+    running — no live directing at all). "event_bus" carries the
+    same fact as "connected" / "memory" / "disconnected" so a reader
+    that only looks at that field is not misled either.
     """
+    if event_bus._running:
+        bus_state = "connected" if event_bus._transport == "redis" else "memory"
+        live_spine = "ready" if event_bus._transport == "redis" else "degraded"
+    else:
+        bus_state = "disconnected"
+        live_spine = "down"
     payload: dict = {
         "status": "online",
         "version": "2.0.0",
         "demo_mode": DEMO_MODE,
         "modes": MATCH_STATE["modes_state"],
-        "event_bus": "connected" if event_bus._running else "disconnected",
+        "event_bus": bus_state,
+        "live_spine": live_spine,
     }
     if DEMO_MODE:
         payload["health"] = _demo_marked(MATCH_STATE["system_health"])
@@ -626,11 +645,24 @@ async def handle_action(data: dict, user: Optional[TokenPayload] = None):
         )
 
     elif action == "start_scrim":
-        lobby_id = f"LOBBY-{random.randint(1000, 9999)}"
+        # Phase 38 (M-4): NO invented lobby id. A real lobby id comes
+        # from the caller and is used verbatim; without one the scrim
+        # starts with the lobby honestly UNSET (None — the same value
+        # the initial MATCH_STATE carries) and the fact is marked, so
+        # no fabricated "LOBBY-<random>" ever implies a real lobby
+        # exists. Non-string / blank caller values are unset, not
+        # coerced into an id.
+        raw_lobby_id = data.get("lobby_id")
+        lobby_id = (
+            raw_lobby_id.strip()
+            if isinstance(raw_lobby_id, str)
+            else None
+        ) or None
         map_name = data.get("map", "Erangel")
         MATCH_STATE["scrim_state"] = {
             "active": True,
             "lobby_id": lobby_id,
+            "lobby_id_unset": lobby_id is None,
             # Phase 13: demo squads only in DEMO_MODE; otherwise an honest
             # empty roster (the operator picks real teams from /api/v1/teams).
             "teams": [{"name": t["name"], "tag": t["tag"], "kills": 0, "placement": 0, "pts": 0} for t in _live_teams()[:8]],
@@ -1468,10 +1500,26 @@ async def lifespan(app: FastAPI):
     multi_device_manager.add_listener(manager.broadcast)
     await _seed_first_admin()
         
+    # Phase 38 (C-1): connect() falls back to REAL in-memory mode when
+    # Redis is down (the live spine keeps working in-process; the bus
+    # logs the degradation itself) — so the old "continuing with
+    # in-memory broadcasting" warning was a lie: no in-memory mode
+    # existed and every service below stayed None while the app
+    # reported ready. Reaching the except branch now means even the
+    # in-process bus failed to start: the live spine is DOWN. The app
+    # still boots (every service below is failure-isolated by design)
+    # but /api/v1/system/status reports live_spine "down" — nothing
+    # claims ready that is not.
     try:
         await event_bus.connect()
     except Exception as e:
-        logger.warning(f"EventBus connection failed, continuing with in-memory broadcasting: {e}")
+        logger.error(
+            "EventBus failed to start (even the in-memory fallback "
+            "failed); the live spine is DOWN — vision, LiveDirector, "
+            "monitor and pilot will stay off. "
+            f"({scrub_db_error_text(e, secrets=[settings.DATABASE_URL])})",
+            exc_info=_scrubbed_exc_info(e),
+        )
 
     # Phase 10: replay buffer fills from the bus; feed adapter activates
     # (after connect so attach() sees a running bus).
@@ -1792,6 +1840,12 @@ async def lifespan(app: FastAPI):
         try:
             from app.vision.multi_feed_monitor import build_multi_feed_monitor
 
+            # Phase 38 (M-1): the builder excludes the manager's LIVE
+            # on-air (primary) slot from the monitor — the monitor
+            # watches observer feeds, never the primary, whose full
+            # pipeline already emits these events. No static
+            # exclude_slots here: on-air is unset at boot and moves
+            # mid-match, so the builder derives it from the manager.
             multi_feed_monitor = build_multi_feed_monitor(
                 ingest=vision_adapter.ingest,
                 multi_device_manager=multi_device_manager,
